@@ -31,7 +31,9 @@
 #include <unistd.h>        /* getpid(2),  */
 #include <errno.h>         /* errno(3), */
 #include <libgen.h>        /* basename(3), */
+#ifndef __ANDROID__
 #include <execinfo.h>      /* backtrace_symbols(3), */
+#endif
 #include <limits.h>        /* INT_MAX, */
 
 #include "cli/cli.h"
@@ -544,7 +546,9 @@ void __cyg_profile_func_enter(void *this_function, void *call_site)
 	void *const pointers[] = { this_function, call_site };
 	char **symbols = NULL;
 
+#ifndef __ANDROID__
 	symbols = backtrace_symbols(pointers, 2);
+#endif
 	if (symbols == NULL)
 		goto end;
 
