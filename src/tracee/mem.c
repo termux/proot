@@ -113,6 +113,9 @@ int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer,
 	nb_trailing_bytes = size % sizeof(word_t);
 	nb_full_words     = (size - nb_trailing_bytes) / sizeof(word_t);
 
+	/* Clear errno so we won't detect previous syscall failure as ptrace one */
+	errno = 0;
+
 	/* Copy one word by one word, except for the last one. */
 	for (i = 0; i < nb_full_words; i++) {
 		status = ptrace(PTRACE_POKEDATA, tracee->pid, dest + i, load_word(&src[i]));
@@ -127,6 +130,9 @@ int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer,
 
 	/* Copy the bytes in the last word carefully since we have to
 	 * overwrite only the relevant ones. */
+
+	/* Clear errno so we won't detect previous syscall failure as ptrace one */
+	errno = 0;
 
 	word = ptrace(PTRACE_PEEKDATA, tracee->pid, dest + i, NULL);
 	if (errno != 0) {
@@ -226,6 +232,9 @@ int read_data(const Tracee *tracee, void *dest_tracer, word_t src_tracee, word_t
 
 	nb_trailing_bytes = size % sizeof(word_t);
 	nb_full_words     = (size - nb_trailing_bytes) / sizeof(word_t);
+
+	/* Clear errno so we won't detect previous syscall failure as ptrace one */
+	errno = 0;
 
 	/* Copy one word by one word, except for the last one. */
 	for (i = 0; i < nb_full_words; i++) {
@@ -353,6 +362,9 @@ fallback:
 
 	nb_trailing_bytes = max_size % sizeof(word_t);
 	nb_full_words     = (max_size - nb_trailing_bytes) / sizeof(word_t);
+
+	/* Clear errno so we won't detect previous syscall failure as ptrace one */
+	errno = 0;
 
 	/* Copy one word by one word, except for the last one. */
 	for (i = 0; i < nb_full_words; i++) {
