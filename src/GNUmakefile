@@ -8,11 +8,11 @@ SRC    = $(dir $(firstword $(MAKEFILE_LIST)))
 GIT      = git
 RM       = rm
 INSTALL  = install
-CC       = $(CROSS_COMPILE)gcc
+CC       ?= $(CROSS_COMPILE)gcc
 LD       = $(CC)
-STRIP    = $(CROSS_COMPILE)strip
-OBJCOPY  = $(CROSS_COMPILE)objcopy
-OBJDUMP  = $(CROSS_COMPILE)objdump
+STRIP    ?= $(CROSS_COMPILE)strip
+OBJCOPY  ?= $(CROSS_COMPILE)objcopy
+OBJDUMP  ?= $(CROSS_COMPILE)objdump
 
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -Wall -Wextra -O2
@@ -203,7 +203,7 @@ DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m32_OBJECTS:.o=.d) $(CH
 ######################################################################
 # PHONY targets
 
-PREFIX = /usr/local
+PREFIX ?= /usr/local
 DESTDIR = $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
