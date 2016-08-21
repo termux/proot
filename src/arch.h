@@ -133,6 +133,11 @@ typedef unsigned char byte_t;
     #define EXEC_PIC_ADDRESS   0x3000000000
     #define INTERP_PIC_ADDRESS 0x3f00000000
 
+    /* Syscall -2 appears to cause some odd side effects, use -1. */
+    /* See https://github.com/termux/termux-packages/pull/390 */
+    #undef SYSCALL_AVOIDER
+    #define SYSCALL_AVOIDER ((word_t) -1)
+
 #elif defined(ARCH_X86)
 
     #define SYSNUMS_HEADER1 "syscall/sysnums-i386.h"
