@@ -58,7 +58,7 @@
  */
 int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 {
-	struct rlimit proot_stack;
+	struct rlimit64 proot_stack;
 	word_t resource;
 	word_t address;
 	word_t tracee_stack_limit;
@@ -94,7 +94,7 @@ int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 		return -errno;
 
 	/* Get current PRoot's stack limit.  */
-	status = prlimit(0, RLIMIT_STACK, NULL, &proot_stack);
+	status = prlimit64(0, RLIMIT_STACK, NULL, &proot_stack);
 	if (status < 0) {
 		VERBOSE(tracee, 1, "can't get stack limit.");
 		return 0; /* Not fatal.  */
@@ -107,7 +107,7 @@ int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 	proot_stack.rlim_cur = tracee_stack_limit;
 
 	/* Increase current PRoot's stack limit.  */
-	status = prlimit(0, RLIMIT_STACK, &proot_stack, NULL);
+	status = prlimit64(0, RLIMIT_STACK, &proot_stack, NULL);
 	if (status < 0)
 		VERBOSE(tracee, 1, "can't set stack limit.");
 	return 0; /* Not fatal.  */
