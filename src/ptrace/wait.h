@@ -23,6 +23,8 @@
 #ifndef PTRACE_WAIT_H
 #define PTRACE_WAIT_H
 
+#include <sys/wait.h> /* for __WALL */
+
 #include "tracee/tracee.h"
 
 extern int translate_wait_enter(Tracee *ptracer);
