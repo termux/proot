@@ -30,6 +30,7 @@
 #include <sys/types.h>     /* getpid(2),  */
 #include <unistd.h>        /* getpid(2),  */
 #include <errno.h>         /* errno(3), */
+#include <libgen.h>        /* basename(3), */
 #include <execinfo.h>      /* backtrace_symbols(3), */
 #include <limits.h>        /* INT_MAX, */
 
