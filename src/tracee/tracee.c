@@ -543,6 +543,9 @@ int new_child(Tracee *parent, word_t clone_flags)
 			/* Sanity check.  */
 			assert(!child->as_ptracee.tracing_started);
 
+#ifndef __W_STOPCODE
+	#define __W_STOPCODE(sig) ((sig) << 8 | 0x7f)
+#endif
 			keep_stopped = handle_ptracee_event(child, __W_STOPCODE(SIGSTOP));
 
 			/* Note that this event was already handled by
