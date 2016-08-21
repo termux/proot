@@ -1,7 +1,6 @@
 DIR    = $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
 ROOTFS = $(DIR)/rootfs
 PROOT  = $(DIR)/../src/proot
-CARE   = $(DIR)/../src/care
 CC     = gcc
 PROOT_RAW = $(PROOT)
 
@@ -22,7 +21,7 @@ check_failure: $(CHECK_TESTS)
 	@bash -c '! test -e failure'
 
 check-%.sh: %.sh setup
-	$(Q)env CARE="$(CARE)" PROOT_RAW="$(PROOT_RAW)" PROOT="$(PROOT)" ROOTFS=$(ROOTFS) sh -ex $< $(silently); $(call check,$*)
+	$(Q)env ROOT_RAW="$(PROOT_RAW)" PROOT="$(PROOT)" ROOTFS=$(ROOTFS) sh -ex $< $(silently); $(call check,$*)
 
 check-%.c: $(ROOTFS)/bin/% setup
 	$(call check_c,$*,$(PROOT) -b /proc -r $(ROOTFS) /bin/$*)
