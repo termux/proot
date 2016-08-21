@@ -37,5 +37,7 @@ extern int restart_original_syscall(Tracee *tracee);
 
 extern void chain_next_syscall(Tracee *tracee);
 
+extern int restart_current_syscall_as_chained(Tracee *tracee);
+
 
 #endif /* CHAIN_H */

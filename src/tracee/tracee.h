@@ -193,6 +193,11 @@ typedef struct tracee {
 		struct chained_syscalls *syscalls;
 		bool force_final_result;
 		word_t final_result;
+		enum {
+			SYSNUM_WORKAROUND_INACTIVE,
+			SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL,
+			SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL
+		} sysnum_workaround_state;
 	} chain;
 
 	/* Load info generated during execve sysenter and used during

@@ -262,12 +262,7 @@ int fetch_regs(Tracee *tracee)
 	return 0;
 }
 
-/**
- * Copy the cached values of all @tracee's general purpose registers
- * back to the process, if necessary.  This function returns -errno if
- * an error occured, 0 otherwise.
- */
-int push_regs(Tracee *tracee)
+int push_specific_regs(Tracee *tracee, bool including_sysnum)
 {
 	int status;
 
@@ -306,12 +301,14 @@ int push_regs(Tracee *tracee)
 		/* Update syscall number if needed.  On arm64, a new
 		 * subcommand has been added to PTRACE_{S,G}ETREGSET
 		 * to allow write/read of current sycall number.  */
-		if (current_sysnum != REG(tracee, ORIGINAL, SYSARG_NUM)) {
+		if (including_sysnum && current_sysnum != REG(tracee, ORIGINAL, SYSARG_NUM)) {
 			regs.iov_base = &current_sysnum;
 			regs.iov_len = sizeof(current_sysnum);
 			status = ptrace(PTRACE_SETREGSET, tracee->pid, NT_ARM_SYSTEM_CALL, &regs);
-			if (status < 0)
-				note(tracee, WARNING, SYSTEM, "can't set the syscall number");
+			if (status < 0) {
+				//note(tracee, WARNING, SYSTEM, "can't set the syscall number");
+				return status;
+			}
 		}
 
 		/* Update other registers.  */
@@ -325,10 +322,12 @@ int push_regs(Tracee *tracee)
 		 * change effectively the syscall number during a
 		 * ptrace-stop.  */
 		word_t current_sysnum = REG(tracee, CURRENT, SYSARG_NUM);
-		if (current_sysnum != REG(tracee, ORIGINAL, SYSARG_NUM)) {
+		if (including_sysnum && current_sysnum != REG(tracee, ORIGINAL, SYSARG_NUM)) {
 			status = ptrace(PTRACE_SET_SYSCALL, tracee->pid, 0, current_sysnum);
-			if (status < 0)
-				note(tracee, WARNING, SYSTEM, "can't set the syscall number");
+			if (status < 0) {
+				//note(tracee, WARNING, SYSTEM, "can't set the syscall number");
+				return status;
+			}
 		}
 #    endif
 
@@ -339,4 +338,13 @@ int push_regs(Tracee *tracee)
 	}
 
 	return 0;
+}
+
+/**
+ * Copy the cached values of all @tracee's general purpose registers
+ * back to the process, if necessary.  This function returns -errno if
+ * an error occured, 0 otherwise.
+ */
+int push_regs(Tracee *tracee) {
+	return push_specific_regs(tracee, true);
 }
