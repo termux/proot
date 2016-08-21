@@ -35,7 +35,6 @@
 
 #include "cli/cli.h"
 #include "cli/note.h"
-#include "extension/care/extract.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/event.h"
@@ -293,20 +292,6 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	size_t argc_offset;
 	size_t i, j, k;
 	int status;
-
-	if (get_care_cli != NULL) {
-		/* Check if it's an self-extracting CARE archive.  */
-		status = extract_archive_from_file("/proc/self/exe");
-		if (status == 0) {
-			/* Yes it is, nothing more to do.  */
-			exit_failure = 0;
-			return -1;
-		}
-
-		/* Check if it's a valid CARE tool name.  */
-		if (strncasecmp(basename(argv[0]), "care", strlen("care")) == 0)
-			cli = get_care_cli(tracee->ctx);
-	}
 
 	/* Unknown tool name?  Default to PRoot.  */
 	if (cli == NULL)

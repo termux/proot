@@ -18,8 +18,6 @@ CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -Wall -Wextra -O2
 LDFLAGS  += -ltalloc -Wl,-z,noexecstack
 
-CARE_LDFLAGS = -larchive
-
 OBJECTS += \
 	cli/cli.o		\
 	cli/proot.o		\
@@ -67,14 +65,6 @@ $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
 ifdef HAS_LOADER_32BIT
   OBJECTS += loader/loader-m32-wrapped.o
 endif
-
-CARE_OBJECTS = 				\
-	cli/care.o			\
-	cli/care-manual.o		\
-	extension/care/care.o		\
-	extension/care/final.o		\
-	extension/care/extract.o	\
-	extension/care/archive.o
 
 .DEFAULT_GOAL = proot
 all: proot
@@ -151,24 +141,14 @@ OBJIFY = $($(quiet)GEN)									\
 proot: $(OBJECTS)
 	$(LINK)
 
-care: $(OBJECTS) $(CARE_OBJECTS)
-	$(LINK) $(CARE_LDFLAGS)
-
 # Special case to compute which files depend on the auto-generated
 # file "build.h".
-USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell egrep -sl 'include[[:space:]]+"build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS) $(CARE_OBJECTS))))
+USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell egrep -sl 'include[[:space:]]+"build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS))))
 $(USE_BUILD_H): build.h
 
 %.o: %.c
 	@mkdir -p $(dir $@)
 	$(COMPILE)
-
-.INTERMEDIATE: manual
-manual: $(VPATH)/../doc/care/manual.txt
-	$(Q)cp $< $@
-
-cli/care-manual.o: manual cli/cli.o
-	$(OBJIFY)
 
 cli/%-licenses.o: licenses cli/cli.o
 	$(OBJIFY)
@@ -215,9 +195,9 @@ endif
 # Dependencies
 
 .DELETE_ON_ERROR:
-$(OBJECTS) $(CARE_OBJECTS) $(LOADER_OBJECTS) $(LOADER-m32_OBJECTS): $(firstword $(MAKEFILE_LIST))
+$(OBJECTS) $(LOADER_OBJECTS) $(LOADER-m32_OBJECTS): $(firstword $(MAKEFILE_LIST))
 
-DEPS = $(OBJECTS:.o=.d) $(CARE_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m32_OBJECTS:.o=.d) $(CHECK_OBJECTS:.o=.d)
+DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m32_OBJECTS:.o=.d) $(CHECK_OBJECTS:.o=.d)
 -include $(DEPS)
 
 ######################################################################
@@ -226,18 +206,12 @@ DEPS = $(OBJECTS:.o=.d) $(CARE_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m
 PREFIX = /usr/local
 DESTDIR = $(PREFIX)/bin
 
-.PHONY: clean distclean install install-care uninstall
+.PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(CHECK_OBJECTS) $(CHECK_PROGRAMS) $(CHECK_RESULTS) $(OBJECTS) $(CARE_OBJECTS) $(LOADER_OBJECTS) $(LOADER-m32_OBJECTS) proot care loader/loader loader/loader-m32 cli/care-manual.o $(DEPS) build.h licenses
+	-$(RM) -f $(CHECK_OBJECTS) $(CHECK_PROGRAMS) $(CHECK_RESULTS) $(OBJECTS) $(LOADER_OBJECTS) $(LOADER-m32_OBJECTS) proot loader/loader loader/loader-m32 $(DEPS) build.h licenses
 
 install: proot
 	$($(quiet)INSTALL) -D $< $(DESTDIR)/$<
 
-install-care: care
-	$($(quiet)INSTALL) -D $< $(DESTDIR)/$<
-
 uninstall:
 	-$(RM) -f $(DESTDIR)/proot
-
-uninstall-care:
-	-$(RM) -f $(DESTDIR)/care
