@@ -143,7 +143,12 @@ typedef struct tracee {
 				     && get_sysnum((tracee), ORIGINAL) == sysnum)
 
 	/* How this tracee is restarted.  */
-	enum __ptrace_request restart_how;
+#ifdef __ANDROID__
+	int
+#else
+	enum __ptrace_request
+#endif
+		restart_how;
 
 	/* Value of the tracee's general purpose registers.  */
 	struct user_regs_struct _regs[NB_REG_VERSION];
