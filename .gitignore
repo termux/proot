@@ -1,0 +1,8 @@
+*.o
+*.d
+*.res
+/src/build.h
+/src/loader/loader
+/src/loader/loader-m32
+/src/proot
+
