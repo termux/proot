@@ -31,6 +31,7 @@
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
 #include "tracee/mem.h"
+#include "cli/note.h"
 
 /**
  * Copy in @path a C string (PATH_MAX bytes max.) from the @tracee's
@@ -126,7 +127,9 @@ void translate_syscall(Tracee *tracee)
 			save_current_regs(tracee, MODIFIED);
 		}
 		else {
-			status = notify_extensions(tracee, SYSCALL_CHAINED_ENTER, 0, 0);
+			if (tracee->chain.sysnum_workaround_state != SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL) {
+				status = notify_extensions(tracee, SYSCALL_CHAINED_ENTER, 0, 0);
+			}
 			tracee->restart_how = PTRACE_SYSCALL;
 		}
 
@@ -159,8 +162,13 @@ void translate_syscall(Tracee *tracee)
 		/* Translate the syscall only if it was actually
 		 * requested by the tracee, it is not a syscall
 		 * chained by PRoot.  */
-		if (tracee->chain.syscalls == NULL)
+		if (tracee->chain.syscalls == NULL || tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL) {
+			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_INACTIVE;
 			translate_syscall_exit(tracee);
+		}
+		else if (tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL) {
+			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL;
+        }
 		else
 			(void) notify_extensions(tracee, SYSCALL_CHAINED_EXIT, 0, 0);
 
@@ -172,7 +180,42 @@ void translate_syscall(Tracee *tracee)
 			chain_next_syscall(tracee);
 	}
 
-	(void) push_regs(tracee);
+	bool override_sysnum = is_enter_stage && tracee->chain.syscalls == NULL;
+	int push_regs_status = push_specific_regs(tracee, override_sysnum);
+
+	/* Handle inability to change syscall number */
+	if (push_regs_status < 0 && override_sysnum) {
+		word_t orig_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
+		word_t current_sysnum = peek_reg(tracee, CURRENT, SYSARG_NUM);
+		if (orig_sysnum != current_sysnum) {
+			/* Restart current syscall as chained */
+			if (current_sysnum != SYSCALL_AVOIDER) {
+				restart_current_syscall_as_chained(tracee);
+			}
+
+			/* Set syscall arguments to make it fail
+			 * TODO: More reliable way to make invalid arguments */
+			if (get_sysnum(tracee, ORIGINAL) == PR_brk) {
+				/* For brk() we pass 0 as first arg; this is used to query value without changing it */
+				poke_reg(tracee, SYSARG_1, 0);
+			} else {
+				/* For other syscalls we set all args to -1
+				 * Hoping there is among them invalid request/address/fd/value that will make syscall fail */
+				poke_reg(tracee, SYSARG_1, -1);
+				poke_reg(tracee, SYSARG_2, -1);
+				poke_reg(tracee, SYSARG_3, -1);
+				poke_reg(tracee, SYSARG_4, -1);
+				poke_reg(tracee, SYSARG_5, -1);
+				poke_reg(tracee, SYSARG_6, -1);
+			}
+
+			/* Push regs again without changing syscall */
+			push_regs_status = push_specific_regs(tracee, false);
+			if (push_regs_status != 0) {
+				note(tracee, WARNING, SYSTEM, "can't set tracee registers in workaround");
+			}
+		}
+	}
 
 	if (is_enter_stage)
 		print_current_regs(tracee, 5, "sysenter end" );

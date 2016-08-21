@@ -39,17 +39,10 @@ struct chained_syscall {
 
 STAILQ_HEAD(chained_syscalls, chained_syscall);
 
-/**
- * Append a new syscall (@sysnum, @sysarg_*) to the list of
- * "unrequested" syscalls for the given @tracee.  These new syscalls
- * will be triggered in order once the current syscall is done.  The
- * caller is free to force the last result of this syscall chain in
- * @tracee->chain.final_result.  This function returns -errno if an
- * error occurred, otherwise 0.
- */
-int register_chained_syscall(Tracee *tracee, Sysnum sysnum,
+static int register_chained_syscall_internal(Tracee *tracee, Sysnum sysnum,
 			word_t sysarg_1, word_t sysarg_2, word_t sysarg_3,
-			word_t sysarg_4, word_t sysarg_5, word_t sysarg_6)
+			word_t sysarg_4, word_t sysarg_5, word_t sysarg_6,
+			bool at_front)
 {
 	struct chained_syscall *syscall;
 
@@ -73,9 +66,32 @@ int register_chained_syscall(Tracee *tracee, Sysnum sysnum,
 	syscall->sysargs[4] = sysarg_5;
 	syscall->sysargs[5] = sysarg_6;
 
-	STAILQ_INSERT_TAIL(tracee->chain.syscalls, syscall, link);
+	if (at_front) {
+		STAILQ_INSERT_HEAD(tracee->chain.syscalls, syscall, link);
+	} else {
+		STAILQ_INSERT_TAIL(tracee->chain.syscalls, syscall, link);
+	}
 
 	return 0;
+}
+
+/**
+ * Append a new syscall (@sysnum, @sysarg_*) to the list of
+ * "unrequested" syscalls for the given @tracee.  These new syscalls
+ * will be triggered in order once the current syscall is done.  The
+ * caller is free to force the last result of this syscall chain in
+ * @tracee->chain.final_result.  This function returns -errno if an
+ * error occurred, otherwise 0.
+ */
+int register_chained_syscall(Tracee *tracee, Sysnum sysnum,
+			word_t sysarg_1, word_t sysarg_2, word_t sysarg_3,
+			word_t sysarg_4, word_t sysarg_5, word_t sysarg_6) {
+	return register_chained_syscall_internal(
+		tracee, sysnum,
+		sysarg_1, sysarg_2, sysarg_3,
+		sysarg_4, sysarg_5, sysarg_6,
+		false
+	);
 }
 
 /**
@@ -126,6 +142,9 @@ void chain_next_syscall(Tracee *tracee)
 	/* Move the instruction pointer back to the original trap.  */
 	instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
 	poke_reg(tracee, INSTR_POINTER, instr_pointer - SYSTRAP_SIZE);
+
+	/* Break after exit from syscall, there may be another one in chain */
+	tracee->restart_how = PTRACE_SYSCALL;
 }
 
 /**
@@ -153,4 +172,19 @@ int restart_original_syscall(Tracee *tracee)
 					peek_reg(tracee, ORIGINAL, SYSARG_4),
 					peek_reg(tracee, ORIGINAL, SYSARG_5),
 					peek_reg(tracee, ORIGINAL, SYSARG_6));
+}
+
+int restart_current_syscall_as_chained(Tracee *tracee)
+{
+	assert(tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_INACTIVE);
+	tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL;
+	return register_chained_syscall_internal(tracee,
+					get_sysnum(tracee, CURRENT),
+					peek_reg(tracee, CURRENT, SYSARG_1),
+					peek_reg(tracee, CURRENT, SYSARG_2),
+					peek_reg(tracee, CURRENT, SYSARG_3),
+					peek_reg(tracee, CURRENT, SYSARG_4),
+					peek_reg(tracee, CURRENT, SYSARG_5),
+					peek_reg(tracee, CURRENT, SYSARG_6),
+					true);
 }
