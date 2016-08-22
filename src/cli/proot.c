@@ -283,6 +283,11 @@ static int post_initialize_exe(Tracee *tracee, const Cli *cli UNUSED,
 	char path[PATH_MAX];
 	int status;
 
+	/* Force the link2symlink extension.  */
+	status = initialize_extension(tracee, link2symlink_callback, NULL);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "link2symlink not initialized");
+
 	/* Nothing else to do ?  */
 	if (tracee->qemu == NULL)
 		return 0;
