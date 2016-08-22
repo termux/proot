@@ -367,12 +367,23 @@ static int handle_sysexit_end(Tracee *tracee)
  * When @translated_path is a faked hard-link, replace it with the
  * point it (internally) points to.
  */
-static void translated_path(char translated_path[PATH_MAX])
+static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 {
 	char path2[PATH_MAX];
 	char path[PATH_MAX];
 	char *component;
 	int status;
+
+	/* Don't translate l2s symlinks if call is (un)link */
+	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+	if (   sysnum == PR_unlink
+	    || sysnum == PR_unlinkat
+	    || sysnum == PR_link
+	    || sysnum == PR_linkat
+	    || sysnum == PR_rename
+	    || sysnum == PR_renameat) {
+		return;
+	}
 
 	status = my_readlink(translated_path, path);
 	if (status < 0)
@@ -544,7 +555,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case TRANSLATED_PATH:
-		translated_path((char *) data1);
+		translated_path(TRACEE(extension), (char *) data1);
 		return 0;
 
 	default:
