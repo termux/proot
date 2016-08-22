@@ -49,6 +49,12 @@ typedef enum {
 	 * as-is.  */
 	HOST_PATH,
 
+	/* The canonicalization succeed: "(char *) data1" is the
+	 * translated path from the host point-of-view.  It can be
+	 * substituted by the extension.  If the extension returns <
+	 * 0, then PRoot reports this errno as-is.  */
+	TRANSLATED_PATH,
+
 	/* The tracee enters a syscall, and PRoot hasn't do anything
 	 * yet.  If the extension returns > 0, then PRoot skips its
 	 * own handling.  If the extension returns < 0, then PRoot
@@ -178,5 +184,6 @@ static inline int notify_extensions(Tracee *tracee, ExtensionEvent event,
 /* Built-in extensions.  */
 extern int kompat_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int link2symlink_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 
 #endif /* EXTENSION_H */
