@@ -60,6 +60,7 @@ static int handle_option_0(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_i(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -214,6 +215,15 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 \tgid.  Likewise, files actually owned by the current user and\n\
 \tgroup appear as if they were owned by uid and gid instead.\n\
 \tNote that the -0 option is the same as -i 0:0.",
+	},
+	{ .class = "Extension options",
+	  .arguments = {
+		{ .name = "--link2symlink", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_link2symlink,
+	  .description = "Replace hard links with symlinks, pretending they are really hardlinks",
+	  .detail = "\tEmulates hard links with symbolic links when SELinux policies\n\
+\tdo not allow hard links.",
 	},
 	{ .class = "Alias options",
 	  .arguments = {
