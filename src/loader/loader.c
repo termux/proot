@@ -27,14 +27,6 @@
 #include "compat.h"
 #include "arch.h"
 
-#define GCC_VERSION (__GNUC__ * 10000			\
-			+ __GNUC_MINOR__ * 100		\
-			+ __GNUC_PATCHLEVEL__)
-
-#if GCC_VERSION < 40500
-#define __builtin_unreachable()
-#endif
-
 #if defined(ARCH_X86_64)
 #    include "loader/assembly-x86_64.h"
 #elif defined(ARCH_ARM_EABI)
