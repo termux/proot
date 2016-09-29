@@ -274,7 +274,7 @@ static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value)
 	return 0;
 }
 
-static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value)
+static int handle_option_link2symlink(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	int status;
 
