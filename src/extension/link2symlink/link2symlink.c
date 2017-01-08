@@ -539,9 +539,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 				return status;
 
 			poke_reg(tracee, SYSARG_1, peek_reg(tracee, CURRENT, SYSARG_2));
-			poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_4));
+			poke_reg(tracee, SYSARG_2, AT_FDCWD);
+			poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_4));
 
-			set_sysnum(tracee, PR_symlink);
+			set_sysnum(tracee, PR_symlinkat);
 			break;
 
 		default:
