@@ -143,8 +143,11 @@ void chain_next_syscall(Tracee *tracee)
 	instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
 	poke_reg(tracee, INSTR_POINTER, instr_pointer - SYSTRAP_SIZE);
 
-	/* Break after exit from syscall, there may be another one in chain */
+	/* Break after exit from syscall, there may be another one in chain
+	 * NOTE: We don't use DISABLING here as that is value used when handling
+	 *       syscall enter and now we're at syscall exit */
 	tracee->restart_how = PTRACE_SYSCALL;
+	tracee->seccomp = DISABLED;
 }
 
 /**
