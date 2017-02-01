@@ -472,7 +472,15 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 				}
 				/* Fall through.  */
 			case DISABLED:
-				translate_syscall(tracee);
+				if (!tracee->seccomp_already_handled_enter)
+				{
+					translate_syscall(tracee);
+				}
+				else {
+					assert(!IS_IN_SYSENTER(tracee));
+					tracee->seccomp_already_handled_enter = false;
+					tracee->restart_how = PTRACE_SYSCALL;
+				}
 
 				/* This syscall has disabled seccomp.  */
 				if (tracee->seccomp == DISABLING) {
@@ -498,6 +506,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			unsigned long flags = 0;
 
 			signal = 0;
+
+			assert(IS_IN_SYSENTER(tracee));
 
 			if (!seccomp_detected) {
 				VERBOSE(tracee, 1, "ptrace acceleration (seccomp mode 2) enabled");
@@ -531,6 +541,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			 * ensure its sysexit will be handled.  */
 			if (tracee->seccomp == DISABLING)
 				tracee->restart_how = PTRACE_SYSCALL;
+
+			if (tracee->restart_how == PTRACE_SYSCALL)
+				tracee->seccomp_already_handled_enter = true;
 			break;
 		}
 

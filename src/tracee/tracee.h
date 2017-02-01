@@ -218,6 +218,9 @@ typedef struct tracee {
 	/* Ensure the sysexit stage is always hit under seccomp.  */
 	bool sysexit_pending;
 
+	/* If true, syscall entry was handled by seccomp and next SIGTRAP | 0x80
+	 * has to be ignored as it's same syscall entry */
+	bool seccomp_already_handled_enter;
 
 	/**********************************************************************
 	 * Shared or private resources, depending on the CLONE_FS/VM flags.   *
