@@ -36,7 +36,7 @@
 		"mov r0, #0				\n\t"	\
 		"					\n\t"	\
 		"// Start the program.			\n\t"	\
-		"mov pc, %1				\n"	\
+		"bx %1					\n"	\
 		: /* no output */				\
 		: "r" (stack_pointer), "r" (destination)	\
 		: "memory", "sp", "r0", "pc");			\
@@ -68,6 +68,23 @@
 	OUTPUT_CONTRAINTS_3,				\
 	"r" (arg4), "r" (arg5), "r" (arg6)
 
+#ifdef __thumb__
+#define STRINGIFY_EXPANDED(s) #s
+#define SYSCALL(number_, nb_args, args...)			\
+	({							\
+		register word_t result asm("r0");		\
+		PREPARE_ARGS_##nb_args(args)			\
+			asm volatile (				\
+				"push {r7}		\n\t"	\
+				"mov r7, #" STRINGIFY_EXPANDED(number_) "\n\t"	\
+				"svc #0x00000000	\n\t"	\
+				"pop {r7}		\n\t"	\
+				: "=r" (result)			\
+				: OUTPUT_CONTRAINTS_##nb_args	\
+				: "memory");			\
+			result;					\
+	})
+#else
 #define SYSCALL(number_, nb_args, args...)			\
 	({							\
 		register word_t number asm("r7") = number_;	\
@@ -81,6 +98,7 @@
 				: "memory");			\
 			result;					\
 	})
+#endif
 
 #define OPEN	5
 #define CLOSE	6
