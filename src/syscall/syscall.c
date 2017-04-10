@@ -140,6 +140,9 @@ void translate_syscall(Tracee *tracee)
 			set_sysnum(tracee, PR_void);
 			poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 			tracee->status = status;
+#if defined(ARCH_ARM_EABI)
+			tracee->restart_how = PTRACE_SYSCALL;
+#endif
 		}
 		else
 			tracee->status = 1;
