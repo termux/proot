@@ -391,14 +391,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		VERBOSE(tracee, 1,
 			"vpid %" PRIu64 ": exited with status %d",
 			tracee->vpid, last_exit_status);
-		tracee->terminated = true;
+		terminate_tracee(tracee);
 	}
 	else if (WIFSIGNALED(tracee_status)) {
 		check_architecture(tracee);
 		VERBOSE(tracee, (int) (tracee->vpid != 1),
 			"vpid %" PRIu64 ": terminated with signal %d",
 			tracee->vpid, WTERMSIG(tracee_status));
-		tracee->terminated = true;
+		terminate_tracee(tracee);
 	}
 	else if (WIFSTOPPED(tracee_status)) {
 		/* Don't use WSTOPSIG() to extract the signal
