@@ -465,7 +465,14 @@ void translate_execve_exit(Tracee *tracee)
 	}
 
 	/* New processes have no heap.  */
-	bzero(tracee->heap, sizeof(Heap));
+	if (talloc_reference_count(tracee->heap) >= 1) {
+		talloc_unlink(tracee, tracee->heap);
+		tracee->heap = talloc_zero(tracee, Heap);
+		if (tracee->heap == NULL)
+			note(tracee, ERROR, INTERNAL, "can't alloc heap after execve");
+	} else {
+		bzero(tracee->heap, sizeof(Heap));
+	}
 
 	/* Transfer the load script to the loader.  */
 	status = transfer_load_script(tracee);
