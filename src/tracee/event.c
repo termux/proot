@@ -580,6 +580,16 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			}
 			break;
 
+		case SIGSYS: {
+			int sigsys_status = fetch_regs(tracee);
+			if (sigsys_status == 0 && get_sysnum(tracee, ORIGINAL) == PR_set_robust_list) {
+				signal = 0;
+				poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+				push_specific_regs(tracee, false);
+			}
+			break;
+		}
+
 		default:
 			/* Deliver this signal as-is.  */
 			break;
