@@ -581,11 +581,21 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			break;
 
 		case SIGSYS: {
-			int sigsys_status = fetch_regs(tracee);
-			if (sigsys_status == 0 && get_sysnum(tracee, ORIGINAL) == PR_set_robust_list) {
-				signal = 0;
+			siginfo_t siginfo = {};
+			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
+			if (siginfo.si_code == SYS_SECCOMP) {
+				int sigsys_fetch_status = fetch_regs(tracee);
+				if (sigsys_fetch_status != 0) {
+					VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
+					break;
+				}
+				print_current_regs(tracee, 3, "seccomp SIGSYS");
 				poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+				tracee->restore_original_regs = false;
 				push_specific_regs(tracee, false);
+				signal = 0;
+			} else {
+				VERBOSE(tracee, 1, "non-seccomp SIGSYS");
 			}
 			break;
 		}
