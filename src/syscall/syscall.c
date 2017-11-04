@@ -111,6 +111,8 @@ void translate_syscall(Tracee *tracee)
 	if (status < 0)
 		return;
 
+	int suppressed_syscall_status = 0;
+
 	if (is_enter_stage) {
 		/* Never restore original register values at the end
 		 * of this stage.  */
@@ -151,6 +153,7 @@ void translate_syscall(Tracee *tracee)
 		 * the sysexit stage (i.e. when seccomp is enabled and
 		 * there's nothing else to do).  */
 		if (tracee->restart_how == PTRACE_CONT) {
+			suppressed_syscall_status = tracee->status;
 			tracee->status = 0;
 			poke_reg(tracee, STACK_POINTER, peek_reg(tracee, ORIGINAL, STACK_POINTER));
 		}
@@ -187,6 +190,7 @@ void translate_syscall(Tracee *tracee)
 	int push_regs_status = push_specific_regs(tracee, override_sysnum);
 
 	/* Handle inability to change syscall number */
+	print_current_regs(tracee, 4, "pre_push");
 	if (push_regs_status < 0 && override_sysnum) {
 		word_t orig_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
 		word_t current_sysnum = peek_reg(tracee, CURRENT, SYSARG_NUM);
@@ -194,22 +198,29 @@ void translate_syscall(Tracee *tracee)
 			/* Restart current syscall as chained */
 			if (current_sysnum != SYSCALL_AVOIDER) {
 				restart_current_syscall_as_chained(tracee);
+			} else if (suppressed_syscall_status) {
+				/* If we've decided to fail this syscall
+				 * by setting it to no-op and continuing, but turns out
+				 * that we can't just make syscall nop, restore tracee->status
+				 * and intercept syscall exit */
+				tracee->status = suppressed_syscall_status;
+				tracee->restart_how = PTRACE_SYSCALL;
 			}
 
 			/* Set syscall arguments to make it fail
-			 * TODO: More reliable way to make invalid arguments */
+			 * TODO: More reliable way to make invalid arguments
+			 * For most syscalls we set all args to -1
+			 * Hoping there is among them invalid request/address/fd/value that will make syscall fail */
+			poke_reg(tracee, SYSARG_1, -1);
+			poke_reg(tracee, SYSARG_2, -1);
+			poke_reg(tracee, SYSARG_3, -1);
+			poke_reg(tracee, SYSARG_4, -1);
+			poke_reg(tracee, SYSARG_5, -1);
+			poke_reg(tracee, SYSARG_6, -1);
+
 			if (get_sysnum(tracee, ORIGINAL) == PR_brk) {
 				/* For brk() we pass 0 as first arg; this is used to query value without changing it */
 				poke_reg(tracee, SYSARG_1, 0);
-			} else {
-				/* For other syscalls we set all args to -1
-				 * Hoping there is among them invalid request/address/fd/value that will make syscall fail */
-				poke_reg(tracee, SYSARG_1, -1);
-				poke_reg(tracee, SYSARG_2, -1);
-				poke_reg(tracee, SYSARG_3, -1);
-				poke_reg(tracee, SYSARG_4, -1);
-				poke_reg(tracee, SYSARG_5, -1);
-				poke_reg(tracee, SYSARG_6, -1);
 			}
 
 			/* Push regs again without changing syscall */
