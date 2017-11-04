@@ -377,7 +377,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		 * seccomp) is not cleared due to an event that would happen
 		 * before the exit stage, eg. PTRACE_EVENT_EXEC for the exit
 		 * stage of execve(2).  */
-		if (tracee->seccomp == ENABLED && !tracee->sysexit_pending)
+		if (tracee->seccomp == ENABLED && !tracee->sysexit_pending && tracee->chain.syscalls == NULL)
 			tracee->restart_how = PTRACE_CONT;
 		else
 			tracee->restart_how = PTRACE_SYSCALL;
@@ -475,6 +475,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 				if (!tracee->seccomp_already_handled_enter)
 				{
 					translate_syscall(tracee);
+
+					/* Redeliver signal suppressed during
+					 * syscall chain once it's finished.  */
+					if (tracee->chain.suppressed_signal && tracee->chain.syscalls == NULL) {
+						signal = tracee->chain.suppressed_signal;
+						tracee->chain.suppressed_signal = 0;
+						VERBOSE(tracee, 6, "vpid %" PRIu64 ": redelivering suppressed signal %d", tracee->vpid, signal);
+					}
 				}
 				else {
 					assert(!IS_IN_SYSENTER(tracee));
@@ -584,6 +592,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
+				/* Set errno to -ENOSYS */
 				int sigsys_fetch_status = fetch_regs(tracee);
 				if (sigsys_fetch_status != 0) {
 					VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
@@ -593,7 +602,13 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 				poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
 				tracee->restore_original_regs = false;
 				push_specific_regs(tracee, false);
+
+				/* Swallow signal */
 				signal = 0;
+
+				/* Reset status so next SIGTRAP | 0x80 is
+				 * recognized as syscall entry */
+				tracee->status = 0;
 			} else {
 				VERBOSE(tracee, 1, "non-seccomp SIGSYS");
 			}
@@ -601,7 +616,15 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		}
 
 		default:
-			/* Deliver this signal as-is.  */
+			/* Deliver this signal as-is,
+			 * unless we're chaining syscall.  */
+			if (tracee->chain.syscalls != NULL) {
+				VERBOSE(tracee, 5,
+						"vpid %" PRIu64 ": suppressing signal during chain signal=%d, prev suppressed_signal=%d",
+						tracee->vpid, signal, tracee->chain.suppressed_signal);
+				tracee->chain.suppressed_signal = signal;
+				signal = 0;
+			}
 			break;
 		}
 	}
