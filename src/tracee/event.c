@@ -48,6 +48,10 @@
 #include "attribute.h"
 #include "compat.h"
 
+#ifndef SYS_SECCOMP
+#define SYS_SECCOMP 1
+#endif
+
 /**
  * Start @tracee->exe with the given @argv[].  This function
  * returns -errno if an error occurred, otherwise 0.
