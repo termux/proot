@@ -453,6 +453,15 @@ int main(int argc, char *const argv[])
 		goto error;
 	tracee->pid = getpid();
 
+	/* Set verboseness from env variable, may be overriden by option */
+	{
+		const char *verbose_env = getenv("PROOT_VERBOSE");
+		if (verbose_env != NULL) {
+			tracee->verbose = strtol(verbose_env, NULL, 10);
+			global_verbose_level = tracee->verbose;
+		}
+	}
+
 	/* Pre-configure the first tracee.  */
 	status = parse_config(tracee, argc, argv);
 	if (status < 0)

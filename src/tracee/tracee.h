@@ -202,6 +202,7 @@ typedef struct tracee {
 			SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL,
 			SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL
 		} sysnum_workaround_state;
+		int suppressed_signal;
 	} chain;
 
 	/* Load info generated during execve sysenter and used during
