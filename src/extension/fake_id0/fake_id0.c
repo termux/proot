@@ -601,7 +601,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 
 		/* Override only permission errors.  */
 		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if ((int) result != -EPERM)
+		if ((int) result != -EPERM && (int) result != -EACCES)
 			return 0;
 
 		/* Force success if the tracee was supposed to have
