@@ -48,6 +48,7 @@ OBJECTS += \
 	tracee/mem.o		\
 	tracee/reg.o		\
 	tracee/event.o		\
+	tracee/seccomp.o        \
 	ptrace/ptrace.o		\
 	ptrace/user.o		\
 	ptrace/wait.o		\
