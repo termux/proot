@@ -36,6 +36,7 @@
 #include <inttypes.h>   /* PRI*, */
 
 #include "tracee/event.h"
+#include "tracee/seccomp.h"
 #include "cli/note.h"
 #include "path/path.h"
 #include "path/binding.h"
@@ -596,23 +597,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
-				/* Set errno to -ENOSYS */
-				int sigsys_fetch_status = fetch_regs(tracee);
-				if (sigsys_fetch_status != 0) {
-					VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
-					break;
-				}
-				print_current_regs(tracee, 3, "seccomp SIGSYS");
-				poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-				tracee->restore_original_regs = false;
-				push_specific_regs(tracee, false);
-
-				/* Swallow signal */
-				signal = 0;
-
-				/* Reset status so next SIGTRAP | 0x80 is
-				 * recognized as syscall entry */
-				tracee->status = 0;
+				signal = handle_seccomp_event(tracee);
 			} else {
 				VERBOSE(tracee, 1, "non-seccomp SIGSYS");
 			}
