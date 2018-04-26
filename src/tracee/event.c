@@ -368,8 +368,15 @@ int event_loop()
 int handle_tracee_event(Tracee *tracee, int tracee_status)
 {
 	static bool seccomp_detected = false;
+	static bool seccomp_after_ptrace_enter = false;
+	static bool seccomp_after_ptrace_enter_checked = false;
 	long status;
 	int signal;
+
+	if (!seccomp_after_ptrace_enter_checked) {
+		seccomp_after_ptrace_enter = getenv("PROOT_ASSUME_NEW_SECCOMP") != NULL;
+		seccomp_after_ptrace_enter_checked = true;
+	}
 
 	/* Don't overwrite restart_how if it is explicitly set
 	 * elsewhere, i.e in the ptrace emulation when single
@@ -479,7 +486,19 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			case DISABLED:
 				if (!tracee->seccomp_already_handled_enter)
 				{
+					bool was_sysenter = IS_IN_SYSENTER(tracee);
+
 					translate_syscall(tracee);
+
+					/* In case we've changed on enter sysnum to PR_void,
+					 * seccomp check is happening after our change
+					 * and seccomp policy raises SIGSYS on -1 syscall,
+					 * set tracee flag to ignore next SIGSYS.  */
+					if (was_sysenter) {
+						tracee->skip_next_seccomp_signal = (
+								seccomp_after_ptrace_enter &&
+								get_sysnum(tracee, CURRENT) == PR_void);
+					}
 
 					/* Redeliver signal suppressed during
 					 * syscall chain once it's finished.  */
@@ -520,13 +539,24 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
 			signal = 0;
 
-			assert(IS_IN_SYSENTER(tracee));
-
 			if (!seccomp_detected) {
 				VERBOSE(tracee, 1, "ptrace acceleration (seccomp mode 2) enabled");
 				tracee->seccomp = ENABLED;
 				seccomp_detected = true;
+				seccomp_after_ptrace_enter = !IS_IN_SYSENTER(tracee);
 			}
+
+			tracee->skip_next_seccomp_signal = false;
+
+			/* If kernel triggered seccomp event after we handled
+			 * syscall enter, skip this event and continue as it didn't happen */
+			if (seccomp_after_ptrace_enter && !IS_IN_SYSENTER(tracee))
+			{
+				tracee->restart_how = tracee->last_restart_how;
+				break;
+			}
+
+			assert(IS_IN_SYSENTER(tracee));
 
 			/* Use the common ptrace flow if seccomp was
 			 * explicitely disabled for this tracee.  */
@@ -540,6 +570,10 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			/* Use the common ptrace flow when
 			 * sysexit has to be handled.  */
 			if ((flags & FILTER_SYSEXIT) != 0) {
+				if (seccomp_after_ptrace_enter) {
+					tracee->restart_how = PTRACE_SYSCALL;
+					translate_syscall(tracee);
+				}
 				tracee->restart_how = PTRACE_SYSCALL;
 				break;
 			}
@@ -575,6 +609,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		case SIGTRAP | PTRACE_EVENT_EXEC  << 8:
 		case SIGTRAP | PTRACE_EVENT_EXIT  << 8:
 			signal = 0;
+			tracee->restart_how = tracee->last_restart_how;
 			break;
 
 		case SIGSTOP:
@@ -597,7 +632,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
-				signal = handle_seccomp_event(tracee);
+				if (tracee->skip_next_seccomp_signal) {
+					signal = 0;
+				} else {
+					signal = handle_seccomp_event(tracee);
+				}
 			} else {
 				VERBOSE(tracee, 1, "non-seccomp SIGSYS");
 			}
@@ -643,6 +682,7 @@ bool restart_tracee(Tracee *tracee, int signal)
 	if (status < 0)
 		return false; /* The process likely died in a syscall.  */
 
+	tracee->last_restart_how = tracee->restart_how;
 	tracee->restart_how = 0;
 	tracee->running = true;
 
