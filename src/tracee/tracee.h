@@ -152,7 +152,7 @@ typedef struct tracee {
 #else
 	enum __ptrace_request
 #endif
-		restart_how;
+		restart_how, last_restart_how;
 
 	/* Value of the tracee's general purpose registers.  */
 	struct user_regs_struct _regs[NB_REG_VERSION];
@@ -165,6 +165,10 @@ typedef struct tracee {
 		SIGSTOP_ALLOWED,      /* Allow SIGSTOP (once the parent is known).   */
 		SIGSTOP_PENDING,      /* Block SIGSTOP until the parent is unknown.  */
 	} sigstop;
+
+	/* True if next SIGSYS caused by seccomp should be silently dropped
+	 * without affecting state of any registers.  */
+	bool skip_next_seccomp_signal;
 
 	/* Context used to collect all the temporary dynamic memory
 	 * allocations.  */
