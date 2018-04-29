@@ -190,10 +190,10 @@ void translate_syscall(Tracee *tracee)
 	int push_regs_status = push_specific_regs(tracee, override_sysnum);
 
 	/* Handle inability to change syscall number */
-	print_current_regs(tracee, 4, "pre_push");
 	if (push_regs_status < 0 && override_sysnum) {
 		word_t orig_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
 		word_t current_sysnum = peek_reg(tracee, CURRENT, SYSARG_NUM);
+		print_current_regs(tracee, 4, "pre_push");
 		if (orig_sysnum != current_sysnum) {
 			/* Restart current syscall as chained */
 			if (current_sysnum != SYSCALL_AVOIDER) {

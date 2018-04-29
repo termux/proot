@@ -540,10 +540,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			signal = 0;
 
 			if (!seccomp_detected) {
-				VERBOSE(tracee, 1, "ptrace acceleration (seccomp mode 2) enabled");
 				tracee->seccomp = ENABLED;
 				seccomp_detected = true;
 				seccomp_after_ptrace_enter = !IS_IN_SYSENTER(tracee);
+				VERBOSE(tracee, 1, "ptrace acceleration (seccomp mode 2, %s syscall order) enabled",
+						seccomp_after_ptrace_enter ? "new" : "old");
 			}
 
 			tracee->skip_next_seccomp_signal = false;
@@ -609,7 +610,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		case SIGTRAP | PTRACE_EVENT_EXEC  << 8:
 		case SIGTRAP | PTRACE_EVENT_EXIT  << 8:
 			signal = 0;
-			tracee->restart_how = tracee->last_restart_how;
+			if (tracee->last_restart_how) {
+				tracee->restart_how = tracee->last_restart_how;
+			}
 			break;
 
 		case SIGSTOP:
@@ -633,6 +636,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
 				if (tracee->skip_next_seccomp_signal) {
+					VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
+					tracee->skip_next_seccomp_signal = false;
 					signal = 0;
 				} else {
 					signal = handle_seccomp_event(tracee);
@@ -678,6 +683,7 @@ bool restart_tracee(Tracee *tracee, int signal)
 
 	/* Restart the tracee and stop it at the next instruction, or
 	 * at the next entry or exit of a system call. */
+	assert(tracee->restart_how != 0);
 	status = ptrace(tracee->restart_how, tracee->pid, NULL, signal);
 	if (status < 0)
 		return false; /* The process likely died in a syscall.  */
