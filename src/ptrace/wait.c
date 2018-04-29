@@ -235,6 +235,7 @@ int translate_wait_exit(Tracee *ptracer)
 bool handle_ptracee_event(Tracee *ptracee, int event)
 {
 	bool handled_by_proot_first = false;
+	bool handled_by_proot_first_may_suppress = false;
 	Tracee *ptracer = PTRACEE.ptracer;
 	bool keep_stopped;
 
@@ -287,6 +288,11 @@ bool handle_ptracee_event(Tracee *ptracee, int event)
 			 * ptrace emulation.  */
 			return false;
 
+		case SIGSYS:
+			handled_by_proot_first = true;
+			handled_by_proot_first_may_suppress = true;
+			break;
+
 		default:
 			PTRACEE.tracing_started = true;
 			break;
@@ -314,10 +320,21 @@ bool handle_ptracee_event(Tracee *ptracee, int event)
 		signal = handle_tracee_event(ptracee, PTRACEE.event4.proot.value);
 		PTRACEE.event4.proot.value = signal;
 
-		/* The computed signal is always 0 since we can come
-		 * in this block only on sysexit and special events
-		 * (as for now).  */
-		assert(signal == 0);
+		if (handled_by_proot_first_may_suppress) {
+			/* If we've decided to suppress signal
+			 * (e.g. because seccomp policy blocked syscall
+			 * but we emulate that syscall),
+			 * don't notify ptracer and let ptracee resume.  */
+			if (signal == 0) {
+				restart_tracee(ptracee, 0);
+				return true;
+			}
+		} else {
+			/* The computed signal is always 0 since we can come
+			 * in this block only on sysexit and special events
+			 * (as for now).  */
+			assert(signal == 0);
+		}
 	}
 
 	/* Remember what the new event is, this will be required by
