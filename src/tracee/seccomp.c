@@ -1,5 +1,6 @@
 #include <errno.h>     /* E*, */
 #include <signal.h>    /* SIGSYS, */
+#include <unistd.h>    /* getpgid, */
 
 #include "cli/note.h"
 #include "syscall/chain.h"
@@ -35,6 +36,15 @@ int handle_seccomp_event(Tracee* tracee) {
 		/* Break as usual on entry to syscall */
 		tracee->restart_how = PTRACE_SYSCALL;
 		push_specific_regs(tracee, true);
+
+		/* Swallow signal */
+		signal = 0;
+		break;
+
+	case PR_getpgrp:
+		/* Query value with getpgid and set it as result.  */
+		poke_reg(tracee, SYSARG_RESULT, getpgid(tracee->pid));
+		push_specific_regs(tracee, false);
 
 		/* Swallow signal */
 		signal = 0;
