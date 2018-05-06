@@ -372,24 +372,28 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 	static bool seccomp_after_ptrace_enter_checked = false;
 	long status;
 	int signal;
+	bool sysexit_necessary;
 
 	if (!seccomp_after_ptrace_enter_checked) {
 		seccomp_after_ptrace_enter = getenv("PROOT_ASSUME_NEW_SECCOMP") != NULL;
 		seccomp_after_ptrace_enter_checked = true;
 	}
 
+	/* When seccomp is enabled, all events are restarted in
+	 * non-stop mode, but this default choice could be overwritten
+	 * later if necessary.  The check against "sysexit_pending"
+	 * ensures PTRACE_SYSCALL (used to hit the exit stage under
+	 * seccomp) is not cleared due to an event that would happen
+	 * before the exit stage, eg. PTRACE_EVENT_EXEC for the exit
+	 * stage of execve(2).  */
+	sysexit_necessary = tracee->sysexit_pending
+				|| tracee->chain.syscalls != NULL
+				|| tracee->restore_original_regs_after_seccomp_event;
 	/* Don't overwrite restart_how if it is explicitly set
 	 * elsewhere, i.e in the ptrace emulation when single
 	 * stepping.  */
 	if (tracee->restart_how == 0) {
-		/* When seccomp is enabled, all events are restarted in
-		 * non-stop mode, but this default choice could be overwritten
-		 * later if necessary.  The check against "sysexit_pending"
-		 * ensures PTRACE_SYSCALL (used to hit the exit stage under
-		 * seccomp) is not cleared due to an event that would happen
-		 * before the exit stage, eg. PTRACE_EVENT_EXEC for the exit
-		 * stage of execve(2).  */
-		if (tracee->seccomp == ENABLED && !tracee->sysexit_pending && tracee->chain.syscalls == NULL)
+		if (tracee->seccomp == ENABLED && !sysexit_necessary)
 			tracee->restart_how = PTRACE_CONT;
 		else
 			tracee->restart_how = PTRACE_SYSCALL;
@@ -570,7 +574,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
 			/* Use the common ptrace flow when
 			 * sysexit has to be handled.  */
-			if ((flags & FILTER_SYSEXIT) != 0) {
+			if ((flags & FILTER_SYSEXIT) != 0 || sysexit_necessary) {
 				if (seccomp_after_ptrace_enter) {
 					tracee->restart_how = PTRACE_SYSCALL;
 					translate_syscall(tracee);

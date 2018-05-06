@@ -38,6 +38,7 @@ typedef enum {
 	CURRENT  = 0,
 	ORIGINAL = 1,
 	MODIFIED = 2,
+	ORIGINAL_SECCOMP_REWRITE = 3,
 	NB_REG_VERSION
 } RegVersion;
 
@@ -158,6 +159,7 @@ typedef struct tracee {
 	struct user_regs_struct _regs[NB_REG_VERSION];
 	bool _regs_were_changed;
 	bool restore_original_regs;
+	bool restore_original_regs_after_seccomp_event;
 
 	/* State for the special handling of SIGSTOP.  */
 	enum {
