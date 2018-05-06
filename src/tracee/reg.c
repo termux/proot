@@ -266,11 +266,17 @@ int push_specific_regs(Tracee *tracee, bool including_sysnum)
 {
 	int status;
 
-	if (tracee->_regs_were_changed) {
+	if (tracee->_regs_were_changed
+			|| (tracee->restore_original_regs && tracee->restore_original_regs_after_seccomp_event)) {
 		/* At the very end of a syscall, with regard to the
 		 * entry, only the result register can be modified by
 		 * PRoot.  */
 		if (tracee->restore_original_regs) {
+			RegVersion restore_from = ORIGINAL;
+			if (tracee->restore_original_regs_after_seccomp_event) {
+				restore_from = ORIGINAL_SECCOMP_REWRITE;
+				tracee->restore_original_regs_after_seccomp_event = false;
+			}
 			/* Restore the sysarg register only if it is
 			 * not the same as the result register.  Note:
 			 * it's never the case on x86 architectures,
@@ -278,10 +284,10 @@ int push_specific_regs(Tracee *tracee, bool including_sysnum)
 			 * would introduce useless complexity because
 			 * of the multiple ABI support.  */
 #if defined(ARCH_X86) || defined(ARCH_X86_64)
-#    define		RESTORE(sysarg)	(REG(tracee, CURRENT, sysarg) = REG(tracee, ORIGINAL, sysarg))
+#    define		RESTORE(sysarg)	(REG(tracee, CURRENT, sysarg) = REG(tracee, restore_from, sysarg))
 #else
 #    define	 	RESTORE(sysarg) (void) (reg_offset[SYSARG_RESULT] != reg_offset[sysarg] && \
-				(REG(tracee, CURRENT, sysarg) = REG(tracee, ORIGINAL, sysarg)))
+				(REG(tracee, CURRENT, sysarg) = REG(tracee, restore_from, sysarg)))
 #endif
 
 			RESTORE(SYSARG_NUM);
