@@ -105,6 +105,7 @@ void chain_next_syscall(Tracee *tracee)
 	struct chained_syscall *syscall;
 	word_t instr_pointer;
 	word_t sysnum;
+	word_t systrap_size = SYSTRAP_SIZE;
 
 	assert(tracee->chain.syscalls != NULL);
 
@@ -146,7 +147,13 @@ void chain_next_syscall(Tracee *tracee)
 
 	/* Move the instruction pointer back to the original trap.  */
 	instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
-	poke_reg(tracee, INSTR_POINTER, instr_pointer - SYSTRAP_SIZE);
+#if defined(ARCH_ARM_EABI)
+	/* On ARM thumb mode systrap size is 2 */
+	if (tracee->_regs[CURRENT].ARM_cpsr & PSR_T_BIT) {
+		systrap_size = 2;
+	}
+#endif
+	poke_reg(tracee, INSTR_POINTER, instr_pointer - systrap_size);
 
 	/* Break after exit from syscall, there may be another one in chain */
 	tracee->restart_how = PTRACE_SYSCALL;
