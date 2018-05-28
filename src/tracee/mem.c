@@ -41,6 +41,23 @@
 #include "build.h"           /* HAVE_PROCESS_VM,  */
 #include "cli/note.h"
 
+#include "tracee/reg.h"
+#include "syscall/sysnum.h"
+
+extern const ssize_t offset_to_pokedata_workaround;
+void launcher_pokedata_workaround();
+
+// See loader/assembly.S
+#if defined(__aarch64__)
+__asm(
+	".globl launcher_pokedata_workaround\n"
+	"launcher_pokedata_workaround:\n"
+	"str x1, [x2]\n"
+	// https://stackoverflow.com/a/16087057
+	".word 0xf7f0a000\n"
+);
+#endif /* defined(__aarch64__) */
+
 /**
  * Load the word at the given @address, potentially *not* aligned.
  */
@@ -75,12 +92,71 @@ static inline void store_word(void *address, word_t value)
 #endif
 }
 
+static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
+{
+	int status;
+#if 0
+	status = ptrace(PTRACE_POKEDATA, tracee->pid, addr, word);
+#else
+	status = 0;
+	struct user_regs_struct orig_regs = tracee->_regs[CURRENT];
+	bool restore_original_regs = tracee->restore_original_regs;
+
+	// Set registers so memory will be written
+	word_t pokedata_workaround_stub_addr = tracee->pokedata_workaround_stub_addr;
+	if (!pokedata_workaround_stub_addr) pokedata_workaround_stub_addr = (word_t)&launcher_pokedata_workaround;
+	poke_reg(tracee, INSTR_POINTER, pokedata_workaround_stub_addr);
+	poke_reg(tracee, SYSARG_2, word);
+	poke_reg(tracee, SYSARG_3, addr);
+	set_sysnum(tracee, PR_void);
+	tracee->_regs_were_changed = true;
+	tracee->restore_original_regs = false;
+	push_specific_regs(tracee, true);
+	print_current_regs(tracee, 5, "pokedata workaround" );
+
+	// Continue tracee
+	ptrace(PTRACE_CONT, tracee->pid, 0, 0);
+	int wstatus = 0;
+	waitpid(tracee->pid, &wstatus, 0);
+
+	// Skip SIGSYS if occured
+	if (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSYS)
+	{
+		ptrace(PTRACE_CONT, tracee->pid, 0, 0);
+		waitpid(tracee->pid, &wstatus, 0);
+	}
+
+	// Check status
+	if (tracee->verbose >= 1)
+	{
+		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%x addr=%x word=%x",
+				wstatus, pokedata_workaround_stub_addr, addr, word);
+	}
+	bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
+
+	// Restore tracee state to one before intervention
+	tracee->_regs[CURRENT] = orig_regs;
+	tracee->_regs_were_changed = true;
+	tracee->pokedata_workaround_cancelled_syscall = true;
+	tracee->restore_original_regs = restore_original_regs;
+
+	status = success ? 0 : -1;
+	if (status) errno = -EFAULT;
+#endif
+	return status;
+}
+
+void mem_prepare_after_execve(Tracee *tracee)
+{
+	tracee->pokedata_workaround_stub_addr = peek_reg(tracee, CURRENT, INSTR_POINTER) + offset_to_pokedata_workaround;
+}
+
 /**
  * Copy @size bytes from the buffer @src_tracer to the address
  * @dest_tracee within the memory space of the @tracee process. It
  * returns -errno if an error occured, otherwise 0.
  */
-int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer, word_t size)
+int write_data(Tracee *tracee, word_t dest_tracee, const void *src_tracer, word_t size)
 {
 	word_t *src  = (word_t *)src_tracer;
 	word_t *dest = (word_t *)dest_tracee;
@@ -118,7 +194,7 @@ int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer,
 
 	/* Copy one word by one word, except for the last one. */
 	for (i = 0; i < nb_full_words; i++) {
-		status = ptrace(PTRACE_POKEDATA, tracee->pid, dest + i, load_word(&src[i]));
+		status = ptrace_pokedata_or_via_stub(tracee, (word_t)(dest + i), load_word(&src[i]));
 		if (status < 0) {
 			note(tracee, WARNING, SYSTEM, "ptrace(POKEDATA)");
 			return -EFAULT;
@@ -146,7 +222,7 @@ int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer,
 	for (j = 0; j < nb_trailing_bytes; j++)
 		last_dest_word[j] = last_src_word[j];
 
-	status = ptrace(PTRACE_POKEDATA, tracee->pid, dest + i, word);
+	status = ptrace(PTRACE_POKEDATA, tracee->pid, (word_t)(dest + i), word);
 	if (status < 0) {
 		note(tracee, WARNING, SYSTEM, "ptrace(POKEDATA)");
 		return -EFAULT;
@@ -161,7 +237,7 @@ int write_data(const Tracee *tracee, word_t dest_tracee, const void *src_tracer,
  * process.  This function returns -errno if an error occured,
  * otherwise 0.
  */
-int writev_data(const Tracee *tracee, word_t dest_tracee, const struct iovec *src_tracer, int src_tracer_count)
+int writev_data(Tracee *tracee, word_t dest_tracee, const struct iovec *src_tracer, int src_tracer_count)
 {
 	size_t size;
 	int status;
@@ -542,7 +618,7 @@ word_t alloc_mem(Tracee *tracee, ssize_t size)
  * space.  This function returns -errno if an error occured, otherwise
  * 0.
  */
-int clear_mem(const Tracee *tracee, word_t address, size_t size)
+int clear_mem(Tracee *tracee, word_t address, size_t size)
 {
 	int status;
 	void *zeros;

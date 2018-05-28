@@ -120,6 +120,13 @@ void translate_syscall(Tracee *tracee)
 
 		print_current_regs(tracee, 3, "sysenter start");
 
+		if (tracee->pokedata_workaround_relaunched_syscall) {
+			tracee->pokedata_workaround_relaunched_syscall = false;
+			tracee->status = 1;
+			tracee->restart_how = PTRACE_SYSCALL;
+			return;
+		}
+
 		/* Translate the syscall only if it was actually
 		 * requested by the tracee, it is not a syscall
 		 * chained by PRoot.  */
@@ -149,6 +156,15 @@ void translate_syscall(Tracee *tracee)
 		else
 			tracee->status = 1;
 
+		if (tracee->pokedata_workaround_cancelled_syscall) {
+			tracee->pokedata_workaround_cancelled_syscall = false;
+			tracee->pokedata_workaround_relaunched_syscall = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+			tracee->status = 0;
+			poke_reg(tracee, INSTR_POINTER, peek_reg(tracee, CURRENT, INSTR_POINTER) - SYSTRAP_SIZE);
+			push_specific_regs(tracee, false);
+			return;
+		}
 		/* Restore tracee's stack pointer now if it won't hit
 		 * the sysexit stage (i.e. when seccomp is enabled and
 		 * there's nothing else to do).  */
@@ -162,6 +178,11 @@ void translate_syscall(Tracee *tracee)
 		/* By default, restore original register values at the
 		 * end of this stage.  */
 		tracee->restore_original_regs = true;
+
+		if (tracee->pokedata_workaround_relaunched_syscall)
+		{
+			return;
+		}
 
 		print_current_regs(tracee, 5, "sysexit start");
 
@@ -180,6 +201,7 @@ void translate_syscall(Tracee *tracee)
 
 		/* Reset the tracee's status. */
 		tracee->status = 0;
+		tracee->pokedata_workaround_cancelled_syscall = false;
 
 		/* Insert the next chained syscall, if any.  */
 		if (tracee->chain.syscalls != NULL)
