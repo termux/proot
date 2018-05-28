@@ -215,6 +215,10 @@ typedef struct tracee {
 	 * execve sysexit.  */
 	struct load_info *load_info;
 
+	word_t pokedata_workaround_stub_addr;
+	bool pokedata_workaround_cancelled_syscall;
+	bool pokedata_workaround_relaunched_syscall;
+
 
 	/**********************************************************************
 	 * Private but inherited resources                                    *
