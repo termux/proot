@@ -488,10 +488,17 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			break;
 
 		case PR_unlinkat:
+			/* If this is request to delete directory, don't handle it here.
+			 * directories cannot be hard links.  */
+			if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) != 0)
+			{
+				return 0;
+			}
+
 			/* If path points a file that is a symlink to a file that begins
 			 *   with PREFIX, let the file be deleted, but also delete the
 			 *   symlink that was created and decremnt the count that is tacked
-        		 *   to end of original file.
+			 *   to end of original file.
 			 */
 
 			status = decrement_link_count(tracee, SYSARG_2);
