@@ -222,7 +222,7 @@ int write_data(Tracee *tracee, word_t dest_tracee, const void *src_tracer, word_
 	for (j = 0; j < nb_trailing_bytes; j++)
 		last_dest_word[j] = last_src_word[j];
 
-	status = ptrace(PTRACE_POKEDATA, tracee->pid, (word_t)(dest + i), word);
+	status = ptrace_pokedata_or_via_stub(tracee, (word_t)(dest + i), word);
 	if (status < 0) {
 		note(tracee, WARNING, SYSTEM, "ptrace(POKEDATA)");
 		return -EFAULT;
