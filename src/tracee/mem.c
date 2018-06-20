@@ -101,6 +101,18 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 	status = 0;
 	struct user_regs_struct orig_regs = tracee->_regs[CURRENT];
 	bool restore_original_regs = tracee->restore_original_regs;
+	sigset_t orig_sigset;
+	sigset_t modified_sigset;
+
+	// Block signals
+	ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
+	sigfillset(&modified_sigset);
+	sigdelset(&modified_sigset, SIGILL);
+	sigdelset(&modified_sigset, SIGTRAP);
+	sigdelset(&modified_sigset, SIGBUS);
+	sigdelset(&modified_sigset, SIGSEGV);
+	sigdelset(&modified_sigset, SIGSYS);
+	int sigmask_result = ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &modified_sigset);
 
 	// Set registers so memory will be written
 	word_t pokedata_workaround_stub_addr = tracee->pokedata_workaround_stub_addr;
@@ -129,12 +141,13 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 	// Check status
 	if (tracee->verbose >= 1)
 	{
-		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%x addr=%x word=%x",
-				wstatus, pokedata_workaround_stub_addr, addr, word);
+		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%x addr=%x word=%x sigmask_result=%d",
+				wstatus, pokedata_workaround_stub_addr, addr, word, sigmask_result);
 	}
 	bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
 
 	// Restore tracee state to one before intervention
+	ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
 	tracee->_regs[CURRENT] = orig_regs;
 	tracee->_regs_were_changed = true;
 	tracee->pokedata_workaround_cancelled_syscall = true;
