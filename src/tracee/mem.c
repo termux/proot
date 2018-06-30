@@ -126,22 +126,31 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 	push_specific_regs(tracee, true);
 	print_current_regs(tracee, 5, "pokedata workaround" );
 
-	// Continue tracee
-	ptrace(PTRACE_CONT, tracee->pid, 0, 0);
+	// Continue tracee, retry if SIGSYS or SIGSTOP occurs
 	int wstatus = 0;
-	waitpid(tracee->pid, &wstatus, 0);
-
-	// Skip SIGSYS if occured
-	if (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSYS)
+	bool redeliver_sigstop = false;
+	do
 	{
 		ptrace(PTRACE_CONT, tracee->pid, 0, 0);
 		waitpid(tracee->pid, &wstatus, 0);
+		// For SIGSTOP, we kill tracee after handling POKEDATA
+		if (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSTOP)
+		{
+			redeliver_sigstop = true;
+		}
+		// SIGSYS is silently skipped (In case of seccomp disallowing void syscall)
+	} while (WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == SIGSYS || WSTOPSIG(wstatus) == SIGSTOP));
+
+	// Redeliver SIGSTOP if occured
+	if (redeliver_sigstop)
+	{
+		kill(tracee->pid, SIGSTOP);
 	}
 
 	// Check status
-	if (tracee->verbose >= 1)
+	if (tracee->verbose >= 3)
 	{
-		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%x addr=%x word=%x sigmask_result=%d",
+		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%lx addr=%lx word=%lx sigmask_result=%d",
 				wstatus, pokedata_workaround_stub_addr, addr, word, sigmask_result);
 	}
 	bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
@@ -153,8 +162,17 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 	tracee->pokedata_workaround_cancelled_syscall = true;
 	tracee->restore_original_regs = restore_original_regs;
 
-	status = success ? 0 : -1;
-	if (status) errno = -EFAULT;
+	if (success)
+	{
+		status = 0;
+	}
+	else
+	{
+		// Report failure
+		note(tracee, ERROR, INTERNAL, "POKEDATA workaround stub got signal %d", WSTOPSIG(wstatus));
+		status = -1;
+		errno = EFAULT;
+	}
 #endif
 	return status;
 }
