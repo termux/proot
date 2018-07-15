@@ -381,7 +381,8 @@ static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 	    || sysnum == PR_link
 	    || sysnum == PR_linkat
 	    || sysnum == PR_rename
-	    || sysnum == PR_renameat) {
+	    || sysnum == PR_renameat
+	    || sysnum == PR_renameat2) {
 		return;
 	}
 
@@ -442,6 +443,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			{ PR_stat64,		FILTER_SYSEXIT },
 			{ PR_rename,		FILTER_SYSEXIT },
 			{ PR_renameat,		FILTER_SYSEXIT },
+			{ PR_renameat2,		FILTER_SYSEXIT },
 			FILTERED_SYSNUM_END,
 		};
 		extension->filtered_sysnums = filtered_sysnums;
@@ -464,6 +466,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			break;
 
 		case PR_renameat:
+		case PR_renameat2:
 			/*int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
 			 *If newpath is a psuedo hard link decrement the link count.
 			 */
