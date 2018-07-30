@@ -133,8 +133,8 @@ LINK    = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
 OBJIFY = $($(quiet)GEN)									\
 	$(OBJCOPY)									\
-		--input binary								\
-		--output `env LANG=C $(OBJDUMP) -f cli/cli.o |				\
+		--input-target=binary								\
+		--output-target=`env LANG=C $(OBJDUMP) -f cli/cli.o |				\
 			grep 'file format' | awk '{print $$4}'`				\
 		--binary-architecture `env LANG=C $(OBJDUMP) -f cli/cli.o |		\
 				grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
