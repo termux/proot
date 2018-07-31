@@ -1,6 +1,7 @@
 #include <errno.h>     /* E*, */
 #include <signal.h>    /* SIGSYS, */
 #include <unistd.h>    /* getpgid, */
+#include <utime.h>     /* utimbuf, */
 
 #include "cli/note.h"
 #include "syscall/chain.h"
@@ -187,6 +188,41 @@ int handle_seccomp_event(Tracee* tracee) {
 			timens[0].tv_nsec = (long)times[0].tv_usec * 1000;
 			timens[1].tv_sec = (time_t)times[1].tv_sec;
 			timens[1].tv_nsec = (long)times[1].tv_usec * 1000;
+			ret = set_sysarg_data(tracee, timens, sizeof(timens), SYSARG_2);
+			if (ret < 0) {
+				set_result_after_seccomp(tracee, ret);
+				break;
+			}
+		}
+		poke_reg(tracee, SYSARG_4, 0);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
+	case PR_utime:
+	{
+		/* int utime(const char *filename, const struct utimbuf *times);
+		 *
+		 * convert to:
+		 * int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags);  */
+		struct utimbuf times;
+		struct timespec timens[2];
+
+		prepare_restart_syscall_after_seccomp(tracee);
+		set_sysnum(tracee, PR_utimensat);
+		if (peek_reg(tracee, CURRENT, SYSARG_2) != 0) {
+			ret = read_data(tracee, &times, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(times));
+			if (ret < 0) {
+				set_result_after_seccomp(tracee, ret);
+				break;
+			}
+			timens[0].tv_sec = (time_t)times.actime;
+			timens[0].tv_nsec = 0;
+			timens[1].tv_sec = (time_t)times.modtime;
+			timens[1].tv_nsec = 0;
 			ret = set_sysarg_data(tracee, timens, sizeof(timens), SYSARG_2);
 			if (ret < 0) {
 				set_result_after_seccomp(tracee, ret);
