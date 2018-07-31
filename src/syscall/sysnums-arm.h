@@ -23,6 +23,7 @@ static const Sysnum sysnums_arm[] = {
 	[ 24 ] = PR_getuid,
 	[ 26 ] = PR_ptrace,
 	[ 29 ] = PR_pause,
+	[ 30 ] = PR_utime,
 	[ 33 ] = PR_access,
 	[ 34 ] = PR_nice,
 	[ 36 ] = PR_sync,
