@@ -42,6 +42,15 @@ static void restart_syscall_after_seccomp(Tracee* tracee) {
 #endif
 	poke_reg(tracee, INSTR_POINTER, instr_pointer - systrap_size);
 
+	/* X86 usually uses orig_rax when selecting syscall,
+	 * but as this code is happening outside syscall handler
+	 * we need to copy orig_eax back to eax.  */
+#if defined(ARCH_X86_64)
+	tracee->_regs[CURRENT].rax = tracee->_regs[CURRENT].orig_rax;
+#elif defined(ARCH_X86)
+	tracee->_regs[CURRENT].eax = tracee->_regs[CURRENT].orig_eax;
+#endif
+
 	/* Write registers. (Omiting special sysnum logic as we're not during syscall
 	 * execution, but we're queueing new syscall to be called) */
 	push_specific_regs(tracee, false);
@@ -78,11 +87,31 @@ int handle_seccomp_event(Tracee* tracee) {
 		VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
 		return SIGSYS;
 	}
+
+	/* X86 uses orig_rax when selecting syscall,
+	 * however at this point we are after syscall has been rejected
+	 * and orig_rax was reset to -1.  */
+#if defined(ARCH_X86_64)
+	tracee->_regs[CURRENT].orig_rax = tracee->_regs[CURRENT].rax;
+#elif defined(ARCH_X86)
+	tracee->_regs[CURRENT].orig_eax = tracee->_regs[CURRENT].eax;
+#endif
+
 	print_current_regs(tracee, 3, "seccomp SIGSYS");
 
 	sysnum = get_sysnum(tracee, CURRENT);
 
 	switch (sysnum) {
+	case PR_open:
+		prepare_restart_syscall_after_seccomp(tracee);
+		set_sysnum(tracee, PR_openat);
+		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_3));
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
 	case PR_accept:
 		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_accept4);
