@@ -10,20 +10,13 @@
 #include "tracee/mem.h"
 
 /**
- * Prepare tracee to restart modified syscall after seccomp SIGSYS
- * signal.
+ * Restart syscall that caused seccomp event
+ * after changing it in tracee registers
  *
- * This function prepares registers to restore and must be called
- * before modyfying them.
- *
- * restart_syscall_after_seccomp() has to be called after syscall change.
- * (Unless mid-way you decide to not restart syscall (e.g. because of error))
+ * Syscall that will be restarted will be translated by proot
+ * so SIGSYS handler sees untranslated paths and should leave
+ * them untranslated.
  */
-static void prepare_restart_syscall_after_seccomp(Tracee* tracee) {
-	/* Save regs so they can be restored at end of replaced call.  */
-	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
-}
-
 static void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
 	word_t systrap_size = SYSTRAP_SIZE;
@@ -88,6 +81,9 @@ int handle_seccomp_event(Tracee* tracee) {
 		return SIGSYS;
 	}
 
+	/* Save regs so they can be restored at end of replaced call.  */
+	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
+
 	/* X86 uses orig_rax when selecting syscall,
 	 * however at this point we are after syscall has been rejected
 	 * and orig_rax was reset to -1.  */
@@ -103,7 +99,6 @@ int handle_seccomp_event(Tracee* tracee) {
 
 	switch (sysnum) {
 	case PR_open:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_openat);
 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_3));
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -113,7 +108,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_accept:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_accept4);
 		poke_reg(tracee, SYSARG_4, 0);
 		restart_syscall_after_seccomp(tracee);
@@ -125,7 +119,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_symlink:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_symlinkat);
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
 		poke_reg(tracee, SYSARG_2, AT_FDCWD);
@@ -133,7 +126,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_link:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_linkat);
 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_2));
 		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
@@ -144,7 +136,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_chmod:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_fchmodat);
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
 		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
@@ -157,7 +148,6 @@ int handle_seccomp_event(Tracee* tracee) {
 	case PR_lchown:
 	case PR_chown32:
 	case PR_lchown32:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_fchownat);
 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_3));
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -172,7 +162,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_rmdir:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_unlinkat);
 		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
@@ -181,7 +170,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_send:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_sendto);
 		poke_reg(tracee, SYSARG_5, 0);
 		poke_reg(tracee, SYSARG_6, 0);
@@ -189,7 +177,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		break;
 
 	case PR_recv:
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_recvfrom);
 		poke_reg(tracee, SYSARG_5, 0);
 		poke_reg(tracee, SYSARG_6, 0);
@@ -205,7 +192,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		struct timeval times[2];
 		struct timespec timens[2];
 
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_utimensat);
 		if (peek_reg(tracee, CURRENT, SYSARG_2) != 0) {
 			ret = read_data(tracee, times, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(times));
@@ -240,7 +226,6 @@ int handle_seccomp_event(Tracee* tracee) {
 		struct utimbuf times;
 		struct timespec timens[2];
 
-		prepare_restart_syscall_after_seccomp(tracee);
 		set_sysnum(tracee, PR_utimensat);
 		if (peek_reg(tracee, CURRENT, SYSARG_2) != 0) {
 			ret = read_data(tracee, &times, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(times));
