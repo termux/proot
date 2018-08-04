@@ -31,6 +31,8 @@
 #include <string.h>      /* memcpy(3), */
 #include <stdlib.h>      /* strtol(3), */
 #include <linux/auxvec.h>/* AT_,  */
+#include <sys/socket.h>  /* cmsghdr, */
+#include <linux/net.h>   /* SYS_SENDMSG, */
 
 #include "extension/extension.h"
 #include "syscall/syscall.h"
@@ -230,6 +232,112 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 	return;
 }
 
+static int fix_sendmsg(Tracee *tracee, bool is_socketcall)
+{
+	/* Read sendmsg header.  */
+	int status;
+	word_t socketcall_args[3];
+	//unsigned long socketcall_args[3];
+	struct msghdr msg = {};
+	if (!is_socketcall)
+	{
+		status = read_data(tracee, &msg, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(struct msghdr));
+		if (status < 0) return status;
+	}
+	else
+	{
+		/* Check if socketcall(2) is a sendmsg(2)  */
+		if (peek_reg(tracee, CURRENT, SYSARG_1) != SYS_SENDMSG) return 0;
+
+		/* Read socketcall args structure */
+		status = read_data(tracee, socketcall_args, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(socketcall_args));
+		if (status < 0) return status;
+
+		/* Read sendmsg header */
+		status = read_data(tracee, &msg, socketcall_args[1], sizeof(struct msghdr));
+		if (status < 0) return status;
+	}
+	if (msg.msg_control != NULL && msg.msg_controllen != 0)
+	{
+		bool did_modify = 0;
+
+		/* Read cmsg header.  */
+		char cmsg_buf[msg.msg_controllen];
+		status = read_data(tracee, cmsg_buf, (word_t) msg.msg_control, msg.msg_controllen);
+		if (status < 0) return status;
+
+		/* Parse cmsg header.  */
+		size_t cmsg_left = msg.msg_controllen;
+		status = 0;
+
+		void *cmsg_ptr = cmsg_buf;
+		while (cmsg_left != 0)
+		{
+			if (cmsg_left < sizeof(struct cmsghdr))
+			{
+				/* Malformed cmsg - header didn't fit in entry.  */
+				return 0;
+			}
+			struct cmsghdr *cmsghdr = cmsg_ptr;
+			if (cmsghdr->cmsg_len < sizeof(struct cmsghdr) || cmsghdr->cmsg_len > cmsg_left)
+			{
+				/* Malformed cmsg - data didn't fit in entry.  */
+				return 0;
+			}
+
+			/* Look into cmsg data.  */
+			if (cmsghdr->cmsg_level == SOL_SOCKET && cmsghdr->cmsg_type == SCM_CREDENTIALS)
+			{
+				if (cmsghdr->cmsg_len != CMSG_LEN(sizeof(struct ucred)))
+				{
+					/* Malformed cmsg - struct ucred size mismatch.  */
+					return 0;
+				}
+				struct ucred *ucred = cmsg_ptr + sizeof(struct cmsghdr);
+				/* Set uid and gid of SCM_CREDENTIALS to ones that proot really has.
+				 * Pid is not changed as we don't fiddle with getpid()  */
+				ucred->uid = getuid();
+				ucred->gid = getgid();
+				did_modify = true;
+			}
+
+			/* Advance to next cmsg entry.  */
+			cmsg_ptr += cmsghdr->cmsg_len;
+			cmsg_left -= cmsghdr->cmsg_len;
+		}
+		if (did_modify)
+		{
+			/* Write cmsg data into tracee. */
+			msg.msg_control = (void *) alloc_mem(tracee, msg.msg_controllen);
+			if (msg.msg_control == 0) return -ENOMEM;
+
+			status = write_data(tracee, (word_t) msg.msg_control, cmsg_buf, msg.msg_controllen);
+			if (status < 0) return -ENOMEM;
+
+			/* Write sendmsg header.  */
+			word_t sendmsg_header_addr = alloc_mem(tracee, sizeof(struct msghdr));
+			if (sendmsg_header_addr == 0) return -ENOMEM;
+
+			status = write_data(tracee, sendmsg_header_addr, &msg, sizeof(struct msghdr));
+			if (status < 0) return -ENOMEM;
+
+			/* Write address of new sendmsg header.  */
+			if (!is_socketcall)
+			{
+				poke_reg(tracee, SYSARG_2, sendmsg_header_addr);
+			}
+			else
+			{
+				socketcall_args[1] = sendmsg_header_addr;
+				status = set_sysarg_data(tracee, socketcall_args, sizeof(socketcall_args), SYSARG_2);
+				if (status < 0) return status;
+			}
+		}
+	}
+
+	return 0;
+}
+
 /**
  * Adjust current @tracee's syscall parameters according to @config.
  * This function always returns 0.
@@ -240,6 +348,11 @@ static int handle_sysenter_end(Tracee *tracee, const Config *config)
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
 	switch (sysnum) {
+	case PR_sendmsg:
+		return fix_sendmsg(tracee, false);
+	case PR_socketcall:
+		return fix_sendmsg(tracee, true);
+
 	case PR_setuid:
 	case PR_setuid32:
 	case PR_setgid:
