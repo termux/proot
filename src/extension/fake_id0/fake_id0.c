@@ -103,6 +103,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_newfstatat,	FILTER_SYSEXIT },
 	{ PR_oldlstat,		FILTER_SYSEXIT },
 	{ PR_oldstat,		FILTER_SYSEXIT },
+	{ PR_sendmsg,		0 },
 	{ PR_setfsgid,		FILTER_SYSEXIT },
 	{ PR_setfsgid32,	FILTER_SYSEXIT },
 	{ PR_setfsuid,		FILTER_SYSEXIT },
@@ -236,8 +237,7 @@ static int fix_sendmsg(Tracee *tracee, bool is_socketcall)
 {
 	/* Read sendmsg header.  */
 	int status;
-	word_t socketcall_args[3];
-	//unsigned long socketcall_args[3];
+	unsigned long socketcall_args[3];
 	struct msghdr msg = {};
 	if (!is_socketcall)
 	{
@@ -266,44 +266,37 @@ static int fix_sendmsg(Tracee *tracee, bool is_socketcall)
 		status = read_data(tracee, cmsg_buf, (word_t) msg.msg_control, msg.msg_controllen);
 		if (status < 0) return status;
 
-		/* Parse cmsg header.  */
-		size_t cmsg_left = msg.msg_controllen;
-		status = 0;
+		/* Set msg_control to address of buffer in proot so CMSG_FIRSTHDR can access it */
+		msg.msg_control = cmsg_buf;
 
-		void *cmsg_ptr = cmsg_buf;
-		while (cmsg_left != 0)
+		/* Iterate over control messages.  */
+		struct cmsghdr *cmsg;
+		for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
 		{
-			if (cmsg_left < sizeof(struct cmsghdr))
+			if (!(
+					cmsg->cmsg_len >= sizeof(struct cmsghdr) &&
+					cmsg->cmsg_len <= msg.msg_controllen - ((char*)cmsg - (char*)msg.msg_control)
+				))
 			{
-				/* Malformed cmsg - header didn't fit in entry.  */
-				return 0;
-			}
-			struct cmsghdr *cmsghdr = cmsg_ptr;
-			if (cmsghdr->cmsg_len < sizeof(struct cmsghdr) || cmsghdr->cmsg_len > cmsg_left)
-			{
-				/* Malformed cmsg - data didn't fit in entry.  */
+				/* Malformed cmsg - header or body didn't fit in entry.  */
 				return 0;
 			}
 
 			/* Look into cmsg data.  */
-			if (cmsghdr->cmsg_level == SOL_SOCKET && cmsghdr->cmsg_type == SCM_CREDENTIALS)
+			if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS)
 			{
-				if (cmsghdr->cmsg_len != CMSG_LEN(sizeof(struct ucred)))
+				if (cmsg->cmsg_len != CMSG_LEN(sizeof(struct ucred)))
 				{
 					/* Malformed cmsg - struct ucred size mismatch.  */
 					return 0;
 				}
-				struct ucred *ucred = cmsg_ptr + sizeof(struct cmsghdr);
+				struct ucred *ucred = (struct ucred *) CMSG_DATA(cmsg);
 				/* Set uid and gid of SCM_CREDENTIALS to ones that proot really has.
 				 * Pid is not changed as we don't fiddle with getpid()  */
 				ucred->uid = getuid();
 				ucred->gid = getgid();
 				did_modify = true;
 			}
-
-			/* Advance to next cmsg entry.  */
-			cmsg_ptr += cmsghdr->cmsg_len;
-			cmsg_left -= cmsghdr->cmsg_len;
 		}
 		if (did_modify)
 		{
