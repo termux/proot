@@ -36,6 +36,7 @@
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "tracee/abi.h"
+#include "tracee/seccomp.h"
 #include "path/path.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
@@ -453,6 +454,13 @@ void translate_syscall_exit(Tracee *tracee)
 			break;
 
 		/* Don't overwrite the syscall result.  */
+		goto end;
+	
+	case PR_utime:
+		if (syscall_result == -ENOSYS)
+		{
+			fix_and_restart_enosys_syscall(tracee);
+		}
 		goto end;
 
 	default:

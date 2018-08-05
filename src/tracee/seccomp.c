@@ -9,6 +9,8 @@
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
 
+static int handle_seccomp_event_common(Tracee *tracee);
+
 /**
  * Restart syscall that caused seccomp event
  * after changing it in tracee registers
@@ -62,9 +64,8 @@ static void set_result_after_seccomp(Tracee *tracee, word_t result) {
  *
  * Return 0 to swallow signal or SIGSYS to deliver it to process.
  */
-int handle_seccomp_event(Tracee* tracee) {
-
-	Sysnum sysnum;
+int handle_seccomp_event(Tracee* tracee)
+{
 	int ret;
 
 	/* Reset status so next SIGTRAP | 0x80 is
@@ -95,7 +96,26 @@ int handle_seccomp_event(Tracee* tracee) {
 
 	print_current_regs(tracee, 3, "seccomp SIGSYS");
 
-	sysnum = get_sysnum(tracee, CURRENT);
+	return handle_seccomp_event_common(tracee);
+}
+
+void fix_and_restart_enosys_syscall(Tracee* tracee)
+{
+	/* Reset tracee state so we're not handling syscall exit */
+	tracee->status = 0;
+	tracee->restore_original_regs = false;
+
+	/* Restore and save original registers */
+	memcpy(&tracee->_regs[CURRENT], &tracee->_regs[ORIGINAL], sizeof(tracee->_regs[CURRENT]));
+	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
+
+	handle_seccomp_event_common(tracee);
+}
+
+static int handle_seccomp_event_common(Tracee *tracee)
+{
+	int ret;
+	Sysnum sysnum = get_sysnum(tracee, CURRENT);
 
 	switch (sysnum) {
 	case PR_open:
