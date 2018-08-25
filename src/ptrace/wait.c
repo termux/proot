@@ -326,8 +326,18 @@ bool handle_ptracee_event(Tracee *ptracee, int event)
 			 * but we emulate that syscall),
 			 * don't notify ptracer and let ptracee resume.  */
 			if (signal == 0) {
-				restart_tracee(ptracee, 0);
-				return true;
+				if (seccomp_event_happens_after_enter_sigtrap()) {
+					if (PTRACEE.ignore_syscalls)
+					{
+						restart_tracee(ptracee, 0);
+						return true;
+					}
+					PTRACEE.event4.proot.value = 0;
+					event = (SIGTRAP | 0x80) << 8 | 0x7f;
+				} else {
+					restart_tracee(ptracee, 0);
+					return true;
+				}
 			}
 		} else {
 			/* The computed signal is always 0 since we can come

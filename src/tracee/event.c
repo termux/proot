@@ -49,9 +49,7 @@
 #include "attribute.h"
 #include "compat.h"
 
-#ifndef SYS_SECCOMP
-#define SYS_SECCOMP 1
-#endif
+static bool seccomp_after_ptrace_enter = false;
 
 /**
  * Start @tracee->exe with the given @argv[].  This function
@@ -368,7 +366,6 @@ int event_loop()
 int handle_tracee_event(Tracee *tracee, int tracee_status)
 {
 	static bool seccomp_detected = false;
-	static bool seccomp_after_ptrace_enter = false;
 	static bool seccomp_after_ptrace_enter_checked = false;
 	long status;
 	int signal;
@@ -670,6 +667,16 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 	tracee->as_ptracee.event4.proot.pending = false;
 
 	return signal;
+}
+
+/**
+ * Returns true if on current system SIGTRAP|0x80
+ * for syscall enter is reported before SIGSYS
+ * when syscall is being blocked by seccomp
+ */
+bool seccomp_event_happens_after_enter_sigtrap()
+{
+	return seccomp_after_ptrace_enter;
 }
 
 /**

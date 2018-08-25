@@ -258,5 +258,8 @@
 #    ifndef NT_ARM_SYSTEM_CALL
 #        define NT_ARM_SYSTEM_CALL		0x404
 #    endif
+#    ifndef SYS_SECCOMP
+#        define SYS_SECCOMP 1
+#    endif
 
 #endif /* COMPAT_H */
