@@ -7,6 +7,7 @@
 #include <errno.h>     /* E*, */
 #include <limits.h>    /* PATH_MAX, */
 
+#include "cli/note.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
@@ -51,6 +52,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 	char final[PATH_MAX];
 	char new_final[PATH_MAX];
 	char * name;
+	const char * l2s_directory;
 	struct stat statl;
 	ssize_t size;
 	int status;
@@ -89,17 +91,28 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 			first_link = 0;
 	} else {
 		/* compute new name */
-		if (strlen(PREFIX) + strlen(original) + 5 >= PATH_MAX)
-			return -ENAMETOOLONG;
-
 		name = strrchr(original,'/');
 		if (name == NULL)
 			name = original;
 		else
 			name++;
 
-		strncpy(intermediate, original, strlen(original) - strlen(name));
-		intermediate[strlen(original) - strlen(name)] = '\0';
+		l2s_directory = getenv("PROOT_L2S_DIR");
+		if (l2s_directory != NULL && l2s_directory[0]) {
+			if (strlen(PREFIX) + strlen(l2s_directory) + (strlen(original) - strlen(name)) + 6 >= PATH_MAX)
+				return -ENAMETOOLONG;
+
+			strcpy(intermediate, l2s_directory);
+			if (l2s_directory[strlen(l2s_directory) - 1] != '/') {
+				strcat(intermediate, "/");
+			}
+		} else {
+			if (strlen(PREFIX) + strlen(original) + 5 >= PATH_MAX)
+				return -ENAMETOOLONG;
+
+			strncpy(intermediate, original, strlen(original) - strlen(name));
+			intermediate[strlen(original) - strlen(name)] = '\0';
+		}
 		strcat(intermediate, PREFIX);
 		strcat(intermediate, name);
 	}
@@ -206,9 +219,14 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
 		return 0;
 
+	/* Read intermediate link - if this fails then
+	 * this link2symlink is broken and we silently
+	 * skip as we were removing it anyway.  */
 	size = my_readlink(intermediate, final);
-	if (size < 0)
-		return size;
+	if (size < 0) {
+		VERBOSE(tracee, 1, "Skiping deref of broken link2symlink \"%s\" -> \"%s\"", original, intermediate);
+		return 0;
+	}
 
 	link_count = atoi(final + strlen(final) - 4);
 	link_count--;
