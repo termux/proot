@@ -680,7 +680,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
  */
 bool seccomp_event_happens_after_enter_sigtrap()
 {
-	return seccomp_after_ptrace_enter;
+	return !seccomp_after_ptrace_enter;
 }
 
 /**

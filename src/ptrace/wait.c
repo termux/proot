@@ -332,8 +332,14 @@ bool handle_ptracee_event(Tracee *ptracee, int event)
 						restart_tracee(ptracee, 0);
 						return true;
 					}
+					/* However if we've already notified ptracer about syscall entry
+					 * before knowing it'll be blocked, notify ptracer about exit.  */
 					PTRACEE.event4.proot.value = 0;
-					event = (SIGTRAP | 0x80) << 8 | 0x7f;
+					if (PTRACEE.options & PTRACE_O_TRACESYSGOOD) {
+						event = (SIGTRAP | 0x80) << 8 | 0x7f;
+					} else {
+						event = SIGTRAP << 8 | 0x7f;
+					}
 				} else {
 					restart_tracee(ptracee, 0);
 					return true;
