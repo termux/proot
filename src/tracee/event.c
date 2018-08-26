@@ -37,6 +37,7 @@
 
 #include "tracee/event.h"
 #include "tracee/seccomp.h"
+#include "tracee/mem.h"
 #include "cli/note.h"
 #include "path/path.h"
 #include "path/binding.h"
@@ -60,6 +61,9 @@ int launch_process(Tracee *tracee, char *const argv[])
 	char *const default_argv[] = { "-sh", NULL };
 	long status;
 	pid_t pid;
+
+	/* Set pokedata workaround stub addr if needed. */
+	mem_prepare_before_first_execve(tracee);
 
 	/* Warn about open file descriptors. They won't be
 	 * translated until they are closed. */

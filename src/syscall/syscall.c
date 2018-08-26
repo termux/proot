@@ -120,12 +120,17 @@ void translate_syscall(Tracee *tracee)
 
 		print_current_regs(tracee, 3, "sysenter start");
 
+#ifdef HAS_POKEDATA_WORKAROUND
+		/* In case of pokedata workaround has cancelled real enter
+		 * of syscall we've enqueued start of syscall again
+		 * so we won't translate it here again.  */
 		if (tracee->pokedata_workaround_relaunched_syscall) {
 			tracee->pokedata_workaround_relaunched_syscall = false;
 			tracee->status = 1;
 			tracee->restart_how = PTRACE_SYSCALL;
 			return;
 		}
+#endif
 
 		/* Translate the syscall only if it was actually
 		 * requested by the tracee, it is not a syscall
@@ -156,6 +161,7 @@ void translate_syscall(Tracee *tracee)
 		else
 			tracee->status = 1;
 
+#ifdef HAS_POKEDATA_WORKAROUND
 		if (tracee->pokedata_workaround_cancelled_syscall) {
 			tracee->pokedata_workaround_cancelled_syscall = false;
 			tracee->pokedata_workaround_relaunched_syscall = true;
@@ -165,6 +171,8 @@ void translate_syscall(Tracee *tracee)
 			push_specific_regs(tracee, false);
 			return;
 		}
+#endif
+
 		/* Restore tracee's stack pointer now if it won't hit
 		 * the sysexit stage (i.e. when seccomp is enabled and
 		 * there's nothing else to do).  */
@@ -179,10 +187,14 @@ void translate_syscall(Tracee *tracee)
 		 * end of this stage.  */
 		tracee->restore_original_regs = true;
 
+#ifdef HAS_POKEDATA_WORKAROUND
+		/* This is exit from syscall that was cancelled
+		 * by pokedata workaround - ignore.  */
 		if (tracee->pokedata_workaround_relaunched_syscall)
 		{
 			return;
 		}
+#endif
 
 		print_current_regs(tracee, 5, "sysexit start");
 
@@ -201,7 +213,9 @@ void translate_syscall(Tracee *tracee)
 
 		/* Reset the tracee's status. */
 		tracee->status = 0;
+#ifdef HAS_POKEDATA_WORKAROUND
 		tracee->pokedata_workaround_cancelled_syscall = false;
+#endif
 
 		/* Insert the next chained syscall, if any.  */
 		if (tracee->chain.syscalls != NULL)

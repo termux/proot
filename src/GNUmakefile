@@ -56,17 +56,21 @@ OBJECTS += \
 	extension/kompat/kompat.o \
 	extension/fake_id0/fake_id0.o \
 	extension/link2symlink/link2symlink.o \
-	loader/loader-wrapped.o \
-	loader/loader-info.o
+	loader/loader-wrapped.o
 
 define define_from_arch.h
 $2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(SRC)/arch.h | grep -w $2 | cut -f 3 -d ' ')
 endef
 
 $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
+$(eval $(call define_from_arch.h,,HAS_POKEDATA_WORKAROUND))
 
 ifdef HAS_LOADER_32BIT
   OBJECTS += loader/loader-m32-wrapped.o
+endif
+
+ifdef HAS_POKEDATA_WORKAROUND
+  OBJECTS += loader/loader-info.o
 endif
 
 .DEFAULT_GOAL = proot
@@ -99,8 +103,7 @@ CHECK_VERSION = VERSION=$$($(GIT) describe --tags --dirty --abbrev=8 --always 2>
 		then /bin/echo -e "\#undef VERSION\n\#define VERSION \"$${VERSION}\""; \
 		fi;
 
-#CHECK_FEATURES = process_vm seccomp_filter
-CHECK_FEATURES = seccomp_filter
+CHECK_FEATURES = process_vm seccomp_filter
 CHECK_PROGRAMS = $(foreach feature,$(CHECK_FEATURES),.check_$(feature))
 CHECK_OBJECTS  = $(foreach feature,$(CHECK_FEATURES),.check_$(feature).o)
 CHECK_RESULTS  = $(foreach feature,$(CHECK_FEATURES),.check_$(feature).res)
