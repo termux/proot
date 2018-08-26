@@ -41,6 +41,7 @@ extern void poke_word(const Tracee *tracee, word_t address, word_t value);
 extern word_t alloc_mem(Tracee *tracee, ssize_t size);
 extern int clear_mem(Tracee *tracee, word_t address, size_t size);
 extern void mem_prepare_after_execve(Tracee *tracee);
+extern void mem_prepare_before_first_execve(Tracee *tracee);
 
 /**
  * Copy to @dest_tracer at most PATH_MAX bytes -- including the

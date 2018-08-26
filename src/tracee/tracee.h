@@ -31,7 +31,7 @@
 #include <talloc.h>    /* talloc_*, */
 #include <stdint.h>    /* *int*_t, */
 
-#include "arch.h" /* word_t, user_regs_struct, */
+#include "arch.h" /* word_t, user_regs_struct, HAS_POKEDATA_WORKAROUND */
 #include "compat.h"
 
 typedef enum {
@@ -215,9 +215,11 @@ typedef struct tracee {
 	 * execve sysexit.  */
 	struct load_info *load_info;
 
+#ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;
 	bool pokedata_workaround_cancelled_syscall;
 	bool pokedata_workaround_relaunched_syscall;
+#endif
 
 
 	/**********************************************************************

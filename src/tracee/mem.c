@@ -41,6 +41,8 @@
 #include "build.h"           /* HAVE_PROCESS_VM,  */
 #include "cli/note.h"
 
+#ifdef HAS_POKEDATA_WORKAROUND
+
 #include "tracee/reg.h"
 #include "syscall/sysnum.h"
 
@@ -57,6 +59,7 @@ __asm(
 	".word 0xf7f0a000\n"
 );
 #endif /* defined(__aarch64__) */
+#endif /* HAS_POKEDATA_WORKAROUND */
 
 /**
  * Load the word at the given @address, potentially *not* aligned.
@@ -94,84 +97,96 @@ static inline void store_word(void *address, word_t value)
 
 static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 {
-	int status;
-#if 0
-	status = ptrace(PTRACE_POKEDATA, tracee->pid, addr, word);
-#else
-	status = 0;
-	struct user_regs_struct orig_regs = tracee->_regs[CURRENT];
-	bool restore_original_regs = tracee->restore_original_regs;
-	sigset_t orig_sigset;
-	sigset_t modified_sigset;
-
-	// Block signals
-	ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
-	sigfillset(&modified_sigset);
-	sigdelset(&modified_sigset, SIGILL);
-	sigdelset(&modified_sigset, SIGTRAP);
-	sigdelset(&modified_sigset, SIGBUS);
-	sigdelset(&modified_sigset, SIGSEGV);
-	sigdelset(&modified_sigset, SIGSYS);
-	int sigmask_result = ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &modified_sigset);
-
-	// Set registers so memory will be written
-	word_t pokedata_workaround_stub_addr = tracee->pokedata_workaround_stub_addr;
-	if (!pokedata_workaround_stub_addr) pokedata_workaround_stub_addr = (word_t)&launcher_pokedata_workaround;
-	poke_reg(tracee, INSTR_POINTER, pokedata_workaround_stub_addr);
-	poke_reg(tracee, SYSARG_2, word);
-	poke_reg(tracee, SYSARG_3, addr);
-	set_sysnum(tracee, PR_void);
-	tracee->_regs_were_changed = true;
-	tracee->restore_original_regs = false;
-	push_specific_regs(tracee, true);
-	print_current_regs(tracee, 5, "pokedata workaround" );
-
-	// Continue tracee, retry if SIGSYS or SIGSTOP occurs
-	int wstatus = 0;
-	bool redeliver_sigstop = false;
-	do
+	int status = -1;
+#if HAS_POKEDATA_WORKAROUND
+	static bool pokedata_workaround_needed, pokedata_workaround_checked;
+	if (!pokedata_workaround_needed)
 	{
-		ptrace(PTRACE_CONT, tracee->pid, 0, 0);
-		waitpid(tracee->pid, &wstatus, 0);
-		// For SIGSTOP, we kill tracee after handling POKEDATA
-		if (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSTOP)
-		{
-			redeliver_sigstop = true;
+#endif
+		status = ptrace(PTRACE_POKEDATA, tracee->pid, addr, word);
+#if HAS_POKEDATA_WORKAROUND
+	}
+	if (!pokedata_workaround_checked) {
+		pokedata_workaround_needed = (status != 0);
+		pokedata_workaround_checked = true;
+		if (pokedata_workaround_needed) {
+			VERBOSE(tracee, 1, "Detected broken PTRACE_POKEDATA - enabling workaround");
 		}
-		// SIGSYS is silently skipped (In case of seccomp disallowing void syscall)
-	} while (WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == SIGSYS || WSTOPSIG(wstatus) == SIGSTOP));
-
-	// Redeliver SIGSTOP if occured
-	if (redeliver_sigstop)
-	{
-		kill(tracee->pid, SIGSTOP);
 	}
+	if (pokedata_workaround_needed) {
+		struct user_regs_struct orig_regs = tracee->_regs[CURRENT];
+		bool restore_original_regs = tracee->restore_original_regs;
+		sigset_t orig_sigset;
+		sigset_t modified_sigset;
 
-	// Check status
-	if (tracee->verbose >= 3)
-	{
-		note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%lx addr=%lx word=%lx sigmask_result=%d",
-				wstatus, pokedata_workaround_stub_addr, addr, word, sigmask_result);
-	}
-	bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
+		// Block signals
+		ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
+		sigfillset(&modified_sigset);
+		sigdelset(&modified_sigset, SIGILL);
+		sigdelset(&modified_sigset, SIGTRAP);
+		sigdelset(&modified_sigset, SIGBUS);
+		sigdelset(&modified_sigset, SIGSEGV);
+		sigdelset(&modified_sigset, SIGSYS);
+		int sigmask_result = ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &modified_sigset);
 
-	// Restore tracee state to one before intervention
-	ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
-	tracee->_regs[CURRENT] = orig_regs;
-	tracee->_regs_were_changed = true;
-	tracee->pokedata_workaround_cancelled_syscall = true;
-	tracee->restore_original_regs = restore_original_regs;
+		// Set registers so memory will be written
+		word_t pokedata_workaround_stub_addr = tracee->pokedata_workaround_stub_addr;
+		poke_reg(tracee, INSTR_POINTER, pokedata_workaround_stub_addr);
+		poke_reg(tracee, SYSARG_2, word);
+		poke_reg(tracee, SYSARG_3, addr);
+		set_sysnum(tracee, PR_void);
+		tracee->_regs_were_changed = true;
+		tracee->restore_original_regs = false;
+		push_specific_regs(tracee, true);
+		print_current_regs(tracee, 5, "pokedata workaround" );
 
-	if (success)
-	{
-		status = 0;
-	}
-	else
-	{
-		// Report failure
-		note(tracee, ERROR, INTERNAL, "POKEDATA workaround stub got signal %d", WSTOPSIG(wstatus));
-		status = -1;
-		errno = EFAULT;
+		// Continue tracee, retry if SIGSYS or SIGSTOP occurs
+		int wstatus = 0;
+		bool redeliver_sigstop = false;
+		do
+		{
+			ptrace(PTRACE_CONT, tracee->pid, 0, 0);
+			waitpid(tracee->pid, &wstatus, 0);
+			// For SIGSTOP, we kill tracee after handling POKEDATA
+			if (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSTOP)
+			{
+				redeliver_sigstop = true;
+			}
+			// SIGSYS is silently skipped (In case of seccomp disallowing void syscall)
+		} while (WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == SIGSYS || WSTOPSIG(wstatus) == SIGSTOP));
+
+		// Redeliver SIGSTOP if occured
+		if (redeliver_sigstop)
+		{
+			kill(tracee->pid, SIGSTOP);
+		}
+
+		// Check status
+		if (tracee->verbose >= 3)
+		{
+			note(tracee, INFO, INTERNAL, "pokedata wstatus=%x stub=%lx addr=%lx word=%lx sigmask_result=%d",
+					wstatus, pokedata_workaround_stub_addr, addr, word, sigmask_result);
+		}
+		bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
+
+		// Restore tracee state to one before intervention
+		ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset);
+		tracee->_regs[CURRENT] = orig_regs;
+		tracee->_regs_were_changed = true;
+		tracee->pokedata_workaround_cancelled_syscall = true;
+		tracee->restore_original_regs = restore_original_regs;
+
+		if (success)
+		{
+			status = 0;
+		}
+		else
+		{
+			// Report failure
+			note(tracee, ERROR, INTERNAL, "POKEDATA workaround stub got signal %d", WSTOPSIG(wstatus));
+			status = -1;
+			errno = EFAULT;
+		}
 	}
 #endif
 	return status;
@@ -179,7 +194,16 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 
 void mem_prepare_after_execve(Tracee *tracee)
 {
+#if HAS_POKEDATA_WORKAROUND
 	tracee->pokedata_workaround_stub_addr = peek_reg(tracee, CURRENT, INSTR_POINTER) + offset_to_pokedata_workaround;
+#endif
+}
+
+void mem_prepare_before_first_execve(Tracee *tracee)
+{
+#if HAS_POKEDATA_WORKAROUND
+	tracee->pokedata_workaround_stub_addr = (word_t)&launcher_pokedata_workaround;
+#endif
 }
 
 /**
