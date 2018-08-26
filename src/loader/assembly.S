@@ -60,3 +60,10 @@ syscall_1:
 	ret
 
 #endif /* defined(__i386__) */
+#if defined(__aarch64__)
+.globl pokedata_workaround
+pokedata_workaround:
+str x1, [x2]
+// https://stackoverflow.com/a/16087057
+.word 0xf7f0a000
+#endif /* defined(__aarch64__) */

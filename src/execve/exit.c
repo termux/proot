@@ -475,6 +475,7 @@ void translate_execve_exit(Tracee *tracee)
 	}
 
 	/* Transfer the load script to the loader.  */
+	mem_prepare_after_execve(tracee);
 	status = transfer_load_script(tracee);
 	if (status < 0)
 		note(tracee, ERROR, INTERNAL, "can't transfer load script: %s", strerror(-status));

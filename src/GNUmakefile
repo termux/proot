@@ -63,9 +63,14 @@ $2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(SRC)/arch.h | grep -w $2 | cu
 endef
 
 $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
+$(eval $(call define_from_arch.h,,HAS_POKEDATA_WORKAROUND))
 
 ifdef HAS_LOADER_32BIT
   OBJECTS += loader/loader-m32-wrapped.o
+endif
+
+ifdef HAS_POKEDATA_WORKAROUND
+  OBJECTS += loader/loader-info.o
 endif
 
 .DEFAULT_GOAL = proot
@@ -192,6 +197,9 @@ $(eval $(build_loader))
 ifdef HAS_LOADER_32BIT
 $(eval $(call build_loader,-m32))
 endif
+
+loader/loader-info.c: loader/loader
+	readelf -s $< | awk -f loader/loader-info.awk > $@
 
 ######################################################################
 # Dependencies
