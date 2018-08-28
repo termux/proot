@@ -424,7 +424,70 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 	return;
 }
 
-static int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum);
+/**
+ * Get fake_id0 Config for given pid
+ *
+ * If pid isn't under fake_id0 returns NULL
+ */
+static Config *get_fake_id_for_pid(pid_t pid)
+{
+	Tracee *tracee = get_tracee(NULL, pid, false);
+	if (tracee == NULL)
+		return NULL;
+	Extension *extension = get_extension(tracee, fake_id0_callback);
+	if (extension == NULL)
+		return NULL;
+	return talloc_get_type_abort(extension->config, Config);
+}
+
+/**
+ * Adjust some ELF auxiliary vectors.  This function assumes the
+ * "argv, envp, auxv" stuff is pointed to by @tracee's stack pointer,
+ * as expected right after a successful call to execve(2).
+ */
+static int adjust_elf_auxv(Tracee *tracee, Config *config)
+{
+	ElfAuxVector *vectors;
+	ElfAuxVector *vector;
+	word_t vectors_address;
+
+	vectors_address = get_elf_aux_vectors_address(tracee);
+	if (vectors_address == 0)
+		return 0;
+
+	vectors = fetch_elf_aux_vectors(tracee, vectors_address);
+	if (vectors == NULL)
+		return 0;
+
+	for (vector = vectors; vector->type != AT_NULL; vector++) {
+		switch (vector->type) {
+		case AT_UID:
+			vector->value = config->ruid;
+			break;
+
+		case AT_EUID:
+			vector->value = config->euid;
+			break;
+
+		case AT_GID:
+			vector->value = config->rgid;
+			break;
+
+		case AT_EGID:
+			vector->value = config->egid;
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	push_elf_aux_vectors(tracee, vectors, vectors_address);
+
+	return 0;
+}
+
+static int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 {
 	/* Read sendmsg header.  */
 	int status;
@@ -551,6 +614,7 @@ static int handle_chroot_exit_end(Tracee *tracee, Config *config) {
 	char root_translated_absolute[PATH_MAX];
 	word_t input;
 	int status;
+	word_t result;
 
 	if (config->euid != 0) /* TODO: && !HAS_CAP(SYS_CHROOT) */
 		return 0;
@@ -601,10 +665,30 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 	return 0;
 }
 
+static int handle_socket_exit_end(Tracee *tracee, Config *config) {
+	word_t result;
+
+	/* Override only permission errors.  */
+	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if ((int) result != -EPERM && (int) result != -EACCES)
+		return 0;
+
+	/* Emulate audit functionality not compiled into kernel
+	 * 		 * if tracee was supposed to have the capability.  */
+	if (
+	peek_reg(tracee, ORIGINAL, SYSARG_1) == 16 /* AF_NETLINK */ &&
+	peek_reg(tracee, ORIGINAL, SYSARG_3) == 9 /* NETLINK_AUDIT */ &&
+	config->euid == 0) /* TODO: || HAS_CAP(...) */
+		return -EPROTONOSUPPORT;
+
+	return 0;
+}
+
 static int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
 	word_t address;
 	uid_t uid;
 	gid_t gid;
+	word_t result;
 
 	/* Override only if it succeed.  */
 	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -651,7 +735,7 @@ static int handle_getresgid_exit_end(Tracee *tracee, Config *config) {
 	return 0;
 }
 
-static int handle_chown_enter_end(tracee, config) {
+static int handle_chown_enter_end(Tracee *tracee, Config *config) {
 	Reg uid_sysarg;
 	Reg gid_sysarg;
 	uid_t uid;
@@ -668,22 +752,6 @@ static int handle_chown_enter_end(tracee, config) {
 		poke_reg(tracee, gid_sysarg, getgid());
 
 	return 0;
-}
-
-/**
- * Get fake_id0 Config for given pid
- *
- * If pid isn't under fake_id0 returns NULL
- */
-static Config *get_fake_id_for_pid(pid_t pid)
-{
-	Tracee *tracee = get_tracee(NULL, pid, false);
-	if (tracee == NULL)
-		return NULL;
-	Extension *extension = get_extension(tracee, fake_id0_callback);
-	if (extension == NULL)
-		return NULL;
-	return talloc_get_type_abort(extension->config, Config);
 }
 
 /**
@@ -845,7 +913,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_perm_err_exit_end(tracee, config);
 
 	case PR_socket: 
-		return handle_socket_exit_end(tracee);
+		return handle_socket_exit_end(tracee, config);
 
 	case PR_fstatat64:
 	case PR_newfstatat:
@@ -862,7 +930,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_chroot_exit_end(tracee, config);
 
 	case PR_getsockopt:
-		return handle_getsockopt_exit_end(tracee, config);
+		return handle_getsockopt_exit_end(tracee);
 
 	default:
 		return 0;
@@ -895,53 +963,6 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 		config->egid = 0;
 		config->sgid = 0;
 	}
-
-	return 0;
-}
-
-/**
- * Adjust some ELF auxiliary vectors.  This function assumes the
- * "argv, envp, auxv" stuff is pointed to by @tracee's stack pointer,
- * as expected right after a successful call to execve(2).
- */
-static int adjust_elf_auxv(Tracee *tracee, Config *config)
-{
-	ElfAuxVector *vectors;
-	ElfAuxVector *vector;
-	word_t vectors_address;
-
-	vectors_address = get_elf_aux_vectors_address(tracee);
-	if (vectors_address == 0)
-		return 0;
-
-	vectors = fetch_elf_aux_vectors(tracee, vectors_address);
-	if (vectors == NULL)
-		return 0;
-
-	for (vector = vectors; vector->type != AT_NULL; vector++) {
-		switch (vector->type) {
-		case AT_UID:
-			vector->value = config->ruid;
-			break;
-
-		case AT_EUID:
-			vector->value = config->euid;
-			break;
-
-		case AT_GID:
-			vector->value = config->rgid;
-			break;
-
-		case AT_EGID:
-			vector->value = config->egid;
-			break;
-
-		default:
-			break;
-		}
-	}
-
-	push_elf_aux_vectors(tracee, vectors, vectors_address);
 
 	return 0;
 }
