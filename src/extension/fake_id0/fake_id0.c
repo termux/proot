@@ -735,9 +735,7 @@ static int handle_getresgid_exit_end(Tracee *tracee, Config *config) {
 	return 0;
 }
 
-static int handle_chown_enter_end(Tracee *tracee, Config *config) {
-	Reg uid_sysarg;
-	Reg gid_sysarg;
+static int handle_chown_enter_end(Tracee *tracee, const Config *config, Reg uid_sysarg, Reg gid_sysarg) {
 	uid_t uid;
 	gid_t gid;
 
@@ -799,7 +797,7 @@ static int handle_sysenter_end(Tracee *tracee, const Config *config)
 	case PR_lchown32:
 	case PR_fchown:
 	case PR_fchown32:
-		return handle_chown_enter_end(tracee, config);
+		return handle_chown_enter_end(tracee, config, uid_sysarg, gid_sysarg);
 
 	case PR_setgroups:
 	case PR_setgroups32:
@@ -824,7 +822,6 @@ static int handle_sysenter_end(Tracee *tracee, const Config *config)
 static int handle_sysexit_end(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
-	word_t result;
 	Reg stat_sysarg = SYSARG_2;
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
