@@ -46,6 +46,8 @@
 #include "path/binding.h"
 #include "arch.h"
 
+#include "extension/fake_id0/chown.h"
+
 /**
  * Copy config->@field to the tracee's memory location pointed to by @sysarg.
  */
@@ -235,18 +237,6 @@
 	poke_reg(tracee, SYSARG_RESULT, old_fs ## type ## id);		\
 	return 0;							\
 } while (0)
-
-typedef struct {
-	uid_t ruid;
-	uid_t euid;
-	uid_t suid;
-	uid_t fsuid;
-
-	gid_t rgid;
-	gid_t egid;
-	gid_t sgid;
-	gid_t fsgid;
-} Config;
 
 typedef struct {
 	char *path;
@@ -732,23 +722,6 @@ static int handle_getresgid_exit_end(Tracee *tracee, Config *config) {
 	POKE_MEM_ID(SYSARG_1, rgid);
 	POKE_MEM_ID(SYSARG_2, egid);
 	POKE_MEM_ID(SYSARG_3, sgid);
-	return 0;
-}
-
-static int handle_chown_enter_end(Tracee *tracee, const Config *config, Reg uid_sysarg, Reg gid_sysarg) {
-	uid_t uid;
-	gid_t gid;
-
-	uid = peek_reg(tracee, ORIGINAL, uid_sysarg);
-	gid = peek_reg(tracee, ORIGINAL, gid_sysarg);
-
-	/* Swap actual and emulated ids to get a chance of
-	 * success.  */
-	if (uid == config->ruid)
-		poke_reg(tracee, uid_sysarg, getuid());
-	if (gid == config->rgid)
-		poke_reg(tracee, gid_sysarg, getgid());
-
 	return 0;
 }
 
