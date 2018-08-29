@@ -47,8 +47,10 @@
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
-#include "extension/fake_id0/sendmsg.h"
 #include "extension/fake_id0/chroot.h"
+#include "extension/fake_id0/getsockopt.h"
+#include "extension/fake_id0/sendmsg.h"
+#include "extension/fake_id0/socket.h"
 
 /**
  * Copy config->@field to the tracee's memory location pointed to by @sysarg.
@@ -417,22 +419,6 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 }
 
 /**
- * Get fake_id0 Config for given pid
- *
- * If pid isn't under fake_id0 returns NULL
- */
-static Config *get_fake_id_for_pid(pid_t pid)
-{
-	Tracee *tracee = get_tracee(NULL, pid, false);
-	if (tracee == NULL)
-		return NULL;
-	Extension *extension = get_extension(tracee, fake_id0_callback);
-	if (extension == NULL)
-		return NULL;
-	return talloc_get_type_abort(extension->config, Config);
-}
-
-/**
  * Adjust some ELF auxiliary vectors.  This function assumes the
  * "argv, envp, auxv" stuff is pointed to by @tracee's stack pointer,
  * as expected right after a successful call to execve(2).
@@ -479,25 +465,6 @@ static int adjust_elf_auxv(Tracee *tracee, Config *config)
 	return 0;
 }
 
-static int handle_getsockopt_exit_end(Tracee *tracee) {
-	if (
-	    peek_reg(tracee, ORIGINAL, SYSARG_2) == SOL_SOCKET &&
-	    peek_reg(tracee, ORIGINAL, SYSARG_3) == SO_PEERCRED &&
-	    peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0) {
-
-		struct ucred cred;
-		word_t cred_addr = peek_reg(tracee, ORIGINAL, SYSARG_4);
-		int status = read_data(tracee, &cred, cred_addr, sizeof(struct ucred));
-		if (status) return 0;
-		Config *peer_config = get_fake_id_for_pid(cred.pid);
-		if (peer_config == NULL) return 0;
-		cred.uid = peer_config->euid;
-		cred.gid = peer_config->egid;
-		write_data(tracee, cred_addr, &cred, sizeof(struct ucred));
-	}
-	return 0;
-}
-
 static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 	word_t result;
 
@@ -510,25 +477,6 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 	 * the capability.  */
 	if (config->euid == 0) /* TODO: || HAS_CAP(...) */
 		poke_reg(tracee, SYSARG_RESULT, 0);
-
-	return 0;
-}
-
-static int handle_socket_exit_end(Tracee *tracee, Config *config) {
-	word_t result;
-
-	/* Override only permission errors.  */
-	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-	if ((int) result != -EPERM && (int) result != -EACCES)
-		return 0;
-
-	/* Emulate audit functionality not compiled into kernel
-	 * 		 * if tracee was supposed to have the capability.  */
-	if (
-	peek_reg(tracee, ORIGINAL, SYSARG_1) == 16 /* AF_NETLINK */ &&
-	peek_reg(tracee, ORIGINAL, SYSARG_3) == 9 /* NETLINK_AUDIT */ &&
-	config->euid == 0) /* TODO: || HAS_CAP(...) */
-		return -EPROTONOSUPPORT;
 
 	return 0;
 }
