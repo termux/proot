@@ -56,7 +56,9 @@ OBJECTS += \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
 	extension/fake_id0/chroot.o \
+	extension/fake_id0/getsockopt.o \
 	extension/fake_id0/sendmsg.o \
+	extension/fake_id0/socket.o \
 	extension/fake_id0/fake_id0.o \
 	extension/link2symlink/link2symlink.o \
 	loader/loader-wrapped.o
