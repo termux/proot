@@ -59,6 +59,17 @@ OBJECTS += \
 	extension/fake_id0/getsockopt.o \
 	extension/fake_id0/sendmsg.o \
 	extension/fake_id0/socket.o \
+	extension/fake_id0/open.o \
+	extension/fake_id0/unlink.o \
+	extension/fake_id0/rename.o \
+	extension/fake_id0/chmod.o \
+	extension/fake_id0/utimensat.o \
+	extension/fake_id0/access.o \
+	extension/fake_id0/exec.o \
+	extension/fake_id0/link.o \
+	extension/fake_id0/symlink.o \
+	extension/fake_id0/mk.o \
+        extension/fake_id0/helper_functions.o \
 	extension/fake_id0/fake_id0.o \
 	extension/link2symlink/link2symlink.o \
 	loader/loader-wrapped.o
