@@ -38,6 +38,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/seccomp.h"
+#include "syscall/chain.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/abi.h"
@@ -51,6 +52,7 @@
 #include "extension/fake_id0/getsockopt.h"
 #include "extension/fake_id0/sendmsg.h"
 #include "extension/fake_id0/socket.h"
+#include "extension/fake_id0/stat.h"
 #ifdef USERLAND
 #include "extension/fake_id0/open.h"
 #include "extension/fake_id0/unlink.h"
@@ -62,6 +64,8 @@
 #include "extension/fake_id0/link.h"
 #include "extension/fake_id0/symlink.h"
 #include "extension/fake_id0/mk.h"
+#include "extension/fake_id0/stat.h"
+#include "extension/fake_id0/helper_functions.h"
 #endif
 
 /**
@@ -76,8 +80,8 @@
 /**
  * Emulate setuid(2) and setgid(2).
  */
-#define SETXID(id) do {							\
-	id ## _t id = peek_reg(tracee, ORIGINAL, SYSARG_1);		\
+#define SETXID(id, version) do {					\
+	id ## _t id = peek_reg(tracee, version, SYSARG_1);		\
 	bool allowed;							\
 									\
 	/* "EPERM: The user is not privileged (does not have the	\
@@ -121,9 +125,9 @@
 /**
  * Emulate setreuid(2) and setregid(2).
  */
-#define SETREXID(id) do {						\
-	id ## _t r ## id = peek_reg(tracee, ORIGINAL, SYSARG_1);	\
-	id ## _t e ## id = peek_reg(tracee, ORIGINAL, SYSARG_2);	\
+#define SETREXID(id, version) do {					\
+	id ## _t r ## id = peek_reg(tracee, version, SYSARG_1); 	\
+	id ## _t e ## id = peek_reg(tracee, version, SYSARG_2); 	\
 	bool allowed;							\
 									\
 	/* "Unprivileged processes may only set the effective user ID	\
@@ -188,10 +192,10 @@
 /**
  * Emulate setresuid(2) and setresgid(2).
  */
-#define SETRESXID(type) do {						\
-	type ## id_t r ## type ## id = peek_reg(tracee, ORIGINAL, SYSARG_1);	\
-	type ## id_t e ## type ## id = peek_reg(tracee, ORIGINAL, SYSARG_2);	\
-	type ## id_t s ## type ## id = peek_reg(tracee, ORIGINAL, SYSARG_3);	\
+#define SETRESXID(type,version) do {						\
+	type ## id_t r ## type ## id = peek_reg(tracee, version, SYSARG_1);	\
+	type ## id_t e ## type ## id = peek_reg(tracee, version, SYSARG_2);	\
+	type ## id_t s ## type ## id = peek_reg(tracee, version, SYSARG_3);	\
 	bool allowed;							\
 									\
 	/* "Unprivileged user processes may change the real UID,	\
@@ -498,13 +502,13 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 
 #ifdef USERLAND
-        /** If the call has been set to PR_void, it "succeeded" in
-         *  altering a meta file correctly.
-         */ 
-        if(get_sysnum(tracee, CURRENT) == PR_getuid && (int) result != 0) 
-            poke_reg(tracee, SYSARG_RESULT, 0);
-        if(get_sysnum(tracee, CURRENT) == PR_void && (int) result != 0) 
-            poke_reg(tracee, SYSARG_RESULT, 0);
+	/** If the call has been set to PR_void, it "succeeded" in
+	 *  altering a meta file correctly.
+	 */ 
+	if(get_sysnum(tracee, CURRENT) == PR_getuid && (int) result != 0) 
+		poke_reg(tracee, SYSARG_RESULT, 0);
+	if(get_sysnum(tracee, CURRENT) == PR_void && (int) result != 0) 
+		poke_reg(tracee, SYSARG_RESULT, 0);
 #endif
 
 	if ((int) result != -EPERM && (int) result != -EACCES)
@@ -514,43 +518,6 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 	 * the capability.  */
 	if (config->euid == 0) /* TODO: || HAS_CAP(...) */
 		poke_reg(tracee, SYSARG_RESULT, 0);
-
-	return 0;
-}
-
-static int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
-	word_t address;
-	uid_t uid;
-	gid_t gid;
-	word_t result;
-
-	/* Override only if it succeed.  */
-	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-	if (result != 0)
-		return 0;
-
-	address = peek_reg(tracee, ORIGINAL, stat_sysarg);
-
-	/* Sanity checks.  */
-	assert(__builtin_types_compatible_p(uid_t, uint32_t));
-	assert(__builtin_types_compatible_p(gid_t, uint32_t));
-
-	/* Get the uid & gid values from the 'stat' structure.  */
-	uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-	if (errno != 0)
-		uid = 0; /* Not fatal.  */
-
-	gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-	if (errno != 0)
-		gid = 0; /* Not fatal.  */
-
-	/* Override only if the file is owned by the current user.
-	 * Errors are not fatal here.  */
-	if (uid == getuid())
-		poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-
-	if (gid == getgid())
-		poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
 
 	return 0;
 }
@@ -573,7 +540,7 @@ static int handle_getresgid_exit_end(Tracee *tracee, Config *config) {
  * Adjust current @tracee's syscall parameters according to @config.
  * This function always returns 0.
  */
-static int handle_sysenter_end(Tracee *tracee, const Config *config)
+static int handle_sysenter_end(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
 	Reg uid_sysarg = SYSARG_2;
@@ -770,105 +737,108 @@ static int handle_sysenter_end(Tracee *tracee, const Config *config)
 static int handle_sysexit_end(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
+#ifdef USERLAND
+	word_t result;
+#endif
 	Reg stat_sysarg = SYSARG_2;
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
 
 #ifdef USERLAND
-    if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64)) {
-        word_t address;
-        Reg sysarg;
-        uid_t uid;
-        gid_t gid;
-        
-        /* Override only if it succeed.  */
-        result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-        if (result != 0)
-            return 0;
-        
-        /* Get the address of the 'stat' structure.  */
-        sysarg = SYSARG_2;
-        
-        address = peek_reg(tracee, ORIGINAL, sysarg);
-        
-        /* Sanity checks.  */
-        assert(__builtin_types_compatible_p(uid_t, uint32_t));
-        assert(__builtin_types_compatible_p(gid_t, uint32_t));
-        
-        /* Get the uid & gid values from the 'stat' structure.  */
-        uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-        if (errno != 0)
-            uid = 0; /* Not fatal.  */
-        
-        gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-        if (errno != 0)
-            gid = 0; /* Not fatal.  */
-        
-        /* Override only if the file is owned by the current user.
-        *          * Errors are not fatal here.  */
-        if (uid == getuid())
-            poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-        
-        if (gid == getgid())
-            poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
-        
-        return 0;
-    }
+	if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64)) {
+		word_t address;
+		Reg sysarg;
+		uid_t uid;
+		gid_t gid;
+		
+		/* Override only if it succeed.  */
+		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (result != 0)
+			return 0;
+		
+		/* Get the address of the 'stat' structure.  */
+		sysarg = SYSARG_2;
+		
+		address = peek_reg(tracee, ORIGINAL, sysarg);
+		
+		/* Sanity checks.  */
+		assert(__builtin_types_compatible_p(uid_t, uint32_t));
+		assert(__builtin_types_compatible_p(gid_t, uint32_t));
+		
+		/* Get the uid & gid values from the 'stat' structure.  */
+		uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
+		if (errno != 0)
+			uid = 0; /* Not fatal.  */
+		
+		gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
+		if (errno != 0)
+			gid = 0; /* Not fatal.  */
+		
+		/* Override only if the file is owned by the current user.
+		*		  * Errors are not fatal here.  */
+		if (uid == getuid())
+			poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
+		
+		if (gid == getgid())
+			poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
+		
+		return 0;
+	}
 
-    if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat)) {
-        int status;
-        char path[PATH_MAX];
-        result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-        poke_reg(tracee, SYSARG_RESULT, 0);
-        if ((int)result <= 0)
-            return result;
+	if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat)) {
+		int status;
+		char path[PATH_MAX];
+		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		if ((int)result <= 0)
+			return result;
 
-        status = read_sysarg_path(tracee, path, SYSARG_3, MODIFIED);
-        if(status < 0) 
-            return status;
+		status = read_sysarg_path(tracee, path, SYSARG_3, MODIFIED);
+		if(status < 0) 
+			return status;
 
-        path[result] = '\0';
+		path[result] = '\0';
 
-        if ((strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0) || (strncmp(path, "pipe", 4) == 0)) {
-            register_chained_syscall(tracee, sysnum, peek_reg(tracee, ORIGINAL, SYSARG_1), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
-        } else {
-            write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, sizeof(path));
-#           if defined(__x86_64__)
-                register_chained_syscall(tracee, PR_newfstatat, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
-#           else
-                register_chained_syscall(tracee, PR_fstatat64, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
-#           endif
-        }
+		if ((strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0) || (strncmp(path, "pipe", 4) == 0)) {
+			register_chained_syscall(tracee, sysnum, peek_reg(tracee, ORIGINAL, SYSARG_1), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
+		} else {
+			write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, sizeof(path));
+#		   if defined(__x86_64__)
+				register_chained_syscall(tracee, PR_newfstatat, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
+#		   else
+				register_chained_syscall(tracee, PR_fstatat64, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
+#		   endif
+		}
 
-        return 0;
-    }
+		return 0;
+	}
 #endif 
 
 	switch (sysnum) {
 
 	case PR_setuid:
 	case PR_setuid32:
-		SETXID(uid);
+		SETXID(uid, ORIGINAL);
 
 	case PR_setgid:
 	case PR_setgid32:
-		SETXID(gid);
+		SETXID(gid, ORIGINAL);
 
 	case PR_setreuid:
 	case PR_setreuid32:
-		SETREXID(uid);
+		SETREXID(uid, ORIGINAL);
 
 	case PR_setregid:
 	case PR_setregid32:
-		SETREXID(gid);
+		SETREXID(gid, ORIGINAL);
 
 	case PR_setresuid:
 	case PR_setresuid32:
-		SETRESXID(u);
+		SETRESXID(u, ORIGINAL);
 
 	case PR_setresgid:
 	case PR_setresgid32:
-		SETRESXID(g);
+		SETRESXID(g, ORIGINAL);
 
 	case PR_setfsuid:
 	case PR_setfsuid32:
@@ -957,7 +927,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_stat:
 	case PR_lstat:
 	case PR_fstat: 
-		//CCX USERLAND, this nees some big changes
+		//CCX USERLAND, this needs some big changes
 		return handle_stat_exit_end(tracee, config, stat_sysarg);
 
 	case PR_chroot: 
@@ -970,45 +940,83 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 /** Check to see if a meta was created for a file that no longer exists.
  *  If so, delete it.
  */
-    case PR_open:
-    case PR_openat:
-    case PR_creat: {
-        int status;
-        Reg sysarg;
-        char path[PATH_MAX];
-        char meta_path[PATH_MAX];
+	case PR_open:
+	case PR_openat:
+	case PR_creat: {
+		int status;
+		Reg sysarg;
+		char path[PATH_MAX];
+		char meta_path[PATH_MAX];
 
-        if(sysnum == PR_open || sysnum == PR_creat)
-            sysarg = SYSARG_1;
-        else
-            sysarg = SYSARG_2;
+		if(sysnum == PR_open || sysnum == PR_creat)
+			sysarg = SYSARG_1;
+		else
+			sysarg = SYSARG_2;
 
-        status = read_sysarg_path(tracee, path, sysarg, MODIFIED);
-        if(status < 0) 
-            return status;
-        if(status == 1) 
-            return 0;
+		status = read_sysarg_path(tracee, path, sysarg, MODIFIED);
+		if(status < 0) 
+			return status;
+		if(status == 1) 
+			return 0;
 
-        /* If the file exists, it doesn't matter if a metafile exists. */
-        if(path_exists(path) == 0) 
-            return 0; 
+		/* If the file exists, it doesn't matter if a metafile exists. */
+		if(path_exists(path) == 0) 
+			return 0; 
 
-        status = get_meta_path(path, meta_path);
-        if(status < 0) 
-            return status;
+		status = get_meta_path(path, meta_path);
+		if(status < 0) 
+			return status;
 
-        /* If the metafile exists and the original file does not, delete it. */
-        if(path_exists(meta_path) == 0) 
-            status = unlink(meta_path);
+		/* If the metafile exists and the original file does not, delete it. */
+		if(path_exists(meta_path) == 0) 
+			status = unlink(meta_path);
 
-        return 0;
-    }    
+		return 0;
+	}	
 #endif
 
 	default:
 		return 0;
 	}
 }
+
+#ifdef USERLAND
+static int handle_sigsys(Tracee *tracee, Config *config)
+{
+	word_t sysnum;
+
+	sysnum = get_sysnum(tracee, CURRENT);
+	switch (sysnum) {
+
+	case PR_setuid:
+	case PR_setuid32:
+		SETXID(uid, CURRENT);
+
+	case PR_setgid:
+	case PR_setgid32:
+		SETXID(gid, CURRENT);
+
+	case PR_setreuid:
+	case PR_setreuid32:
+		SETREXID(uid, CURRENT);
+
+	case PR_setregid:
+	case PR_setregid32:
+		SETREXID(gid, CURRENT);
+
+	case PR_setresuid:
+	case PR_setresuid32:
+		SETRESXID(u, CURRENT);
+
+	case PR_setresgid:
+	case PR_setresgid32:
+		SETRESXID(g, CURRENT);
+
+	default:
+		return 0;
+	}
+}
+#endif
 
 static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1083,8 +1091,8 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->egid  = gid;
 		config->sgid  = gid;
 		config->fsgid = gid;
-        	/* Set the umask to the typical linux value. */
-        	config->umask = 022;
+			/* Set the umask to the typical linux value. */
+			config->umask = 022;
 
 		extension->filtered_sysnums = filtered_sysnums;
 		return 0;
@@ -1127,53 +1135,53 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 	}
 
 #ifdef USERLAND
-    /** LINK2SYMLINK is an extension intended to emulate hard links on
-     *  platforms that do not have the capability to create them. In order to
-     *  retain functionality of metafiles, it's necessary to move the metafile
-     *  associated with the file being linked to the end of a symlink chain.
-     */
-    case LINK2SYMLINK_RENAME: {
-        int status;
-        char old_meta[PATH_MAX];
-        char new_meta[PATH_MAX];
-    
-        status = get_meta_path((char *) data1, old_meta);
-        if(status < 0)
-            return status;
+	/** LINK2SYMLINK is an extension intended to emulate hard links on
+	 *  platforms that do not have the capability to create them. In order to
+	 *  retain functionality of metafiles, it's necessary to move the metafile
+	 *  associated with the file being linked to the end of a symlink chain.
+	 */
+	case LINK2SYMLINK_RENAME: {
+		int status;
+		char old_meta[PATH_MAX];
+		char new_meta[PATH_MAX];
+	
+		status = get_meta_path((char *) data1, old_meta);
+		if(status < 0)
+			return status;
 
-        /* If meta doesn't exist, get out. */
-        if(path_exists(old_meta) != 0)
-            return 0; 
+		/* If meta doesn't exist, get out. */
+		if(path_exists(old_meta) != 0)
+			return 0; 
 
-        status = get_meta_path((char *) data2, new_meta);
-        if(status < 0)
-            return status;
+		status = get_meta_path((char *) data2, new_meta);
+		if(status < 0)
+			return status;
 
-        status = rename(old_meta, new_meta);
-        if(status < 0)
-            return status;
+		status = rename(old_meta, new_meta);
+		if(status < 0)
+			return status;
 
-        return 0;
-    }
+		return 0;
+	}
 
-    case LINK2SYMLINK_UNLINK: {
-        int status;
-        char meta_path[PATH_MAX];
+	case LINK2SYMLINK_UNLINK: {
+		int status;
+		char meta_path[PATH_MAX];
 
-        status = get_meta_path((char *) data1, meta_path);
-        if(status < 0)
-            return status;
+		status = get_meta_path((char *) data1, meta_path);
+		if(status < 0)
+			return status;
 
-        /* If metafile doesn't already exist, get out */
-        if(path_exists(meta_path) != 0)
-            return 0;
+		/* If metafile doesn't already exist, get out */
+		if(path_exists(meta_path) != 0)
+			return 0;
 
-        status = unlink(meta_path);
-        if(status < 0) 
-            return status;
+		status = unlink(meta_path);
+		if(status < 0) 
+			return status;
 
-        return 0;
-    }
+		return 0;
+	}
 #endif
 
 	case SYSCALL_ENTER_END: {
@@ -1194,39 +1202,38 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 	}
 
 #ifdef USERLAND
-    case SIGSYS_OCC: {
-        Tracee *tracee = TRACEE(extension);
-        Config *config = talloc_get_type_abort(extension->config, Config);
-        word_t sysnum = get_sysnum(tracee, CURRENT);
-        int status;
+	case SIGSYS_OCC: {
+		Tracee *tracee = TRACEE(extension);
+		Config *config = talloc_get_type_abort(extension->config, Config);
+		word_t sysnum = get_sysnum(tracee, CURRENT);
+		int status;
 
-        switch (sysnum) {
+		switch (sysnum) {
 
-            case PR_setuid:
-            case PR_setuid32:
-            case PR_setgid:
-            case PR_setgid32:
-            case PR_setreuid:
-            case PR_setreuid32:
-            case PR_setregid:
-            case PR_setregid32:
-            case PR_setresuid:
-            case PR_setresuid32:
-            case PR_setresgid:
-            case PR_setresgid32:
+		case PR_setuid:
+		case PR_setuid32:
+		case PR_setgid:
+		case PR_setgid32:
+		case PR_setreuid:
+		case PR_setreuid32:
+		case PR_setregid:
+		case PR_setregid32:
+		case PR_setresuid:
+		case PR_setresuid32:
+		case PR_setresgid:
+		case PR_setresgid32:
+			status = handle_sigsys(tracee, config);
+			if (status < 0)
+				return status;
+			break;
 
-            status = handle_sigsys(tracee, config);
-            if (status < 0)
-                return status;
-            break;
+		default:
+			return 0;
+		}
 
-        default:
-            return 0;
-        }
+		return 1; 
 
-        return 1; 
-
-    }
+	}
 #endif
 
 	case SYSCALL_EXIT_START: {

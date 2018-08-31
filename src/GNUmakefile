@@ -69,6 +69,7 @@ OBJECTS += \
 	extension/fake_id0/link.o \
 	extension/fake_id0/symlink.o \
 	extension/fake_id0/mk.o \
+	extension/fake_id0/stat.o \
         extension/fake_id0/helper_functions.o \
 	extension/fake_id0/fake_id0.o \
 	extension/link2symlink/link2symlink.o \

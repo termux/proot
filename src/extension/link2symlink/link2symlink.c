@@ -130,6 +130,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 		status = rename(original, final);
 		if (status < 0)
 			return status;
+		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
+		if (status < 0)
+			return status;
 
 		/* Symlink the intermediate to the final file.  */
 		status = symlink(final, intermediate);
@@ -153,6 +156,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
 
 		status = rename(final, new_final);
+		if (status < 0)
+			return status;
+		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
 		strcpy(final, new_final);
@@ -239,6 +245,9 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 		status = rename(final, new_final);
 		if (status < 0)
 			return status;
+		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
+		if (status < 0)
+			return status;
 
 		strcpy(final, new_final);
 
@@ -258,7 +267,10 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 		status = unlink(final);
 		if (status < 0)
 			return status;
-	}
+		status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t) final, 0);
+		if (status < 0)
+			return status;
+		}
 
 	return 0;
 }
