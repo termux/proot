@@ -740,7 +740,9 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 #ifdef USERLAND
 	word_t result;
 #endif
+#ifndef USERLAND
 	Reg stat_sysarg = SYSARG_2;
+#endif
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
 
@@ -918,6 +920,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_socket: 
 		return handle_socket_exit_end(tracee, config);
 
+#ifndef USERLAND
 	case PR_fstatat64:
 	case PR_newfstatat:
 		stat_sysarg = SYSARG_3;
@@ -927,8 +930,20 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_stat:
 	case PR_lstat:
 	case PR_fstat: 
-		//CCX USERLAND, this needs some big changes
 		return handle_stat_exit_end(tracee, config, stat_sysarg);
+#endif /* ifndef USERLAND */
+
+#ifdef USERLAND
+	case PR_fstatat64:
+	case PR_newfstatat:
+	case PR_stat64:
+	case PR_lstat64:
+	case PR_fstat64:
+	case PR_stat:
+	case PR_lstat:
+	case PR_fstat: 
+		return handle_stat_exit_end(tracee, config, sysnum);
+#endif /* ifdef USERLAND */
 
 	case PR_chroot: 
 		return handle_chroot_exit_end(tracee, config);
