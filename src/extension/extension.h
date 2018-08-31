@@ -130,6 +130,17 @@ typedef enum {
 	/* Print the usage of the extension: "(bool) data1" is true
 	 * for a detailed usage.  See print_usage() as an example.  */
 	PRINT_USAGE,
+
+	/* A SIGSYS has occurred and we are going to see if any of the extensions wants to handle it for us*/
+	SIGSYS_OCC,
+
+        /* link2symlink notifies other extensions when it is moving
+         * a file */
+        LINK2SYMLINK_RENAME,
+
+        /* link2symlink notifies other extensions when it is unlinking
+         * a file */
+        LINK2SYMLINK_UNLINK,
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)
