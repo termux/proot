@@ -170,12 +170,12 @@ static int remove_temp_directory2(const char *path)
 {
 	int result;
 	int status;
+	char *cwd;
 
 #ifdef __ANDROID__
-	char cwd[PATH_MAX];
+	cwd = malloc(PATH_MAX);
 	getcwd(cwd, PATH_MAX);
 #else
-	char *cwd;
 	cwd = get_current_dir_name();
 #endif
 
@@ -218,9 +218,7 @@ end:
 			result = -1;
 			note(NULL, ERROR, SYSTEM, "can't chdir to '%s'", cwd);
 		}
-#ifndef __ANDROID__
 		free(cwd);
-#endif
 	}
 
 	return result;
