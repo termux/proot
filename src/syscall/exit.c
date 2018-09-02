@@ -457,7 +457,7 @@ void translate_syscall_exit(Tracee *tracee)
 		goto end;
 	
 	case PR_utime:
-		if (syscall_result == -ENOSYS)
+		if ((int) syscall_result == -ENOSYS)
 		{
 			fix_and_restart_enosys_syscall(tracee);
 		}
