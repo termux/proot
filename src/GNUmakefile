@@ -105,7 +105,7 @@ endif
 
 CHECK_VERSION = VERSION=$$($(GIT) describe --tags --dirty --abbrev=8 --always 2>/dev/null); \
 		if [ ! -z "$${VERSION}" ]; \
-		then /bin/echo -e "\#undef VERSION\n\#define VERSION \"$${VERSION}\""; \
+		then printf "\#undef VERSION\n\#define VERSION \"$${VERSION}\"\n"; \
 		fi;
 
 CHECK_FEATURES = process_vm seccomp_filter
