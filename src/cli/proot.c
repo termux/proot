@@ -292,6 +292,24 @@ static int handle_option_link2symlink(Tracee *tracee, const Cli *cli UNUSED, con
 	return 0;
 }
 
+static int handle_option_L(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+        (void) initialize_extension(tracee, fix_symlink_size_callback, NULL);
+        return 0;
+}
+
+static int handle_option_H(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+        (void) initialize_extension(tracee, hidden_files_callback, NULL);
+        return 0;
+}
+
+static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+        (void) initialize_extension(tracee, port_switch_callback, NULL);
+        return 0;
+}
+
 /**
  * Initialize @tracee->qemu.
  */
