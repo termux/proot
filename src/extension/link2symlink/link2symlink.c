@@ -17,7 +17,12 @@
 #include "arch.h"
 #include "attribute.h"
 
+#ifdef USERLAND
+#define PREFIX ".proot.l2s."
+#endif 
+#ifndef USERLAND
 #define PREFIX ".l2s."
+#endif 
 #define DELETED_SUFFIX " (deleted)"
 
 /**
