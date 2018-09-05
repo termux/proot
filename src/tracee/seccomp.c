@@ -343,12 +343,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 
-	case PR_void:
-	{
-		set_result_after_seccomp(tracee, 0);
-		break;
-	}
-
 	case PR_set_robust_list:
 	default:
 		/* Set errno to -ENOSYS */
