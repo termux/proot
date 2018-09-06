@@ -75,8 +75,7 @@ OBJECTS += \
 	extension/hidden_files/hidden_files.o \
 	extension/port_switch/port_switch.o \
 	extension/link2symlink/link2symlink.o \
-	extension/fix_symlink_size/fix_symlink_size.o \
-	loader/loader-wrapped.o
+	extension/fix_symlink_size/fix_symlink_size.o
 
 define define_from_arch.h
 $2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(SRC)/arch.h | grep -w $2 | cut -f 3 -d ' ')
@@ -85,8 +84,15 @@ endef
 $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
 $(eval $(call define_from_arch.h,,HAS_POKEDATA_WORKAROUND))
 
+ifdef PROOT_UNBUNDLE_LOADER
+  CFLAGS += "-DPROOT_UNBUNDLE_LOADER=\"$(PROOT_UNBUNDLE_LOADER)\""
+else
+  OBJECTS += loader/loader-wrapped.o
+proot: | loader/loader
 ifdef HAS_LOADER_32BIT
   OBJECTS += loader/loader-m32-wrapped.o
+proot: | loader/loader-m32
+endif
 endif
 
 ifdef HAS_POKEDATA_WORKAROUND
@@ -242,6 +248,16 @@ clean distclean:
 
 install: proot
 	$($(quiet)INSTALL) -D $< $(DESTDIR)/$<
+ifdef PROOT_UNBUNDLE_LOADER
+	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
+ifdef HAS_LOADER_32BIT
+	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
+endif
+endif
 
 uninstall:
 	-$(RM) -f $(DESTDIR)/proot
+ifdef PROOT_UNBUNDLE_LOADER
+	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
+	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
+endif
