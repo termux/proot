@@ -25,16 +25,12 @@ const char *get_temp_directory()
 	temp_directory = getenv("PROOT_TMP_DIR");
 	if (temp_directory == NULL) {
 		temp_directory = P_tmpdir;
-		return temp_directory;
 	}
 
 	tmp = realpath(temp_directory, NULL);
 	if (tmp == NULL) {
 		note(NULL, WARNING, SYSTEM,
-			"can't canonicalize %s, using %s instead of PROOT_TMP_DIR",
-			temp_directory, P_tmpdir);
-
-		temp_directory = P_tmpdir;
+			"can't canonicalize %s", temp_directory);
 		return temp_directory;
 	}
 
@@ -86,7 +82,7 @@ static int clean_temp_cwd()
 	if (strncmp(prefix, temp_directory, length_temp_directory) != 0) {
 		note(NULL, ERROR, INTERNAL,
 			"trying to remove a directory outside of '%s', "
-			"please report this error.\n", temp_directory);
+			"please report this error.", temp_directory);
 		nb_errors++;
 		goto end;
 	}
@@ -174,12 +170,12 @@ static int remove_temp_directory2(const char *path)
 {
 	int result;
 	int status;
+	char *cwd;
 
 #ifdef __ANDROID__
-	char cwd[PATH_MAX];
+	cwd = malloc(PATH_MAX);
 	getcwd(cwd, PATH_MAX);
 #else
-	char *cwd;
 	cwd = get_current_dir_name();
 #endif
 
@@ -222,9 +218,7 @@ end:
 			result = -1;
 			note(NULL, ERROR, SYSTEM, "can't chdir to '%s'", cwd);
 		}
-#ifndef __ANDROID__
 		free(cwd);
-#endif
 	}
 
 	return result;
