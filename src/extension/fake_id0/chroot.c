@@ -1,5 +1,6 @@
 #include <errno.h>       /* E*, */
 
+#include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "path/path.h"
 #include "path/binding.h"

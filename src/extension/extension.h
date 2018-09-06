@@ -130,6 +130,17 @@ typedef enum {
 	/* Print the usage of the extension: "(bool) data1" is true
 	 * for a detailed usage.  See print_usage() as an example.  */
 	PRINT_USAGE,
+
+	/* A SIGSYS has occurred and we are going to see if any of the extensions wants to handle it for us*/
+	SIGSYS_OCC,
+
+        /* link2symlink notifies other extensions when it is moving
+         * a file */
+        LINK2SYMLINK_RENAME,
+
+        /* link2symlink notifies other extensions when it is unlinking
+         * a file */
+        LINK2SYMLINK_UNLINK,
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)
@@ -184,6 +195,9 @@ static inline int notify_extensions(Tracee *tracee, ExtensionEvent event,
 /* Built-in extensions.  */
 extern int kompat_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int hidden_files_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int link2symlink_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int fix_symlink_size_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 
 #endif /* EXTENSION_H */

@@ -13,6 +13,8 @@ typedef struct {
 	gid_t egid;
 	gid_t sgid;
 	gid_t fsgid;
+
+	mode_t umask;
 } Config;
 
 #endif /* FAKE_ID0_CONFIG_H */
