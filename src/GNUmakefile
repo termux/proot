@@ -86,12 +86,14 @@ $(eval $(call define_from_arch.h,,HAS_POKEDATA_WORKAROUND))
 
 ifdef PROOT_UNBUNDLE_LOADER
   CFLAGS += "-DPROOT_UNBUNDLE_LOADER=\"$(PROOT_UNBUNDLE_LOADER)\""
-else
-  OBJECTS += loader/loader-wrapped.o
 proot: | loader/loader
 ifdef HAS_LOADER_32BIT
-  OBJECTS += loader/loader-m32-wrapped.o
 proot: | loader/loader-m32
+endif
+else
+  OBJECTS += loader/loader-wrapped.o
+ifdef HAS_LOADER_32BIT
+  OBJECTS += loader/loader-m32-wrapped.o
 endif
 endif
 
