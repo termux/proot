@@ -144,9 +144,9 @@ int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const cha
 	if (status < 0)
 		return -ENOENT;
 
-	status = access(host_path, X_OK);
-	if (status < 0)
-		return -EACCES;
+	//status = access(host_path, X_OK);
+	//if (status < 0)
+	//	return -EACCES;
 
 	status = lstat(host_path, &statl);
 	if (status < 0)

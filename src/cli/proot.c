@@ -319,6 +319,9 @@ static int post_initialize_exe(Tracee *tracee, const Cli *cli UNUSED,
 	char path[PATH_MAX];
 	int status;
 
+	/* TODO: Move to extension option  */
+	(void) initialize_extension(tracee, force_exec_callback, NULL);
+
 	/* Nothing else to do ?  */
 	if (tracee->qemu == NULL)
 		return 0;

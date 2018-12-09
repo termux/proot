@@ -72,6 +72,7 @@ OBJECTS += \
 	extension/fake_id0/stat.o \
         extension/fake_id0/helper_functions.o \
 	extension/fake_id0/fake_id0.o \
+	extension/force_exec/force_exec.o \
 	extension/hidden_files/hidden_files.o \
 	extension/port_switch/port_switch.o \
 	extension/link2symlink/link2symlink.o \

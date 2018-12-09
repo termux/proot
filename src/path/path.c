@@ -137,10 +137,10 @@ int which(Tracee *tracee, const char *paths, char host_path[PATH_MAX], const cha
 			return -EACCES;
 		}
 
-		if (is_explicit && (statr.st_mode & S_IXUSR) == 0) {
-			note(tracee, ERROR, USER, "'%s' is not executable", command);
-			return -EACCES;
-		}
+		//if (is_explicit && (statr.st_mode & S_IXUSR) == 0) {
+		//	note(tracee, ERROR, USER, "'%s' is not executable", command);
+		//	return -EACCES;
+		//}
 
 		found = true;
 
