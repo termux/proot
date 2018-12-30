@@ -164,12 +164,14 @@ void translate_syscall(Tracee *tracee)
 #ifdef HAS_POKEDATA_WORKAROUND
 		if (tracee->pokedata_workaround_cancelled_syscall) {
 			tracee->pokedata_workaround_cancelled_syscall = false;
-			tracee->pokedata_workaround_relaunched_syscall = true;
-			tracee->restart_how = PTRACE_SYSCALL;
-			tracee->status = 0;
-			poke_reg(tracee, INSTR_POINTER, peek_reg(tracee, CURRENT, INSTR_POINTER) - SYSTRAP_SIZE);
-			push_specific_regs(tracee, false);
-			return;
+			if (get_sysnum(tracee, CURRENT) != PR_void) {
+				tracee->pokedata_workaround_relaunched_syscall = true;
+				tracee->restart_how = PTRACE_SYSCALL;
+				tracee->status = 0;
+				poke_reg(tracee, INSTR_POINTER, peek_reg(tracee, CURRENT, INSTR_POINTER) - SYSTRAP_SIZE);
+				push_specific_regs(tracee, false);
+				return;
+			}
 		}
 #endif
 
