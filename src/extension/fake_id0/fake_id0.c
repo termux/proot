@@ -995,7 +995,6 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	}
 }
 
-#ifdef USERLAND
 static int handle_sigsys(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
@@ -1031,7 +1030,6 @@ static int handle_sigsys(Tracee *tracee, Config *config)
 		return 0;
 	}
 }
-#endif
 
 static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1216,7 +1214,6 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		return handle_sysexit_end(tracee, config);
 	}
 
-#ifdef USERLAND
 	case SIGSYS_OCC: {
 		Tracee *tracee = TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
@@ -1249,7 +1246,6 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		return 1; 
 
 	}
-#endif
 
 	case SYSCALL_EXIT_START: {
 		Tracee *tracee = TRACEE(extension);
