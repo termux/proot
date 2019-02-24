@@ -328,10 +328,12 @@ static int handle_sysexit_end(Tracee *tracee)
 		if (sysnum == PR_fstat64 || sysnum == PR_fstat) {
 			#ifndef USERLAND
 				status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
+				if (status < 0) {
+					VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
+					return 0; // Don't alter syscall result
+				}
 				if (strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
 					original[strlen(original) - strlen(DELETED_SUFFIX)] = '\0';
-				if (status < 0)
-					return status;
 			#endif
 			#ifdef USERLAND
 				size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
