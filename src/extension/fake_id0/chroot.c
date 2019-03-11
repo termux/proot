@@ -8,6 +8,7 @@
 
 int handle_chroot_exit_end(Tracee *tracee, Config *config) {
 	char path[PATH_MAX];
+	char path_absolute[PATH_MAX];
 	word_t input;
 	int status;
 	word_t result;
@@ -26,8 +27,10 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config) {
 	if (status < 0)
 		return status;
 
+	realpath(path, path_absolute);
+
 	/* Only "new rootfs == current rootfs" is supported yet.  */
-	status = compare_paths(get_root(tracee), path);
+	status = compare_paths(get_root(tracee), path_absolute);
 	if (status != PATHS_ARE_EQUAL)
 		return 0;
 
