@@ -946,7 +946,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 #endif /* ifdef USERLAND */
 
 	case PR_chroot: 
-		return handle_chroot_exit_end(tracee, config);
+		return handle_chroot_exit_end(tracee, config, false);
 
 	case PR_getsockopt:
 		return handle_getsockopt_exit_end(tracee);
@@ -1025,6 +1025,9 @@ static int handle_sigsys(Tracee *tracee, Config *config)
 	case PR_setresgid:
 	case PR_setresgid32:
 		SETRESXID(g, CURRENT);
+
+	case PR_chroot:
+		return handle_chroot_exit_end(tracee, config, true);
 
 	default:
 		return 0;
@@ -1234,6 +1237,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		case PR_setresuid32:
 		case PR_setresgid:
 		case PR_setresgid32:
+		case PR_chroot:
 			status = handle_sigsys(tracee, config);
 			if (status < 0)
 				return status;
