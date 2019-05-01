@@ -26,6 +26,7 @@
 #include <linux/net.h>   /* SYS_*, */
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <limits.h>      /* PATH_MAX, */
+#include <string.h>      /* strcpy */
 
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"

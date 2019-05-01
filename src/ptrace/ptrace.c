@@ -60,10 +60,10 @@
 #endif
 
 static const char *stringify_ptrace(
-#ifdef __ANDROID__
-		int
-#else
+#ifdef __GLIBC__
 		enum __ptrace_request
+#else
+		int
 #endif
 		request)
 {
