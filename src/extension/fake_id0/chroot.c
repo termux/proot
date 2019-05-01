@@ -93,11 +93,27 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 		}
 	}
 
+	/* Change tracee root binding if supported.  */
 	if (!seen_bind_under_new_root) {
-		/* Change tracee root binding.  */
+		/* Save current dir.  */
+		status = translate_path(tracee, path, AT_FDCWD, tracee->fs->cwd, true);
+		if (status < 0)
+			return status;
+
+		/* Replace tracee bindings */
+		talloc_unlink(tracee, tracee->fs);
 		tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 		binding = new_binding(tracee, path_host_absolute, "/", true);
 		initialize_bindings(tracee);
+
+		/* Restore current dir.  */
+		status = detranslate_path(tracee, path, NULL);
+		if (status <= 0) {
+			tracee->fs->cwd = talloc_strdup(tracee->fs, "/");
+		} else {
+			tracee->fs->cwd = talloc_strdup(tracee->fs, path);
+		}
+
 		/* Force success.  */
 		if (from_sigsys) return 1;
 		poke_reg(tracee, SYSARG_RESULT, 0);
