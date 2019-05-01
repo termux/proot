@@ -148,10 +148,10 @@ typedef struct tracee {
 				     && get_sysnum((tracee), ORIGINAL) == sysnum)
 
 	/* How this tracee is restarted.  */
-#ifdef __ANDROID__
-	int
-#else
+#ifdef __GLIBC__
 	enum __ptrace_request
+#else
+	int
 #endif
 		restart_how, last_restart_how;
 
