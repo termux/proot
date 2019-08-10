@@ -4,6 +4,8 @@
 #include <utime.h>     /* utimbuf, */
 #include <sys/vfs.h>   /* statfs64 */
 #include <string.h>    /* memset   */
+#include <linux/net.h> /* SYS_SENDMMSG */
+#include <assert.h>    /* assert(3), */
 
 #include "extension/extension.h"
 #include "cli/note.h"
@@ -227,6 +229,12 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 
+	case PR_waitpid:
+		set_sysnum(tracee, PR_wait4);
+		poke_reg(tracee, SYSARG_4, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
 	case PR_statfs:
 	{
 		int size;
@@ -342,6 +350,30 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
+
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
+	case PR_sendmmsg:
+	{
+		/* Convert direct sendmmsg syscall to socketcall.
+		 * This affects only 32-bit x86, in other archs
+		 * bionic doesn't use socketcall() for sendmmsg.  */
+		size_t arg_size = sizeof_word(tracee);
+		assert(arg_size <= sizeof(word_t));
+		byte_t args[arg_size * 4];
+		memset(args, 0, arg_size * 4);
+		*(word_t*)(args) = peek_reg(tracee, CURRENT, SYSARG_1);
+		*(word_t*)(args + arg_size) = peek_reg(tracee, CURRENT, SYSARG_2);
+		*(word_t*)(args + 2 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_3);
+		*(word_t*)(args + 3 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_4);
+		word_t tracee_args = alloc_mem(tracee, arg_size * 4);
+		write_data(tracee, tracee_args, args, arg_size * 4);
+		set_sysnum(tracee, PR_socketcall);
+		poke_reg(tracee, SYSARG_1, SYS_SENDMMSG);
+		poke_reg(tracee, SYSARG_2, tracee_args);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+#endif
 
 	case PR_set_robust_list:
 	default:
