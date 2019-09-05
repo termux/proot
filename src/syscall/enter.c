@@ -27,6 +27,7 @@
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
+#include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
@@ -565,6 +566,15 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_3, SYMLINK);
+		break;
+
+	case PR_prctl:
+		/* Prevent tracees from setting dumpable flag.
+		 * (Otherwise it could break tracee memory access)  */
+		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_DUMPABLE) {
+			set_sysnum(tracee, PR_void);
+			status = 0;
+		}
 		break;
 	}
 
