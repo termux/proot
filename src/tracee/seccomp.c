@@ -27,7 +27,6 @@ static int handle_seccomp_event_common(Tracee *tracee);
  */
 static void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
-	word_t systrap_size = SYSTRAP_SIZE;
 
 	/* Enable restore regs at end of replaced call.  */
 	tracee->restore_original_regs_after_seccomp_event = true;
@@ -35,13 +34,7 @@ static void restart_syscall_after_seccomp(Tracee* tracee) {
 
 	/* Move the instruction pointer back to the original trap */
 	instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
-#if defined(ARCH_ARM_EABI)
-	/* On ARM thumb mode systrap size is 2 */
-	if (tracee->_regs[CURRENT].ARM_cpsr & PSR_T_BIT) {
-		systrap_size = 2;
-	}
-#endif
-	poke_reg(tracee, INSTR_POINTER, instr_pointer - systrap_size);
+	poke_reg(tracee, INSTR_POINTER, instr_pointer - get_systrap_size(tracee));
 
 	/* X86 usually uses orig_rax when selecting syscall,
 	 * but as this code is happening outside syscall handler
