@@ -453,6 +453,10 @@ void translate_execve_exit(Tracee *tracee)
 		return;
 	}
 
+#ifdef ARCH_ARM64
+	tracee->is_aarch32 = IS_CLASS32(tracee->load_info->elf_header);
+#endif
+
 	syscall_result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 	if ((int) syscall_result < 0)
 		return;

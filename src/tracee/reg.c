@@ -116,6 +116,7 @@
 
     #undef  USER_REGS_OFFSET
     #define USER_REGS_OFFSET(reg_name) offsetof(struct user_regs_struct, reg_name)
+    #define USER_REGS_OFFSET_32(reg_number) ((reg_number) * 4)
 
     static off_t reg_offset[] = {
 	[SYSARG_NUM]    = USER_REGS_OFFSET(regs[8]),
@@ -130,6 +131,26 @@
 	[INSTR_POINTER] = USER_REGS_OFFSET(pc),
 	[USERARG_1]     = USER_REGS_OFFSET(regs[0]),
     };
+
+    static off_t reg_offset_armeabi[] = {
+	[SYSARG_NUM]    = USER_REGS_OFFSET_32(7),
+	[SYSARG_1]      = USER_REGS_OFFSET_32(0),
+	[SYSARG_2]      = USER_REGS_OFFSET_32(1),
+	[SYSARG_3]      = USER_REGS_OFFSET_32(2),
+	[SYSARG_4]      = USER_REGS_OFFSET_32(3),
+	[SYSARG_5]      = USER_REGS_OFFSET_32(4),
+	[SYSARG_6]      = USER_REGS_OFFSET_32(5),
+	[SYSARG_RESULT] = USER_REGS_OFFSET_32(0),
+	[STACK_POINTER] = USER_REGS_OFFSET_32(13),
+	[INSTR_POINTER] = USER_REGS_OFFSET_32(15),
+	[USERARG_1]     = USER_REGS_OFFSET_32(0),
+    };
+
+    #undef  REG
+    #define REG(tracee, version, index)					\
+	(*(word_t*) (tracee->is_aarch32									\
+		? (((uint8_t *) &tracee->_regs[version]) + reg_offset_armeabi[index]) \
+		: (((uint8_t *) &tracee->_regs[version]) + reg_offset[index])))
 
 #elif defined(ARCH_X86)
 
@@ -198,6 +219,11 @@ void poke_reg(Tracee *tracee, Reg reg, word_t value)
 	if (peek_reg(tracee, CURRENT, reg) == value)
 		return;
 
+#ifdef ARCH_ARM64
+	if (is_32on64_mode(tracee)) {
+		*(uint32_t *) &REG(tracee, CURRENT, reg) = value;
+	} else
+#endif
 	REG(tracee, CURRENT, reg) = value;
 	tracee->_regs_were_changed = true;
 }
@@ -353,4 +379,21 @@ int push_specific_regs(Tracee *tracee, bool including_sysnum)
  */
 int push_regs(Tracee *tracee) {
 	return push_specific_regs(tracee, true);
+}
+
+word_t get_systrap_size(Tracee *tracee) {
+#if defined(ARCH_ARM_EABI)
+	/* On ARM thumb mode systrap size is 2 */
+	if (tracee->_regs[CURRENT].ARM_cpsr & PSR_T_BIT) {
+		return 2;
+	}
+#elif defined(ARCH_ARM64)
+	/* Same for AArch32, but we don't have nice macros */
+	if (tracee->is_aarch32 && (((unsigned char *) &tracee->_regs[CURRENT])[0x40] & 0x20) != 0) {
+		return 2;
+	}
+#else
+	(void) tracee;
+#endif
+	return SYSTRAP_SIZE;
 }

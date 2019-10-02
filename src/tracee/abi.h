@@ -34,7 +34,7 @@
 
 typedef enum {
 	ABI_DEFAULT = 0,
-	ABI_2, /* x86_32 on x86_64.  */
+	ABI_2, /* x86_32 on x86_64, ARM EABI on AArch64.  */
 	ABI_3, /* x32 on x86_64.  */
 	NB_MAX_ABIS,
 } Abi;
@@ -80,6 +80,24 @@ static inline bool is_32on64_mode(const Tracee *tracee)
 	default:
 		return false;
 	}
+}
+#elif defined(ARCH_ARM64)
+static inline Abi get_abi(const Tracee *tracee)
+{
+	if (tracee->is_aarch32) {
+		return ABI_2;
+	}
+
+	return ABI_DEFAULT;
+}
+
+/**
+ * Return true if @tracee is a 32-bit process running on a 64-bit
+ * kernel.
+ */
+static inline bool is_32on64_mode(const Tracee *tracee)
+{
+	return tracee->is_aarch32;
 }
 #else
 static inline Abi get_abi(const Tracee *tracee UNUSED)
