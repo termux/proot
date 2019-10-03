@@ -514,7 +514,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					}
 				}
 				else {
+					VERBOSE(tracee, 6, "skipping SIGTRAP for already handled sysenter");
 					assert(!IS_IN_SYSENTER(tracee));
+					assert(!seccomp_after_ptrace_enter);
 					tracee->seccomp_already_handled_enter = false;
 					tracee->restart_how = PTRACE_SYSCALL;
 				}
@@ -600,7 +602,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (tracee->seccomp == DISABLING)
 				tracee->restart_how = PTRACE_SYSCALL;
 
-			if (tracee->restart_how == PTRACE_SYSCALL)
+			if (!seccomp_after_ptrace_enter && tracee->restart_how == PTRACE_SYSCALL)
 				tracee->seccomp_already_handled_enter = true;
 			break;
 		}
