@@ -649,8 +649,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (siginfo.si_code == SYS_SECCOMP) {
 				/* Signal cannot happen when we're inside syscall,
 				 * tracee would have to exit from syscall first.
-				 * Reset status if seccomp triggered sysexit skip.  */
-				tracee->status = 0;
+				 * Execute exit handler now if seccomp triggered sysexit skip.  */
+				if (!IS_IN_SYSENTER(tracee)) {
+					VERBOSE(tracee, 1, "Handling syscall exit from SIGSYS");
+					translate_syscall(tracee);
+				}
 
 				if (tracee->skip_next_seccomp_signal || (seccomp_after_ptrace_enter && siginfo.si_syscall == SYSCALL_AVOIDER)) {
 					VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
