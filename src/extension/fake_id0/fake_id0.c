@@ -1040,7 +1040,7 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	struct stat mode;
 	int status;
 
-	if ((int) result < 0 || sysnum != PR_execve)
+	if ((int) result < 0 || tracee->status < 0 || sysnum != PR_execve)
 		return 0;
 
 	/* This has to be done before PRoot pushes the load
