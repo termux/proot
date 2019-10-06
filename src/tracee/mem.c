@@ -113,7 +113,11 @@ static int ptrace_pokedata_or_via_stub(Tracee *tracee, word_t addr, word_t word)
 			VERBOSE(tracee, 1, "Detected broken PTRACE_POKEDATA - enabling workaround");
 		}
 	}
-	if (pokedata_workaround_needed) {
+	if (pokedata_workaround_needed && tracee->is_aarch32) {
+		note(tracee, ERROR, INTERNAL, "POKEDATA workaround is not supported on AArch32");
+		status = -1;
+		errno = EIO;
+	} else if (pokedata_workaround_needed) {
 		struct user_regs_struct orig_regs = tracee->_regs[CURRENT];
 		bool restore_original_regs = tracee->restore_original_regs;
 		sigset_t orig_sigset;

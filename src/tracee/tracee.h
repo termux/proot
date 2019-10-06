@@ -221,6 +221,10 @@ typedef struct tracee {
 	bool pokedata_workaround_relaunched_syscall;
 #endif
 
+#ifdef ARCH_ARM64
+	bool is_aarch32;
+#endif
+
 
 	/**********************************************************************
 	 * Private but inherited resources                                    *

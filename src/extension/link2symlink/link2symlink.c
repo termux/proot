@@ -298,6 +298,13 @@ static int handle_sysexit_end(Tracee *tracee)
 			return 0;
 	#endif
 
+#ifdef ARCH_ARM64
+		if (tracee->is_aarch32) {
+			VERBOSE(tracee, 1, "Skipping link2symlink stat fixup on AArch32");
+			return 0;
+		}
+#endif
+
 	switch (sysnum) {
 
 	case PR_fstatat64:                 //int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);

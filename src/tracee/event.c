@@ -514,7 +514,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					}
 				}
 				else {
+					VERBOSE(tracee, 6, "skipping SIGTRAP for already handled sysenter");
 					assert(!IS_IN_SYSENTER(tracee));
+					assert(!seccomp_after_ptrace_enter);
 					tracee->seccomp_already_handled_enter = false;
 					tracee->restart_how = PTRACE_SYSCALL;
 				}
@@ -559,6 +561,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (seccomp_after_ptrace_enter && !IS_IN_SYSENTER(tracee))
 			{
 				tracee->restart_how = tracee->last_restart_how;
+				VERBOSE(tracee, 6, "skipping PTRACE_EVENT_SECCOMP for already handled sysenter");
+
+				/* "!IS_IN_SYSENTER(tracee)" in condition above means we have pending sysexit,
+				 * so requesting to not be notified about it makes no sense */
+				assert(tracee->restart_how != PTRACE_CONT);
 				break;
 			}
 
@@ -595,7 +602,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (tracee->seccomp == DISABLING)
 				tracee->restart_how = PTRACE_SYSCALL;
 
-			if (tracee->restart_how == PTRACE_SYSCALL)
+			if (!seccomp_after_ptrace_enter && tracee->restart_how == PTRACE_SYSCALL)
 				tracee->seccomp_already_handled_enter = true;
 			break;
 		}
@@ -640,6 +647,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
+				/* Signal cannot happen when we're inside syscall,
+				 * tracee would have to exit from syscall first.
+				 * Execute exit handler now if seccomp triggered sysexit skip.  */
+				if (!IS_IN_SYSENTER(tracee)) {
+					VERBOSE(tracee, 1, "Handling syscall exit from SIGSYS");
+					translate_syscall(tracee);
+				}
+
 				if (tracee->skip_next_seccomp_signal || (seccomp_after_ptrace_enter && siginfo.si_syscall == SYSCALL_AVOIDER)) {
 					VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
 					tracee->skip_next_seccomp_signal = false;
