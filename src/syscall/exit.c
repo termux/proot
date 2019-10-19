@@ -25,6 +25,7 @@
 #include <linux/net.h>   /* SYS_*, */
 #include <string.h>      /* strlen(3), */
 
+#include "cli/note.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
@@ -462,6 +463,52 @@ void translate_syscall_exit(Tracee *tracee)
 			fix_and_restart_enosys_syscall(tracee);
 		}
 		goto end;
+
+	case PR_statfs:
+	case PR_statfs64: {
+		/* Possibly fake that /dev/shm is living on tmpfs */
+		char devshm_path[PATH_MAX];
+		char statfs_path[PATH_MAX];
+
+		/* Only perform changes to result of successful syscall
+		 * (that is, path was valid, it doesn't have to point
+		 * to mount root) */
+		if (syscall_result != 0) {
+			goto end;
+		}
+
+		if (translate_path(tracee, devshm_path, AT_FDCWD, "/dev/shm", true) < 0) {
+			VERBOSE(tracee, 5, "/dev/shm is not mounted, not changing statfs() result");
+			goto end;
+		}
+
+		if (read_path(tracee, statfs_path, peek_reg(tracee, MODIFIED, SYSARG_1)) < 0) {
+			VERBOSE(tracee, 5, "statfs() exit couldn't read statfs_path");
+			goto end;
+		}
+
+		Comparison comparison = compare_paths(devshm_path, statfs_path);
+		if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) {
+			VERBOSE(tracee, 5, "Updating statfs() result to fake tmpfs /dev/shm");
+			/* Write TMPFS_MAGIC at beginning of statfs structure.
+			 *
+			 * (It's at beginning of structure regardless of syscall variant
+			 * (statfs vs statfs64) and architecture bitness
+			 * (on 64 bit this field is 8 bytes long, but as long as it's
+			 * little endian, it will need only first 4 bytes to be modified,
+			 * as next 4 bytes will always be 0))
+			 * */
+			int write_status = write_data(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2), "\x94\x19\x02\x01", 4);
+			if (write_status < 0) {
+				VERBOSE(tracee, 5, "Updating statfs() result failed");
+			}
+		}
+		else {
+			VERBOSE(tracee, 5, "statfs() not for /dev/shm, not changing result");
+		}
+
+		goto end;
+	}
 
 	default:
 		goto end;
