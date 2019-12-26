@@ -14,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "path/path.h"
+#include "path/f2fs-bug.h"
 #include "arch.h"
 #include "attribute.h"
 
@@ -453,6 +454,9 @@ static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 	    || sysnum == PR_renameat2) {
 		return;
 	}
+
+	if (should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))
+		return;
 
 	status = my_readlink(translated_path, path);
 	if (status < 0)
