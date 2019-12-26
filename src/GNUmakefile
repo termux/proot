@@ -32,6 +32,7 @@ OBJECTS += \
 	path/binding.o		\
 	path/glue.o		\
 	path/canon.o		\
+	path/f2fs-bug.o		\
 	path/path.o		\
 	path/proc.o		\
 	path/temp.o		\
