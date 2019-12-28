@@ -28,6 +28,7 @@
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
+#include <termios.h>     /* TCSETS, TCSANOW */
 
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
@@ -576,6 +577,15 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 		}
 		break;
+
+#ifdef __ANDROID__
+	case PR_ioctl:
+		/* Using literal value because Termux build system patches TCSAFLUSH */
+		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS + 2 /* + TCSAFLUSH */) {
+			poke_reg(tracee, SYSARG_2, TCSETS + TCSANOW);
+		}
+		break;
+#endif
 	}
 
 end:
