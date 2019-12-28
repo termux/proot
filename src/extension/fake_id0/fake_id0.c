@@ -45,6 +45,7 @@
 #include "tracee/mem.h"
 #include "execve/auxv.h"
 #include "path/binding.h"
+#include "path/f2fs-bug.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -375,6 +376,9 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 	int status;
 
 	/* Get the meta-data */
+	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
+		return;
+
 	status = stat(path, &perms);
 	if (status < 0)
 		return;

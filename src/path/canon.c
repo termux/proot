@@ -35,6 +35,7 @@
 #include "path/binding.h"
 #include "path/glue.h"
 #include "path/proc.h"
+#include "path/f2fs-bug.h"
 #include "extension/extension.h"
 
 /**
@@ -152,7 +153,11 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	}
 
 	statl.st_mode = 0;
-	status = lstat(host_path, &statl);
+	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
+		status = -ENOENT;
+	} else {
+		status = lstat(host_path, &statl);
+	}
 
 	/* Build the glue between the hostfs and the guestfs during
 	 * the initialization of a binding.  */
