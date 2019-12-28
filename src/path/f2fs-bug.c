@@ -31,7 +31,7 @@ static bool probe_f2fs_bug(const Tracee *tracee) {
 	strcat(tmp, "/proot_f2fsbug_XXXXXX");
 	if (mkdtemp(tmp) == NULL) {
 		note(tracee, WARNING, SYSTEM, "Unable to create temp directory for f2fs bug probe");
-		goto end_free_base_tmp;
+		goto end;
 	}
 
 	/* Build test file paths */
@@ -75,16 +75,15 @@ static bool probe_f2fs_bug(const Tracee *tracee) {
 		errno = 0;
 		fd = open(file3, O_WRONLY|O_CREAT, 0600);
 		if (fd < 0) {
-			if (errno == -EEXIST) {
+			if (errno == EEXIST) {
 				VERBOSE(tracee, 1, "f2fs bug detected");
 				_exit(1);
 			} else {
 				note(tracee, WARNING, SYSTEM, "f2fs bug probe failed to open third file with different errno than expected (errno=%d)", errno);
 				_exit(2);
 			}
-		} else {
-			close(fd);
 		}
+		close(fd);
 		_exit(0);
 	} else if (pid != -1) {
 		waitpid(pid, &wstatus, 0);
@@ -94,10 +93,14 @@ static bool probe_f2fs_bug(const Tracee *tracee) {
 	}
 
 	/* Set result basing on child exit status */
-	if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 1) {
+	if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0) {
+		VERBOSE(tracee, 6, "f2fs bug not present on device");
+	} else if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 1) {
 		/* Bug detected */
 		VERBOSE(tracee, 1, "enabling f2fs bug workaround");
 		result = true;
+	} else {
+		note(tracee, WARNING, SYSTEM, "got unexpected status from f2fs bug probe process (wstatus=0x%X)", wstatus);
 	}
 
 end_delete_temp_files:
@@ -106,8 +109,7 @@ end_delete_temp_files:
 	unlink(file3);
 end_remove_temp_dir:
 	rmdir(tmp);
-end_free_base_tmp:
-	talloc_free((void *) base_tmp);
+end:
 	return result;
 }
 
