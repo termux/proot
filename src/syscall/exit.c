@@ -498,7 +498,8 @@ void translate_syscall_exit(Tracee *tracee)
 			 * little endian, it will need only first 4 bytes to be modified,
 			 * as next 4 bytes will always be 0))
 			 * */
-			int write_status = write_data(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2), "\x94\x19\x02\x01", 4);
+			word_t stat_addr = peek_reg(tracee, ORIGINAL, syscall_number == PR_statfs64 ? SYSARG_3 : SYSARG_2);
+			int write_status = write_data(tracee, stat_addr, "\x94\x19\x02\x01", 4);
 			if (write_status < 0) {
 				VERBOSE(tracee, 5, "Updating statfs() result failed");
 			}
