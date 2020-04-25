@@ -643,7 +643,7 @@ int translate_execve_enter(Tracee *tracee)
 			return status;
 	}
 
-	TALLOC_FREE(tracee->load_info);
+	talloc_unlink(tracee, tracee->load_info);
 
 	tracee->load_info = talloc_zero(tracee, LoadInfo);
 	if (tracee->load_info == NULL)
