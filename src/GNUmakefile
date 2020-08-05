@@ -262,5 +262,7 @@ uninstall:
 	-$(RM) -f $(DESTDIR)$(BINDIR)/proot
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
+ifdef HAS_LOADER_32BIT
 	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
+endif
 endif
