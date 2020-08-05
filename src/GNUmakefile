@@ -243,14 +243,14 @@ DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m32_OBJECTS:.o=.d) $(CH
 # PHONY targets
 
 PREFIX ?= /usr/local
-DESTDIR = $(PREFIX)/bin
+BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
 	-$(RM) -f $(CHECK_OBJECTS) $(CHECK_PROGRAMS) $(CHECK_RESULTS) $(OBJECTS) $(LOADER_OBJECTS) $(LOADER-m32_OBJECTS) proot loader/loader loader/loader-m32 $(DEPS) build.h licenses
 
 install: proot
-	$($(quiet)INSTALL) -D $< $(DESTDIR)/$<
+	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
 ifdef HAS_LOADER_32BIT
@@ -259,7 +259,7 @@ endif
 endif
 
 uninstall:
-	-$(RM) -f $(DESTDIR)/proot
+	-$(RM) -f $(DESTDIR)$(BINDIR)/proot
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
 	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
