@@ -23,8 +23,23 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 	}
 	else
 	{
+		word_t call = peek_reg(tracee, CURRENT, SYSARG_1);
+
+		/* On i386 opening audit socket is done through socketcall()
+		 * See extension/fake_id0/socket.c
+		 * for non-socketcall handler.  */
+		if (call == SYS_SOCKET) {
+			status = read_data(tracee, socketcall_args, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(socketcall_args));
+			/* Emulate audit functionality not compiled into kernel
+			 * 		 * if tracee was supposed to have the capability.  */
+			if (
+			socketcall_args[0] == 16 /* AF_NETLINK */ &&
+			socketcall_args[2] == 9 /* NETLINK_AUDIT */)
+				return -EPROTONOSUPPORT;
+		}
+
 		/* Check if socketcall(2) is a sendmsg(2)  */
-		if (peek_reg(tracee, CURRENT, SYSARG_1) != SYS_SENDMSG) return 0;
+		if (call != SYS_SENDMSG) return 0;
 
 		/* Read socketcall args structure */
 		status = read_data(tracee, socketcall_args, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(socketcall_args));
