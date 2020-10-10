@@ -141,6 +141,12 @@ typedef enum {
         /* link2symlink notifies other extensions when it is unlinking
          * a file */
         LINK2SYMLINK_UNLINK,
+
+	/* statx() syscall was used by tracee and is being replaced by proot
+	 * data1 argument contains pointer to statx_syscall_state struct
+	 * defined in tracee/statx.h
+	 * */
+	STATX_SYSCALL,
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)

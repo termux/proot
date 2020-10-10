@@ -1262,6 +1262,13 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		return handle_sysexit_start(tracee, config);
 	}
 
+	case STATX_SYSCALL: {
+		Tracee *tracee = TRACEE(extension);
+		Config *config = talloc_get_type_abort(extension->config, Config);
+
+		return fake_id0_handle_statx_syscall(tracee, config, data1);
+	}
+
 	default:
 		return 0;
 	}

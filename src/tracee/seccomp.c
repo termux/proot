@@ -14,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 
 static int handle_seccomp_event_common(Tracee *tracee);
@@ -55,6 +56,7 @@ static void restart_syscall_after_seccomp(Tracee* tracee) {
  * Set specified result (negative for errno) and do not restart syscall.
  */
 static void set_result_after_seccomp(Tracee *tracee, word_t result) {
+	VERBOSE(tracee, 3, "Setting result after SIGSYS to 0x%lx", result);
 	poke_reg(tracee, SYSARG_RESULT, result);
 	push_specific_regs(tracee, false);
 }
@@ -493,6 +495,12 @@ static int handle_seccomp_event_common(Tracee *tracee)
 			poke_word(tracee, addr, t);
 		}
 		set_result_after_seccomp(tracee, errno ? -EFAULT : t);
+		break;
+	}
+
+	case PR_statx:
+	{
+		set_result_after_seccomp(tracee, handle_statx_syscall(tracee));
 		break;
 	}
 
