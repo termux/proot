@@ -50,6 +50,7 @@ OBJECTS += \
 	tracee/reg.o		\
 	tracee/event.o		\
 	tracee/seccomp.o        \
+	tracee/statx.o		\
 	ptrace/ptrace.o		\
 	ptrace/user.o		\
 	ptrace/wait.o		\
