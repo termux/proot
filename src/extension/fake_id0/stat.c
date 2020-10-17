@@ -164,11 +164,13 @@ int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t stat
 	if (state->statx_buf.stx_mask & STATX_UID) {
 		if (state->statx_buf.stx_uid == getuid()) {
 			state->statx_buf.stx_uid = config->suid;
+			state->updated_stats = true;
 		}
 	}
 	if (state->statx_buf.stx_mask & STATX_GID) {
 		if (state->statx_buf.stx_gid == getuid()) {
 			state->statx_buf.stx_gid = config->sgid;
+			state->updated_stats = true;
 		}
 	}
 	return 0;
