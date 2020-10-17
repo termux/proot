@@ -16,21 +16,18 @@ struct statx_syscall_state {
 
 	/* This is statx structure that will be returned
 	 * Extensions can fill additional data in it
+	 *
+	 * After changing data there set updated_stats to true
 	 */
 	struct statx statx_buf;
 
-	/* Mask parameter passed to statx(),
-	 * selects fields which should be filled
+	/* Flag indicating that statx_buf was changed
+	 * and needs to be copied back to tracee
 	 */
-	word_t mask;
-
-	/* True if AT_SYMLINK_NOFOLLOW flag was used
-	 * requesting lstat()-like behavior of not following symlink
-	 */
-	bool do_lstat;
+	bool updated_stats;
 };
 
-int handle_statx_syscall(Tracee *tracee);
+int handle_statx_syscall(Tracee *tracee, bool from_sigsys);
 
 
 #endif // STATX_H

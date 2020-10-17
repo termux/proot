@@ -500,7 +500,7 @@ static int handle_seccomp_event_common(Tracee *tracee)
 
 	case PR_statx:
 	{
-		set_result_after_seccomp(tracee, handle_statx_syscall(tracee));
+		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
 		break;
 	}
 

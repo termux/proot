@@ -38,6 +38,7 @@
 #include "tracee/mem.h"
 #include "tracee/abi.h"
 #include "tracee/seccomp.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
@@ -510,6 +511,10 @@ void translate_syscall_exit(Tracee *tracee)
 
 		goto end;
 	}
+
+	case PR_statx:
+		status = handle_statx_syscall(tracee, false);
+		break;
 
 	default:
 		goto end;
