@@ -45,7 +45,6 @@
 
 #include "compat.h"
 
-typedef LIST_HEAD(tracees, tracee) Tracees;
 static Tracees tracees;
 
 
@@ -634,4 +633,8 @@ void kill_all_tracees()
 
 	LIST_FOREACH(tracee, &tracees, link)
 		kill(tracee->pid, SIGKILL);
+}
+
+Tracees *get_tracees_list_head() {
+	return &tracees;
 }
