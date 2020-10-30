@@ -44,6 +44,8 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
+#include <extension/extension.h>
+#include <extension/sysvipc/sysvipc.h>
 
 #include "build.h"
 
@@ -476,6 +478,7 @@ int main(int argc, char *const argv[])
 		goto error;
 
 	/* Start the first tracee.  */
+	initialize_extension(tracee, sysvipc_callback, NULL);
 	status = launch_process(tracee, &argv[status]);
 	if (status < 0) {
 		print_execve_help(tracee, tracee->exe, status);
