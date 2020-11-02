@@ -229,10 +229,10 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 		if ((shmflg & IPC_CREAT) && (shmflg & IPC_EXCL)) {
 			return -EEXIST;
 		}
+		shm = &shms[shm_index];
 		if (shm_size && shm_size != shm->stats.shm_segsz) {
 			return -EINVAL;
 		}
-		shm = &shms[shm_index];
 	}
 	return IPC_OBJECT_ID(shm_index, shm);
 }
