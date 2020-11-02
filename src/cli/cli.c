@@ -457,6 +457,10 @@ int main(int argc, char *const argv[])
 	talloc_set_log_stderr();
 #endif
 
+	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
+		sysvipc_shm_helper_main();
+	}
+
 	/* Pre-create the first tracee (pid == 0).  */
 	tracee = get_tracee(NULL, 0, true);
 	if (tracee == NULL)

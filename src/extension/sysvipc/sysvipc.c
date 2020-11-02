@@ -1,10 +1,12 @@
 #include "extension/sysvipc/sysvipc.h"
 #include "tracee/seccomp.h"
+#include "syscall/chain.h"
 
 #include <assert.h> /* assert */
 #include <unistd.h> /* syscall */
 #include <sys/syscall.h> /* __NR_tkill */
 #include <errno.h> /* E* */
+#include <sched.h> /* CLONE_THREAD */
 
 
 #include "sysvipc_internal.h"
@@ -19,6 +21,10 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_semop,		0 },
 	{ PR_semtimedop,	0 },
 	{ PR_semctl,		0 },
+	{ PR_shmget,		0 },
+	{ PR_shmat,		0 },
+	{ PR_shmdt,		0 },
+	{ PR_shmctl,		0 },
 	FILTERED_SYSNUM_END,
 };
 
@@ -55,11 +61,40 @@ static int sysvipc_syscall_common(Tracee *tracee, struct SysVIpcConfig *config, 
 	case PR_semctl:
 		status = sysvipc_semctl(tracee, config);
 		break;
+	case PR_shmget:
+		status = sysvipc_shmget(tracee, config);
+		break;
+	case PR_shmat:
+		status = sysvipc_shmat(tracee, config);
+		break;
+	case PR_shmdt:
+		status = sysvipc_shmdt(tracee, config);
+		break;
+	case PR_shmctl:
+		status = sysvipc_shmctl(tracee, config);
+		break;
 	default:
 		return 0;
 	}
 
-	if (config->wait_reason != WR_NOT_WAITING) {
+	if (config->chain_state != CSTATE_NOT_CHAINED) {
+		/* Check if chain_state is one of initial ones
+		 * (others not go through SYSCALL_ENTER_START).  */
+		assert(
+				config->chain_state == CSTATE_SINGLE ||
+				config->chain_state == CSTATE_SHMAT_SOCKET
+		);
+		if (config->chain_state == CSTATE_SINGLE) {
+			config->chain_state = CSTATE_NOT_CHAINED;
+		}
+		tracee->restart_how = PTRACE_SYSCALL;
+		if (from_sigsys) {
+			restart_syscall_after_seccomp(tracee);
+			return 2;
+		} else {
+			return 1;
+		}
+	} else if (config->wait_reason != WR_NOT_WAITING) {
 		poke_reg(tracee, SYSARG_1, 0);
 		poke_reg(tracee, SYSARG_2, 0);
 		poke_reg(tracee, SYSARG_3, timeout);
@@ -98,8 +133,11 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 	switch (event) {
 	case INITIALIZATION:
 	{
+		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = talloc_zero(extension, struct SysVIpcConfig);
 		config->ipc_namespace = talloc_zero(config, struct SysVIpcNamespace);
+		config->process = talloc_zero(config, struct SysVIpcProcess);
+		config->process->pgid = tracee->pid;
 		extension->config = config;
 		extension->filtered_sysnums = filtered_sysnums;
 		return 0;
@@ -114,6 +152,14 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		struct SysVIpcConfig *child_config = talloc_zero(extension, struct SysVIpcConfig);
 		if (child_config == NULL)
 			return -1;
+
+		if (data1 & CLONE_THREAD) {
+			child_config->process = talloc_reference(child_config, parent_config->process);
+		} else {
+			Tracee *tracee = TRACEE(extension);
+			child_config->process = talloc_zero(child_config, struct SysVIpcProcess);
+			child_config->process->pgid = tracee->pid;
+		}
 
 		child_config->ipc_namespace = talloc_reference(child_config, parent_config->ipc_namespace);
 		extension->config = child_config;
@@ -154,6 +200,10 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 	{
 		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
+		if (config->chain_state != CSTATE_NOT_CHAINED) {
+			assert(config->chain_state == CSTATE_SHMAT_SOCKET);
+			return sysvipc_shmat_chain(tracee, config);
+		}
 		switch (config->wait_state) {
 		case WSTATE_NOT_WAITING:
 			return 0;
@@ -182,6 +232,16 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		default:
 			assert(!"Bad wait_state on SYSCALL_EXIT_START");
 		}
+	}
+
+	case SYSCALL_CHAINED_EXIT:
+	{
+		Tracee *tracee = TRACEE(extension);
+		struct SysVIpcConfig *config = extension->config;
+		if (config->chain_state >= CSTATE_SHMAT_SOCKET && config->chain_state <= CSTATE_SHMAT_MMAP) {
+			sysvipc_shmat_chain(tracee, config);
+		}
+		return 0;
 	}
 
 	default:
