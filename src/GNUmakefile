@@ -79,6 +79,7 @@ OBJECTS += \
 	extension/sysvipc/sysvipc.o \
 	extension/sysvipc/sysvipc_msg.o \
 	extension/sysvipc/sysvipc_sem.o \
+	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
 	extension/fix_symlink_size/fix_symlink_size.o
 

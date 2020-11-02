@@ -43,18 +43,37 @@ struct SysVIpcSemaphore {
 	int semzcnt;
 };
 
+/*****************
+ * Shared Memory *
+ ****************/
+struct SysVIpcSharedMem {
+	int32_t key;
+	int16_t generation;
+	bool valid;
+	int fd;
+	struct SysVIpcShmidDs stats;
+};
+struct SysVIpcSharedMemMap {
+	word_t addr;
+	size_t size;
+	LIST_ENTRY(SysVIpcSharedMemMap) link;
+};
+LIST_HEAD(SysVIpcSharedMemMaps, SysVIpcSharedMemMap);
+
 struct SysVIpcNamespace {
 	/** Array of Message Queues
 	 * Since arrays are 0-indexed and queues are 1-indexed,
 	 * queues with id is at queues[id-1] */
 	struct SysVIpcMsgQueue *queues;
 	struct SysVIpcSemaphore *semaphores;
+	struct SysVIpcSharedMem *shms;
 };
 
 enum SysVIpcWaitReason {
 	WR_NOT_WAITING,
 	WR_WAIT_QUEUE_RECV,
 	WR_WAIT_SEMOP,
+	WR_WAIT_SHMAT_HELPER_BUSY,
 };
 
 enum SysVIpcWaitState {
@@ -66,11 +85,28 @@ enum SysVIpcWaitState {
 	WSTATE_ENTERED_GETPID,
 };
 
-/** Per-tracee structure with state of this extension */
+enum SysVIpcChainState {
+	CSTATE_NOT_CHAINED,
+	CSTATE_SINGLE,
+	CSTATE_SHMAT_SOCKET,
+	CSTATE_SHMAT_CONNECT,
+	CSTATE_SHMAT_RECVMSG,
+	CSTATE_SHMAT_MMAP,
+};
+
+/** Per-process (thread group) structure with state of this extension */
+struct SysVIpcProcess {
+	int pgid;
+	struct SysVIpcSharedMemMaps mapped_shms;
+};
+
+/** Per-tracee (thread) structure with state of this extension */
 struct SysVIpcConfig {
 	struct SysVIpcNamespace *ipc_namespace;
+	struct SysVIpcProcess *process;
 	enum SysVIpcWaitReason wait_reason;
 	enum SysVIpcWaitState wait_state;
+	enum SysVIpcChainState chain_state;
 	word_t status_after_wait;
 
 	size_t waiting_object_index;
@@ -83,6 +119,10 @@ struct SysVIpcConfig {
 	size_t semop_nsops;
 	struct SysVIpcSembuf *semop_sops;
 	char semop_wait_type;
+
+	word_t shmat_guest_buf;
+	int shmat_socket_fd;
+	int shmat_mem_fd;
 };
 
 /**
@@ -105,6 +145,9 @@ struct SysVIpcConfig {
 	} \
 }
 
+#define IPC_OBJECT_ID(index, object) \
+	((index + 1) | (object->generation << 12))
+
 /**
  * Iterate over all Tracees in given SysVIpc namespace
  *
@@ -119,6 +162,12 @@ struct SysVIpcConfig {
 		(out_config)->ipc_namespace == (checked_namespace) \
 	)
 
+#define SYSVIPC_FOREACH_TRACEE_ANY_NAMESPACE(out_tracee, out_config) \
+	LIST_FOREACH((out_tracee), get_tracees_list_head(), link) \
+	if ( \
+		((out_config) = sysvipc_get_config(out_tracee)) != NULL \
+	)
+
 void sysvipc_wake_tracee(Tracee *tracee, struct SysVIpcConfig *config, int status);
 struct SysVIpcConfig *sysvipc_get_config(Tracee *tracee);
 
@@ -131,6 +180,12 @@ int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config);
 void sysvipc_semop_timedout(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config);
+
+int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config);
+int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config);
+int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config);
+int sysvipc_shmdt(Tracee *tracee, struct SysVIpcConfig *config);
+int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config);
 
 #endif // SYSVIPC_INTERNAL_H
 
