@@ -51,6 +51,8 @@ int sysvipc_msgget(Tracee *tracee, struct SysVIpcConfig *config)
 		queue->valid = true;
 		queue->items = talloc(config->ipc_namespace->queues, struct SysVIpcMsgQueueItems);
 		STAILQ_INIT(queue->items);
+		memset(&queue->stats, 0, sizeof(queue->stats));
+		queue->stats.msg_qbytes = 1024 * 64; // Not enforced limit
 	} else {
 		if ((msgflg & IPC_CREAT) && (msgflg & IPC_EXCL)) {
 			return -EEXIST;
@@ -60,12 +62,18 @@ int sysvipc_msgget(Tracee *tracee, struct SysVIpcConfig *config)
 	return (queue_index + 1) | (queue->generation << 12);
 }
 
-static bool sysvipc_msg_match(int sender_type, int receiver_filter)
+static bool sysvipc_msg_match(int sender_type, int receiver_filter, int receiver_flag)
 {
-	return
+	bool matched =
 		receiver_filter == 0 ||
 		sender_type == receiver_filter ||
 		(receiver_filter < 0 && sender_type <= -receiver_filter);
+
+	if (receiver_flag & MSG_EXCEPT) {
+		matched = !matched;
+	}
+
+	return matched;
 }
 
 static int sysvipc_msg_deliver(Tracee *recipent_tracee, struct SysVIpcConfig *recipent_config, struct SysVIpcMsgQueue *queue, struct SysVIpcMsgQueueItem *msg, time_t delivery_time)
@@ -140,7 +148,8 @@ int sysvipc_msgsnd(Tracee *tracee, struct SysVIpcConfig *config) {
 				receiver_config->waiting_object_index == queue_index &&
 				sysvipc_msg_match(
 					item->mtype,
-					receiver_config->msgrcv_msgtyp
+					receiver_config->msgrcv_msgtyp,
+					receiver_config->msgrcv_msgflg
 				)
 		) {
 			int status = sysvipc_msg_deliver(receiver_tracee, receiver_config, queue, item, current_time);
@@ -159,6 +168,8 @@ int sysvipc_msgsnd(Tracee *tracee, struct SysVIpcConfig *config) {
 	}
 
 	STAILQ_INSERT_TAIL(queue->items, item, link);
+	queue->stats.msg_qnum += 1;
+	queue->stats.msg_cbytes += item->mtext_length;
 
 	return 0;
 }
@@ -168,21 +179,46 @@ int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
 	struct SysVIpcMsgQueue *queue;
 	LOOKUP_IPC_OBJECT(queue_index, queue, config->ipc_namespace->queues)
 
-	if ((int) peek_reg(tracee, CURRENT, SYSARG_3) < 0) { // msgsz < 0
-		return -EINVAL;
-	}
-
 	config->msgrcv_msgp = peek_reg(tracee, CURRENT, SYSARG_2);
 	config->msgrcv_msgsz = peek_reg(tracee, CURRENT, SYSARG_3);
 	config->msgrcv_msgtyp = peek_reg(tracee, CURRENT, SYSARG_4);
 	config->msgrcv_msgflg = peek_reg(tracee, CURRENT, SYSARG_5);
 
+	if ((int) config->msgrcv_msgsz < 0) {
+		return -EINVAL;
+	}
+
+	if ((config->msgrcv_msgflg & ~(IPC_NOWAIT | MSG_NOERROR | MSG_COPY | MSG_EXCEPT)) != 0) {
+		return -EINVAL;
+	}
+
+	bool copy = (config->msgrcv_msgflg & MSG_COPY) != 0;
+	if (copy) {
+		if ((config->msgrcv_msgflg & IPC_NOWAIT) == 0) {
+			return -EINVAL;
+		}
+		if ((config->msgrcv_msgflg & MSG_EXCEPT) != 0) {
+			return -EINVAL;
+		}
+	}
+
 	struct SysVIpcMsgQueueItem *found_item = NULL;
 	struct SysVIpcMsgQueueItem *candidate_item;
-	STAILQ_FOREACH(candidate_item, queue->items, link) {
-		if (sysvipc_msg_match(candidate_item->mtype, config->msgrcv_msgtyp)) {
-			found_item = candidate_item;
-			break;
+	if (copy) {
+		int index = 0;
+		STAILQ_FOREACH(candidate_item, queue->items, link) {
+			if (index == config->msgrcv_msgtyp) {
+				found_item = candidate_item;
+				break;
+			}
+			index += 1;
+		}
+	} else {
+		STAILQ_FOREACH(candidate_item, queue->items, link) {
+			if (sysvipc_msg_match(candidate_item->mtype, config->msgrcv_msgtyp, config->msgrcv_msgflg)) {
+				found_item = candidate_item;
+				break;
+			}
 		}
 	}
 
@@ -201,7 +237,9 @@ int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
 
 	int status = sysvipc_msg_deliver(tracee, config, queue, found_item, current_time);
 
-	if (status >= 0) {
+	if (status >= 0 && !copy) {
+		queue->stats.msg_qnum -= 1;
+		queue->stats.msg_cbytes -= found_item->mtext_length;
 		STAILQ_REMOVE(queue->items, found_item, SysVIpcMsgQueueItem, link);
 		talloc_free(found_item);
 	}
@@ -219,6 +257,7 @@ int sysvipc_msgctl(Tracee *tracee, struct SysVIpcConfig *config) {
 	
 	switch (cmd) {
 	case IPC_RMID:
+	case IPC_RMID | SYSVIPC_IPC_64:
 	{
 		Tracee *waiting_tracee;
 		struct SysVIpcConfig *waiting_config;
@@ -237,6 +276,7 @@ int sysvipc_msgctl(Tracee *tracee, struct SysVIpcConfig *config) {
 		return 0;
 	}
 	case IPC_STAT:
+	case IPC_STAT | SYSVIPC_IPC_64:
 	{
 		int status = write_data(tracee, buf, &queue->stats, sizeof(struct msqid_ds));
 		if (status < 0) return status;
