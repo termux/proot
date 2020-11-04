@@ -508,6 +508,20 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 
+	case PR_ftruncate:
+	{
+		if (detranslate_sysnum(get_abi(tracee), PR_ftruncate64) == SYSCALL_AVOIDER) {
+			set_result_after_seccomp(tracee, -ENOSYS);
+			break;
+		}
+		set_sysnum(tracee, PR_ftruncate64);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, 0);
+		poke_reg(tracee, SYSARG_4, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
 	case PR_set_robust_list:
 	default:
 		/* Set errno to -ENOSYS */
