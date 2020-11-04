@@ -223,7 +223,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			if ((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == -EFAULT) {
 				return 1;
 			}
-			return -EAGAIN;
+			return -EINTR;
 		case WSTATE_SIGNALED_PPOLL:
 		case WSTATE_ENTERED_GETPID:
 			config->wait_state = WSTATE_NOT_WAITING;

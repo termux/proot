@@ -86,4 +86,10 @@ struct SysVIpcShmidDs
 	uint64_t __glibc_reserved6;
 };
 
+/* Flag for *ctl `cmd` argument to force use
+ * of 64-bit structures regardless of architecture
+ *
+ * Matches glibc's __IPC_64  */
+#define SYSVIPC_IPC_64      0x100
+
 #endif // SYSVIPC_SYS_H
