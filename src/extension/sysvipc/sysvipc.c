@@ -129,7 +129,6 @@ static int sysvipc_syscall_common(Tracee *tracee, struct SysVIpcConfig *config, 
  */
 int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1, intptr_t data2)
 {
-	(void) data2;
 	switch (event) {
 	case INITIALIZATION:
 	{
@@ -153,7 +152,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		if (child_config == NULL)
 			return -1;
 
-		if (data1 & CLONE_THREAD) {
+		if (data2 & CLONE_THREAD) {
 			child_config->process = talloc_reference(child_config, parent_config->process);
 		} else {
 			Tracee *tracee = TRACEE(extension);
