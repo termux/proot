@@ -104,9 +104,43 @@ struct SysVIpcProcess {
 struct SysVIpcConfig {
 	struct SysVIpcNamespace *ipc_namespace;
 	struct SysVIpcProcess *process;
+
+	/* Reason why this tracee should wait
+	 *
+	 * When syscall handler requests tracee to wait
+	 * (for example because semaphore is blocked)
+	 * it sets wait_reason to one of WR_WAIT_*
+	 * values
+	 *
+	 * When tracee has to resume, use sysvipc_wake_tracee
+	 * Only sysvipc_wake_tracee function should set
+	 * this to WR_NOT_WAITING value  */
 	enum SysVIpcWaitReason wait_reason;
+
+	/* Internal state of tracee wait mechanism
+	 *
+	 * This should only be accessed from
+	 * wait mechanism implementation in sysvipc.c,
+	 * not syscall handlers in sysvipc_[msg|sem|shm].c  */
 	enum SysVIpcWaitState wait_state;
+
+	/* State of syscall chaining inside this extension
+	 *
+	 * This is used for shmat as it needs to perform
+	 * sequence of operations that rely on results
+	 * from previous chained syscalls
+	 *
+	 * When this is set to non-CSTATE_NOT_CHAINED value,
+	 * sysvipc_syscall_common won't cancel syscall set
+	 * by handler  */
 	enum SysVIpcChainState chain_state;
+
+	/* Result of syscall that will be reported
+	 * after waiting
+	 *
+	 * This should be accessed by mechanisms in sysvipc.c
+	 * Handlers shouldn't access this, instead they should
+	 * return result directly or pass it to sysvipc_wake_tracee  */
 	word_t status_after_wait;
 
 	size_t waiting_object_index;
