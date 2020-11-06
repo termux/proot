@@ -39,8 +39,6 @@ struct SysVIpcSemaphore {
 	bool valid;
 	uint16_t *sems;
 	int nsems;
-	int semncnt;
-	int semzcnt;
 };
 
 /*****************
@@ -150,9 +148,7 @@ struct SysVIpcConfig {
 	int msgrcv_msgtyp;
 	int msgrcv_msgflg;
 
-	size_t semop_nsops;
 	struct SysVIpcSembuf *semop_sops;
-	char semop_wait_type;
 
 	word_t shmat_guest_buf;
 	int shmat_socket_fd;

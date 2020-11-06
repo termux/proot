@@ -10,6 +10,7 @@
 #define SYSVIPC_MAX_SEMS 512
 #define SYSVIPC_MAX_NSEMS 512
 #define SYSVIPC_MAX_NSOPS 512
+#define SYSVIPC_MAX_SEMVAL 0x7000
 
 int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config) {
 	word_t semaphore_id = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -70,21 +71,24 @@ int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config) {
 	return (semaphore_index + 1) | (semaphore->generation << 12);
 }
 
-int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemaphore *semaphore) {
+/**
+ * Check/execute semops of given tracee
+ *
+ * Returns 1 if tracee should still wait, otherwise
+ * returns result semop syscall shall return
+ *
+ * If out_wait_type is non-NULL when semaphore waits
+ * 'n' or 'z' is written to indicate this semaphore
+ * is counted for GETNCNT/GETZCNT.
+ */
+static int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemaphore *semaphore, char *out_wait_type) {
 	assert(config->wait_reason == WR_WAIT_SEMOP);
 
-	if (config->semop_wait_type == 'n') {
-		semaphore->semncnt--;
-		config->semop_wait_type = 0;
-	} else if (config->semop_wait_type == 'z') {
-		semaphore->semzcnt--;
-		config->semop_wait_type = 0;
-	}
-
+	size_t nsops = talloc_array_length(config->semop_sops);
 	uint16_t new_sems[semaphore->nsems];
 	memcpy(new_sems, semaphore->sems, semaphore->nsems * sizeof(uint16_t));
 
-	for (size_t i = 0; i < config->semop_nsops; i++) {
+	for (size_t i = 0; i < nsops; i++) {
 		int op = config->semop_sops[i].sem_op;
 		size_t sem_num = config->semop_sops[i].sem_num;
 		if (op == 0) {
@@ -92,8 +96,7 @@ int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemaphore *sem
 				if (config->semop_sops[i].sem_flg & IPC_NOWAIT) {
 					return -EAGAIN;
 				}
-				semaphore->semzcnt++;
-				config->semop_wait_type = 'z';
+				if (out_wait_type != NULL) *out_wait_type = 'z';
 				return 1;
 			}
 		} else {
@@ -102,11 +105,10 @@ int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemaphore *sem
 				if (config->semop_sops[i].sem_flg & IPC_NOWAIT) {
 					return -EAGAIN;
 				}
-				semaphore->semncnt++;
-				config->semop_wait_type = 'n';
+				if (out_wait_type != NULL) *out_wait_type = 'n';
 				return 1;
 			}
-			if (new_value > 0xFFFF) {
+			if (new_value > SYSVIPC_MAX_SEMVAL) {
 				return -ERANGE;
 			}
 			new_sems[sem_num] = new_value;
@@ -133,7 +135,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 	}
 
 	if (nsops == 0) {
-		return 0;
+		return -EINVAL;
 	}
 
 	struct SysVIpcSembuf *sops = talloc_array(config, struct SysVIpcSembuf, nsops);
@@ -153,8 +155,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 	config->wait_reason = WR_WAIT_SEMOP;
 	config->waiting_object_index = semaphore_index;
 	config->semop_sops = sops;
-	config->semop_nsops = nsops;
-	int this_semop_status = sysvipc_sem_check(config, semaphore);
+	int this_semop_status = sysvipc_sem_check(config, semaphore, NULL);
 
 	Tracee *other_tracee;
 	struct SysVIpcConfig *other_config;
@@ -163,7 +164,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 				other_config != config &&
 				other_config->wait_reason == WR_WAIT_SEMOP &&
 				other_config->waiting_object_index == semaphore_index) {
-			int other_semop_status = sysvipc_sem_check(other_config, semaphore);
+			int other_semop_status = sysvipc_sem_check(other_config, semaphore, NULL);
 			if (other_semop_status != 1) {
 				TALLOC_FREE(other_config->semop_sops);
 				sysvipc_wake_tracee(other_tracee, other_config, other_semop_status);
@@ -183,15 +184,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 }
 
 void sysvipc_semop_timedout(Tracee *tracee, struct SysVIpcConfig *config) {
-	struct SysVIpcSemaphore *semaphore = &config->ipc_namespace->semaphores[config->waiting_object_index];
-
-	if (config->semop_wait_type == 'n') {
-		semaphore->semncnt--;
-		config->semop_wait_type = 0;
-	} else if (config->semop_wait_type == 'z') {
-		semaphore->semzcnt--;
-		config->semop_wait_type = 0;
-	}
+	(void) tracee;
 
 	TALLOC_FREE(config->semop_sops);
 	config->wait_reason = WR_NOT_WAITING;
@@ -215,7 +208,7 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 	}
 	case SYSVIPC_SETVAL:
 	{
-		if (cmdarg > 0xFFFF) return -ERANGE;
+		if (cmdarg > SYSVIPC_MAX_SEMVAL) return -ERANGE;
 		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
 		semaphore->sems[semnum] = cmdarg;
 		return 0;
@@ -264,7 +257,7 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 		.semopm = SYSVIPC_MAX_NSOPS,
 		// semume
 		// semusz
-		.semvmx = 0xFFFF
+		.semvmx = SYSVIPC_MAX_SEMVAL
 		// semaem
 		};
 		if (cmd == SYSVIPC_SEM_INFO) {
