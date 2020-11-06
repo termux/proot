@@ -44,19 +44,36 @@ struct SysVIpcSemaphore {
 /*****************
  * Shared Memory *
  ****************/
+
+/**
+ * Currently mapped region of shared memory
+ * (For shmdt and shm_nattch)
+ */
+struct SysVIpcSharedMemMap {
+	word_t addr;
+	size_t size;
+
+	/**
+	 * SysVIpcNamespace containing this shm id
+	 *
+	 * May be null if IPC_RMID is used but process
+	 * still has region mapped
+	 */
+	bool shmid_valid;
+	LIST_ENTRY(SysVIpcSharedMemMap) link_shmid;
+
+	LIST_ENTRY(SysVIpcSharedMemMap) link_process;
+};
+LIST_HEAD(SysVIpcSharedMemMaps, SysVIpcSharedMemMap);
+
 struct SysVIpcSharedMem {
 	int32_t key;
 	int16_t generation;
 	bool valid;
 	int fd;
 	struct SysVIpcShmidDs stats;
+	struct SysVIpcSharedMemMaps mappings;
 };
-struct SysVIpcSharedMemMap {
-	word_t addr;
-	size_t size;
-	LIST_ENTRY(SysVIpcSharedMemMap) link;
-};
-LIST_HEAD(SysVIpcSharedMemMaps, SysVIpcSharedMemMap);
 
 struct SysVIpcNamespace {
 	/** Array of Message Queues
@@ -216,6 +233,9 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_shmdt(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config);
+void sysvipc_shm_inherit_process(struct SysVIpcProcess *parent, struct SysVIpcProcess *child);
+void sysvipc_shm_remove_mappings_from_process(struct SysVIpcProcess *process);
+void sysvipc_shm_fill_proc(FILE *proc_file, struct SysVIpcNamespace *ipc_namespace);
 
 #endif // SYSVIPC_INTERNAL_H
 
