@@ -1,12 +1,15 @@
 #include "extension/sysvipc/sysvipc.h"
 #include "tracee/seccomp.h"
 #include "syscall/chain.h"
+#include "path/path.h"
+#include "path/temp.h"
 
 #include <assert.h> /* assert */
 #include <unistd.h> /* syscall */
 #include <sys/syscall.h> /* __NR_tkill */
 #include <errno.h> /* E* */
 #include <sched.h> /* CLONE_THREAD */
+#include <string.h> /* strcmp */
 
 
 #include "sysvipc_internal.h"
@@ -123,6 +126,30 @@ static int sysvipc_syscall_common(Tracee *tracee, struct SysVIpcConfig *config, 
 	}
 }
 
+static int sysvipc_proc_handler(
+		char *out_path,
+		Extension *extension,
+		void (*handler)(FILE *proc_file, struct SysVIpcNamespace *ipc_namespace)
+		) {
+	Tracee *tracee = TRACEE(extension);
+	struct SysVIpcConfig *config = extension->config;
+
+	const char *path = create_temp_file(tracee->ctx, "prootseq");
+	if (path == NULL) {
+		return -ENOMEM;
+	}
+
+	FILE *fp = fopen(path, "w");
+	if (fp == NULL) {
+		return -ENOMEM;
+	}
+	handler(fp, config->ipc_namespace);
+	fclose(fp);
+
+	strncpy(out_path, path, PATH_MAX);
+	return 1;
+}
+
 /**
  * Handler for this @extension.  It is triggered each time an @event
  * occurred.  See ExtensionEvent for the meaning of @data1 and @data2.
@@ -158,6 +185,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			Tracee *tracee = TRACEE(extension);
 			child_config->process = talloc_zero(child_config, struct SysVIpcProcess);
 			child_config->process->pgid = tracee->pid;
+			sysvipc_shm_inherit_process(parent_config->process, child_config->process);
 		}
 
 		child_config->ipc_namespace = talloc_reference(child_config, parent_config->ipc_namespace);
@@ -165,6 +193,17 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 
 		return 0;
 	}
+
+	case SYSCALL_ENTER_END:
+		/* If we've just finished execve remove mapped shms from this process  */
+		if (data1 == 0) {
+			Tracee *tracee = TRACEE(extension);
+			if (get_sysnum(tracee, CURRENT) == PR_execve) {
+				struct SysVIpcConfig *config = extension->config;
+				sysvipc_shm_remove_mappings_from_process(config->process);
+			}
+		}
+		return 0;
 
 	case SYSCALL_ENTER_START:
 	{
@@ -240,6 +279,14 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		struct SysVIpcConfig *config = extension->config;
 		if (config->chain_state >= CSTATE_SHMAT_SOCKET && config->chain_state <= CSTATE_SHMAT_MMAP) {
 			sysvipc_shmat_chain(tracee, config);
+		}
+		return 0;
+	}
+
+	case GUEST_PATH:
+	{
+		if (strcmp((const char *) data2, "/proc/sysvipc/shm") == 0) {
+			return sysvipc_proc_handler((char *) data1, extension, sysvipc_shm_fill_proc);
 		}
 		return 0;
 	}
