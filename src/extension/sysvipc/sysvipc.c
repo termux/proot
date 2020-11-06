@@ -219,10 +219,11 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 				config->wait_reason = WR_NOT_WAITING;
 			}
 			assert(config->wait_reason == WR_NOT_WAITING);
-			if ((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == -EFAULT) {
+			int ppoll_status = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+			if (ppoll_status == -EFAULT || ppoll_status == -EINTR) {
 				return 1;
 			}
-			return -EINTR;
+			return -EAGAIN;
 		case WSTATE_SIGNALED_PPOLL:
 		case WSTATE_ENTERED_GETPID:
 			config->wait_state = WSTATE_NOT_WAITING;
