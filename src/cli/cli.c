@@ -44,6 +44,8 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
+#include <extension/extension.h>
+#include <extension/sysvipc/sysvipc.h>
 
 #include "build.h"
 
@@ -454,6 +456,10 @@ int main(int argc, char *const argv[])
 #if defined(TALLOC_VERSION_MAJOR) && TALLOC_VERSION_MAJOR >= 2
 	talloc_set_log_stderr();
 #endif
+
+	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
+		sysvipc_shm_helper_main();
+	}
 
 	/* Pre-create the first tracee (pid == 0).  */
 	tracee = get_tracee(NULL, 0, true);

@@ -27,7 +27,7 @@ static int handle_seccomp_event_common(Tracee *tracee);
  * so SIGSYS handler sees untranslated paths and should leave
  * them untranslated.
  */
-static void restart_syscall_after_seccomp(Tracee* tracee) {
+void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
 
 	/* Enable restore regs at end of replaced call.  */
@@ -55,7 +55,7 @@ static void restart_syscall_after_seccomp(Tracee* tracee) {
 /**
  * Set specified result (negative for errno) and do not restart syscall.
  */
-static void set_result_after_seccomp(Tracee *tracee, word_t result) {
+void set_result_after_seccomp(Tracee *tracee, word_t result) {
 	VERBOSE(tracee, 3, "Setting result after SIGSYS to 0x%lx", result);
 	poke_reg(tracee, SYSARG_RESULT, result);
 	push_specific_regs(tracee, false);
@@ -131,6 +131,10 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	if (status == 1) {
 		VERBOSE(tracee, 4, "SIGSYS fully handled by an extension");
 		set_result_after_seccomp(tracee, 0);
+		return 0;
+	}
+	if (status == 2) {
+		VERBOSE(tracee, 4, "SIGSYS fully handled by an extension with result set");
 		return 0;
 	}
 
@@ -501,6 +505,20 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	case PR_statx:
 	{
 		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
+		break;
+	}
+
+	case PR_ftruncate:
+	{
+		if (detranslate_sysnum(get_abi(tracee), PR_ftruncate64) == SYSCALL_AVOIDER) {
+			set_result_after_seccomp(tracee, -ENOSYS);
+			break;
+		}
+		set_sysnum(tracee, PR_ftruncate64);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, 0);
+		poke_reg(tracee, SYSARG_4, 0);
+		restart_syscall_after_seccomp(tracee);
 		break;
 	}
 
