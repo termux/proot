@@ -28,6 +28,7 @@
 #include "cli/cli.h"
 #include "cli/note.h"
 #include "extension/extension.h"
+#include "extension/sysvipc/sysvipc.h"
 #include "path/binding.h"
 #include "attribute.h"
 
@@ -288,6 +289,18 @@ static int handle_option_link2symlink(Tracee *tracee, const Cli *cli UNUSED, con
 	status = initialize_extension(tracee, link2symlink_callback, NULL);
 	if (status < 0)
 		note(tracee, WARNING, INTERNAL, "link2symlink not initialized");
+
+	return 0;
+}
+
+static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	int status;
+
+	/* Initialize the sysvipc extension.  */
+	status = initialize_extension(tracee, sysvipc_callback, NULL);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "sysvipc not initialized");
 
 	return 0;
 }
