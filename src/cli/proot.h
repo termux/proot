@@ -61,6 +61,7 @@ static int handle_option_i(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_sysvipc(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
@@ -239,6 +240,16 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 	  .description = "Replace hard links with symlinks, pretending they are really hardlinks",
 	  .detail = "\tEmulates hard links with symbolic links when SELinux policies\n\
 \tdo not allow hard links.",
+	},
+	{ .class = "Extension options",
+	  .arguments = {
+		{ .name = "--sysvipc", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_sysvipc,
+	  .description = "Handle System V IPC syscalls in proot",
+	  .detail = "\tHandles System V IPC syscalls (shmget, semget, msgget, etc.)\n\
+\tsyscalls inside proot. IPC is handled inside proot and launching 2 proot instances\n\
+\twill lead to 2 different IPC Namespaces",
 	},
         { .class = "Extension options",
           .arguments = {
