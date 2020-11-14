@@ -225,7 +225,8 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 		shm->stats.shm_cpid = config->process->pgid;
 		shm->key = shm_key;
 		shm->valid = true;
-		LIST_INIT(&shm->mappings);
+		shm->mappings = talloc_zero(config->ipc_namespace, struct SysVIpcSharedMemMaps);
+		LIST_INIT(shm->mappings);
 	} else {
 		if ((shmflg & IPC_CREAT) && (shmflg & IPC_EXCL)) {
 			return -EEXIST;
@@ -238,11 +239,31 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 	return IPC_OBJECT_ID(shm_index, shm);
 }
 
+static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
+{
+	/* Close ashmem fd in helper process  */
+	struct SysVIpcShmHelperRequest request = {
+		.op = SHMHELPER_FREE,
+		.fd = shm->fd,
+	};
+	sysvipc_shm_send_helper_request(&request);
+
+	/* Mark shm as freed  */
+	TALLOC_FREE(shm->mappings);
+	shm->valid = false;
+	shm->rmid_pending = false;
+	shm->generation = (shm->generation + 1) & 0xFFF;
+	shm->fd = -1;
+}
+
 static int sysvipc_shm_memmap_destructor(struct SysVIpcSharedMemMap *mapping) {
-	if (mapping->shmid_valid) {
-		LIST_REMOVE(mapping, link_shmid);
-	}
+	LIST_REMOVE(mapping, link_shmid);
 	LIST_REMOVE(mapping, link_process);
+
+	struct SysVIpcSharedMem *shm = &mapping->ipc_namespace->shms[mapping->shm_index];
+	if (shm->rmid_pending && LIST_EMPTY(shm->mappings)) {
+		sysvipc_do_rmid(shm);
+	}
 	return 0;
 }
 
@@ -278,6 +299,14 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 			return 0;
 		}
 	}
+
+	// Register mapping for process (to prevent IPC_RMID concurrent to shmat)
+	struct SysVIpcSharedMemMap *mapping = talloc_zero(config->process, struct SysVIpcSharedMemMap);
+	talloc_set_destructor(mapping, sysvipc_shm_memmap_destructor);
+	mapping->ipc_namespace = config->ipc_namespace;
+	mapping->shm_index = shm_index;
+	LIST_INSERT_HEAD(&config->process->mapped_shms, mapping, link_process);
+	LIST_INSERT_HEAD(shm->mappings, mapping, link_shmid);
 
 	// Start operation with socket(AF_UNIX, SOCK_SEQPACKET, 0)
 	set_sysnum(tracee, PR_socket);
@@ -364,7 +393,10 @@ int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)
 		size_t map_size = shm->stats.shm_segsz;
 		map_size = (map_size + (page_size - 1)) & ~page_size;
 
-		register_chained_syscall(tracee, PR_mmap, 0, map_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+		word_t mmap_sysnum = detranslate_sysnum(get_abi(tracee), PR_mmap2) != SYSCALL_AVOIDER
+			? PR_mmap2
+			: PR_mmap;
+		register_chained_syscall(tracee, mmap_sysnum, 0, map_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 		config->chain_state = CSTATE_SHMAT_MMAP;
 
 		return 1;
@@ -373,13 +405,17 @@ int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)
 	{
 		word_t addr = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 
-		struct SysVIpcSharedMemMap *mapping = talloc_zero(config->process, struct SysVIpcSharedMemMap);
-		talloc_set_destructor(mapping, sysvipc_shm_memmap_destructor);
-		mapping->addr = addr;
-		mapping->size = peek_reg(tracee, CURRENT, SYSARG_2);
-		mapping->shmid_valid = true;
-		LIST_INSERT_HEAD(&config->process->mapped_shms, mapping, link_process);
-		LIST_INSERT_HEAD(&shm->mappings, mapping, link_shmid);
+		struct SysVIpcSharedMemMap *mapping;
+		bool found_mapping_to_fill = false;
+		LIST_FOREACH(mapping, &config->process->mapped_shms, link_process) {
+			if (mapping->size == 0 && mapping->shm_index == config->waiting_object_index && mapping->ipc_namespace == config->ipc_namespace) {
+				mapping->addr = addr;
+				mapping->size = peek_reg(tracee, CURRENT, SYSARG_2);
+				found_mapping_to_fill = true;
+				break;
+			}
+		}
+		assert(found_mapping_to_fill);
 
 		register_chained_syscall(tracee, PR_close, config->shmat_mem_fd, 0, 0, 0, 0, 0);
 		register_chained_syscall(tracee, PR_close, config->shmat_socket_fd, 0, 0, 0, 0, 0);
@@ -428,7 +464,7 @@ static void sysvipc_shm_update_stats(struct SysVIpcSharedMem *shm)
 {
 	shm->stats.shm_nattch = 0;
 	struct SysVIpcSharedMemMap *mapping = NULL;
-	LIST_FOREACH(mapping, &shm->mappings, link_shmid) {
+	LIST_FOREACH(mapping, shm->mappings, link_shmid) {
 		shm->stats.shm_nattch++;
 	}
 }
@@ -444,29 +480,16 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 	
 	switch (cmd) {
 	case IPC_RMID:
+	case IPC_RMID | SYSVIPC_IPC_64:
 	{
-		/* Unlink all mappings from process
-		 * Using manual le_ pointer operations because we unlink during loop */
-		struct SysVIpcSharedMemMap *mapping = shm->mappings.lh_first;
-		while (mapping != NULL) {
-			struct SysVIpcSharedMemMap *next_mapping = mapping->link_shmid.le_next;
-			mapping->shmid_valid = false;
-			mapping->link_shmid.le_next = NULL;
-			mapping->link_shmid.le_prev = NULL;
-			mapping = next_mapping;
+		/* Perform rmid only if this region is not mapped,
+		 * otherwise set flag to do so once all maps are unmapped */
+		if (LIST_EMPTY(shm->mappings)) {
+			sysvipc_do_rmid(shm);
+		} else {
+			shm->rmid_pending = true;
 		}
 
-		/* Close ashmem fd in helper process  */
-		struct SysVIpcShmHelperRequest request = {
-			.op = SHMHELPER_FREE,
-			.fd = shm->fd,
-		};
-		sysvipc_shm_send_helper_request(&request);
-
-		/* Mark shm as freed  */
-		shm->valid = false;
-		shm->generation++;
-		shm->fd = -1;
 		return 0;
 	}
 	case IPC_STAT:
@@ -494,11 +517,9 @@ void sysvipc_shm_inherit_process(struct SysVIpcProcess *parent, struct SysVIpcPr
 
 		new_mapping->addr = parent_mapping->addr;
 		new_mapping->size = parent_mapping->size;
-
-		if (parent_mapping->shmid_valid) {
-			LIST_INSERT_AFTER(parent_mapping, new_mapping, link_shmid);
-			new_mapping->shmid_valid = true;
-		}
+		new_mapping->ipc_namespace = parent_mapping->ipc_namespace;
+		new_mapping->shm_index = parent_mapping->shm_index;
+		LIST_INSERT_AFTER(parent_mapping, new_mapping, link_shmid);
 
 		if (prev_inserted_mapping != NULL) {
 			LIST_INSERT_AFTER(prev_inserted_mapping, new_mapping, link_process);
