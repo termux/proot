@@ -51,17 +51,36 @@ struct SysVIpcSemaphore {
  */
 struct SysVIpcSharedMemMap {
 	word_t addr;
+
+	/**
+	 * Size of mmap-ed region or 0 if mmap hasn't been done yet
+	 * (but is scheduled in syscall chain)
+	 */
 	size_t size;
 
 	/**
 	 * SysVIpcNamespace containing this shm id
 	 *
-	 * May be null if IPC_RMID is used but process
-	 * still has region mapped
+	 * Note: This reference isn't tracked by talloc,
+	 * however as we don't currently implement unshare/clone(CLONE_NEWIPC)
+	 * IPC namespace will be kept because process that has mapping
+	 * must be in same IPC namespace
 	 */
-	bool shmid_valid;
+	struct SysVIpcNamespace *ipc_namespace;
+
+	/**
+	 * Index of this mapping in SysVIpcNamespace.shms
+	 */
+	size_t shm_index;
+
+	/**
+	 * List pointers for SysVIpcSharedMem.mappings
+	 */
 	LIST_ENTRY(SysVIpcSharedMemMap) link_shmid;
 
+	/**
+	 * List pointers for SysVIpcProcess.mapped_shms
+	 */
 	LIST_ENTRY(SysVIpcSharedMemMap) link_process;
 };
 LIST_HEAD(SysVIpcSharedMemMaps, SysVIpcSharedMemMap);
@@ -70,9 +89,17 @@ struct SysVIpcSharedMem {
 	int32_t key;
 	int16_t generation;
 	bool valid;
+	bool rmid_pending;
 	int fd;
 	struct SysVIpcShmidDs stats;
-	struct SysVIpcSharedMemMaps mappings;
+
+	/**
+	 * Currently shmat'ed memory for this shm id.
+	 *
+	 * While there is any map, IPC_RMID cannot be completed
+	 * (will cause rmid_pending flag to be set instead)
+	 */
+	struct SysVIpcSharedMemMaps *mappings;
 };
 
 struct SysVIpcNamespace {
