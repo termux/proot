@@ -214,7 +214,7 @@ struct SysVIpcConfig {
 	} \
 	out_index = object_index - 1; \
 	out_object = &(objects_array)[object_index - 1]; \
-	if (out_object->generation != ((object_id >> 12) & 0xFFFF)) { \
+	if (!out_object->valid || out_object->generation != ((object_id >> 12) & 0xFFFF)) { \
 		return -EINVAL; \
 	} \
 }

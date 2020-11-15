@@ -241,6 +241,8 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 
 static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
 {
+	assert(LIST_EMPTY(shm->mappings));
+
 	/* Close ashmem fd in helper process  */
 	struct SysVIpcShmHelperRequest request = {
 		.op = SHMHELPER_FREE,
@@ -252,7 +254,7 @@ static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
 	TALLOC_FREE(shm->mappings);
 	shm->valid = false;
 	shm->rmid_pending = false;
-	shm->generation = (shm->generation + 1) & 0xFFF;
+	shm->generation = (shm->generation + 1) & 0xFFFF;
 	shm->fd = -1;
 }
 
@@ -290,6 +292,14 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 
 	config->waiting_object_index = shm_index;
 
+	// Register mapping for process (to prevent IPC_RMID concurrent to shmat)
+	struct SysVIpcSharedMemMap *mapping = talloc_zero(config->process, struct SysVIpcSharedMemMap);
+	talloc_set_destructor(mapping, sysvipc_shm_memmap_destructor);
+	mapping->ipc_namespace = config->ipc_namespace;
+	mapping->shm_index = shm_index;
+	LIST_INSERT_HEAD(&config->process->mapped_shms, mapping, link_process);
+	LIST_INSERT_HEAD(shm->mappings, mapping, link_shmid);
+
 	// Check if any tracee is running concurrent shmat and wait if so
 	Tracee *other_tracee;
 	struct SysVIpcConfig *other_config;
@@ -300,14 +310,6 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 		}
 	}
 
-	// Register mapping for process (to prevent IPC_RMID concurrent to shmat)
-	struct SysVIpcSharedMemMap *mapping = talloc_zero(config->process, struct SysVIpcSharedMemMap);
-	talloc_set_destructor(mapping, sysvipc_shm_memmap_destructor);
-	mapping->ipc_namespace = config->ipc_namespace;
-	mapping->shm_index = shm_index;
-	LIST_INSERT_HEAD(&config->process->mapped_shms, mapping, link_process);
-	LIST_INSERT_HEAD(shm->mappings, mapping, link_shmid);
-
 	// Start operation with socket(AF_UNIX, SOCK_SEQPACKET, 0)
 	set_sysnum(tracee, PR_socket);
 	poke_reg(tracee, SYSARG_1, AF_UNIX);
@@ -315,6 +317,17 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 	poke_reg(tracee, SYSARG_3, 0);
 	config->chain_state = CSTATE_SHMAT_SOCKET;
 	return 0;
+}
+
+static struct SysVIpcSharedMemMap *sysvipc_shm_find_pending_mapping(struct SysVIpcProcess *process, struct SysVIpcNamespace *ipc_namespace, size_t shm_index)
+{
+	struct SysVIpcSharedMemMap *mapping;
+	LIST_FOREACH(mapping, &process->mapped_shms, link_process) {
+		if (mapping->size == 0 && mapping->shm_index == shm_index && mapping->ipc_namespace == ipc_namespace) {
+			return mapping;
+		}
+	}
+	assert(!"No pending mapping found");
 }
 
 int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)
@@ -405,17 +418,9 @@ int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)
 	{
 		word_t addr = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 
-		struct SysVIpcSharedMemMap *mapping;
-		bool found_mapping_to_fill = false;
-		LIST_FOREACH(mapping, &config->process->mapped_shms, link_process) {
-			if (mapping->size == 0 && mapping->shm_index == config->waiting_object_index && mapping->ipc_namespace == config->ipc_namespace) {
-				mapping->addr = addr;
-				mapping->size = peek_reg(tracee, CURRENT, SYSARG_2);
-				found_mapping_to_fill = true;
-				break;
-			}
-		}
-		assert(found_mapping_to_fill);
+		struct SysVIpcSharedMemMap *mapping = sysvipc_shm_find_pending_mapping(config->process, config->ipc_namespace, config->waiting_object_index);
+		mapping->addr = addr;
+		mapping->size = peek_reg(tracee, CURRENT, SYSARG_2);
 
 		register_chained_syscall(tracee, PR_close, config->shmat_mem_fd, 0, 0, 0, 0, 0);
 		register_chained_syscall(tracee, PR_close, config->shmat_socket_fd, 0, 0, 0, 0, 0);
@@ -435,10 +440,12 @@ fail_close_socket:
 	register_chained_syscall(tracee, PR_close, config->shmat_socket_fd, 0, 0, 0, 0, 0);
 	force_chain_final_result(tracee, -ENOMEM);
 	config->chain_state = CSTATE_NOT_CHAINED;
+	talloc_free(sysvipc_shm_find_pending_mapping(config->process, config->ipc_namespace, config->waiting_object_index));
 	sysvipc_shm_wake_pending_shmat();
 	return 1;
 fail_dont_close:
 	config->chain_state = CSTATE_NOT_CHAINED;
+	talloc_free(sysvipc_shm_find_pending_mapping(config->process, config->ipc_namespace, config->waiting_object_index));
 	sysvipc_shm_wake_pending_shmat();
 	return -ENOMEM;
 }

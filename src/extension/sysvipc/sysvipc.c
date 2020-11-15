@@ -10,6 +10,7 @@
 #include <errno.h> /* E* */
 #include <sched.h> /* CLONE_THREAD */
 #include <string.h> /* strcmp */
+#include <signal.h> /* SIGSTOP */
 
 
 #include "sysvipc_internal.h"
@@ -273,10 +274,39 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		}
 	}
 
+	case SYSCALL_CHAINED_ENTER:
+	{
+		struct SysVIpcConfig *config = extension->config;
+		switch (config->wait_state) {
+		case WSTATE_NOT_WAITING:
+			break;
+		case WSTATE_RESTARTED_INTO_PPOLL_CANCELED:
+		{
+			Tracee *tracee = TRACEE(extension);
+			poke_reg(tracee, SYSARG_3, 1);
+			config->wait_state = WSTATE_SIGNALED_PPOLL;
+			break;
+		}
+		default:
+			assert(!"Bad wait_state on SYSCALL_CHAINED_ENTER");
+		}
+		return 0;
+	}
+
 	case SYSCALL_CHAINED_EXIT:
 	{
 		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
+		switch (config->wait_state) {
+		case WSTATE_NOT_WAITING:
+			break;
+		case WSTATE_SIGNALED_PPOLL:
+			config->wait_state = WSTATE_NOT_WAITING;
+			/* Don't run chain handlers, return instead of break */
+			return 0;
+		default:
+			assert(!"Bad wait_state on SYSCALL_CHAINED_EXIT");
+		}
 		if (config->chain_state >= CSTATE_SHMAT_SOCKET && config->chain_state <= CSTATE_SHMAT_MMAP) {
 			sysvipc_shmat_chain(tracee, config);
 		}
@@ -311,7 +341,8 @@ void sysvipc_wake_tracee(Tracee *tracee, struct SysVIpcConfig *config, int statu
 	config->status_after_wait = status;
 	if (config->wait_state == WSTATE_ENTERED_PPOLL) {
 		config->wait_state = WSTATE_SIGNALED_PPOLL;
-		syscall(__NR_tkill, tracee->pid, 19);// TODO: SIGSTOP constant
+		syscall(__NR_tkill, tracee->pid, SIGSTOP);
+		tracee->sigstop = SIGSTOP_IGNORED;
 	} else if (config->wait_state == WSTATE_RESTARTED_INTO_PPOLL) {
 		config->wait_state = WSTATE_RESTARTED_INTO_PPOLL_CANCELED;
 	} else {
