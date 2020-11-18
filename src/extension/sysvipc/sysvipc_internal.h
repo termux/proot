@@ -134,6 +134,7 @@ enum SysVIpcChainState {
 	CSTATE_SHMAT_CONNECT,
 	CSTATE_SHMAT_RECVMSG,
 	CSTATE_SHMAT_MMAP,
+	CSTATE_MSGRCV_RETRY,
 };
 
 /** Per-process (thread group) structure with state of this extension */
@@ -248,6 +249,7 @@ struct SysVIpcConfig *sysvipc_get_config(Tracee *tracee);
 int sysvipc_msgget(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_msgsnd(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config);
+int sysvipc_msgrcv_retry(Tracee *tracee, struct SysVIpcConfig *config);
 int sysvipc_msgctl(Tracee *tracee, struct SysVIpcConfig *config);
 
 int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config);

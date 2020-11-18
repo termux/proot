@@ -200,7 +200,7 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 	int cmd = peek_reg(tracee, CURRENT, SYSARG_3);
 	word_t cmdarg = peek_reg(tracee, CURRENT, SYSARG_4);
 	
-	switch (cmd) {
+	switch (cmd & ~SYSVIPC_IPC_64) {
 	case SYSVIPC_GETVAL:
 	{
 		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
