@@ -239,7 +239,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 	{
 		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
-		if (config->chain_state != CSTATE_NOT_CHAINED) {
+		if (config->chain_state >= CSTATE_SHMAT_SOCKET && config->chain_state <= CSTATE_SHMAT_MMAP) {
 			assert(config->chain_state == CSTATE_SHMAT_SOCKET);
 			return sysvipc_shmat_chain(tracee, config);
 		}
@@ -263,12 +263,30 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			if (ppoll_status == -EFAULT || ppoll_status == -EINTR) {
 				return 1;
 			}
-			return -EAGAIN;
+			return -EINTR;
 		case WSTATE_SIGNALED_PPOLL:
 		case WSTATE_ENTERED_GETPID:
+		{
+			assert(config->wait_reason == WR_NOT_WAITING);
 			config->wait_state = WSTATE_NOT_WAITING;
-			poke_reg(tracee, SYSARG_RESULT, config->status_after_wait);
+			int status = config->status_after_wait;
+			if (config->chain_state == CSTATE_MSGRCV_RETRY) {
+				if (status == -EAGAIN) {
+					status = sysvipc_msgrcv_retry(tracee, config);
+
+					/* Retry handler requested wait? This is uncommon path
+					 * (but can happen due to e.g. concurrent msgrcv consuming message),
+					 * do a spurious wakeup */
+					if (config->wait_reason != WR_NOT_WAITING) {
+						status = -EINTR;
+						config->wait_reason = WR_NOT_WAITING;
+					}
+				}
+				config->chain_state = CSTATE_NOT_CHAINED;
+			}
+			poke_reg(tracee, SYSARG_RESULT, status);
 			return 1;
+		}
 		default:
 			assert(!"Bad wait_state on SYSCALL_EXIT_START");
 		}

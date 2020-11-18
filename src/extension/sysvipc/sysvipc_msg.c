@@ -10,6 +10,7 @@
 #include <syscall.h> /* syscall() */
 #include <string.h> /* memset */
 #include <time.h> /* time */
+#include <assert.h> /* assert */
 
 #define SYSVIPC_MAX_MSG_SIZE 0xFFFF
 
@@ -152,18 +153,13 @@ int sysvipc_msgsnd(Tracee *tracee, struct SysVIpcConfig *config) {
 					receiver_config->msgrcv_msgflg
 				)
 		) {
-			int status = sysvipc_msg_deliver(receiver_tracee, receiver_config, queue, item, current_time);
+			receiver_config->chain_state = CSTATE_MSGRCV_RETRY;
 			sysvipc_wake_tracee(
-					receiver_tracee,
-					receiver_config,
-					status
+				receiver_tracee,
+				receiver_config,
+				-EAGAIN
 			);
-			if (status >= 0) {
-				talloc_free(item);
-				return 0;
-			} else {
-				break;
-			}
+			break;
 		}
 	}
 
@@ -174,16 +170,7 @@ int sysvipc_msgsnd(Tracee *tracee, struct SysVIpcConfig *config) {
 	return 0;
 }
 
-int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
-	size_t queue_index;
-	struct SysVIpcMsgQueue *queue;
-	LOOKUP_IPC_OBJECT(queue_index, queue, config->ipc_namespace->queues)
-
-	config->msgrcv_msgp = peek_reg(tracee, CURRENT, SYSARG_2);
-	config->msgrcv_msgsz = peek_reg(tracee, CURRENT, SYSARG_3);
-	config->msgrcv_msgtyp = peek_reg(tracee, CURRENT, SYSARG_4);
-	config->msgrcv_msgflg = peek_reg(tracee, CURRENT, SYSARG_5);
-
+static int sysvipc_do_msgrcv(Tracee *tracee, struct SysVIpcConfig *config, size_t queue_index, struct SysVIpcMsgQueue *queue) {
 	if ((int) config->msgrcv_msgsz < 0) {
 		return -EINVAL;
 	}
@@ -245,6 +232,27 @@ int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
 	}
 
 	return status;
+}
+
+int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
+	size_t queue_index;
+	struct SysVIpcMsgQueue *queue;
+	LOOKUP_IPC_OBJECT(queue_index, queue, config->ipc_namespace->queues)
+
+	config->msgrcv_msgp = peek_reg(tracee, CURRENT, SYSARG_2);
+	config->msgrcv_msgsz = peek_reg(tracee, CURRENT, SYSARG_3);
+	config->msgrcv_msgtyp = peek_reg(tracee, CURRENT, SYSARG_4);
+	config->msgrcv_msgflg = peek_reg(tracee, CURRENT, SYSARG_5);
+
+	return sysvipc_do_msgrcv(tracee, config, queue_index, queue);
+}
+
+int sysvipc_msgrcv_retry(Tracee *tracee, struct SysVIpcConfig *config) {
+	size_t queue_index = config->waiting_object_index;
+	assert(queue_index < talloc_array_length(config->ipc_namespace->queues));
+	struct SysVIpcMsgQueue *queue = &config->ipc_namespace->queues[queue_index];
+	assert(queue->valid);
+	return sysvipc_do_msgrcv(tracee, config, queue_index, queue);
 }
 
 int sysvipc_msgctl(Tracee *tracee, struct SysVIpcConfig *config) {
