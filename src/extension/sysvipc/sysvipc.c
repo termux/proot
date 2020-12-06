@@ -219,10 +219,16 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			tracee->restart_how = PTRACE_SYSCALL;
 			return 1;
 		case WSTATE_RESTARTED_INTO_PPOLL_CANCELED:
-			poke_reg(tracee, SYSARG_RESULT, config->status_after_wait);
+		{
+			int status = config->status_after_wait;
+			if (config->chain_state == CSTATE_MSGRCV_RETRY) {
+				status = sysvipc_msgrcv_retry(tracee, config);
+			}
+			poke_reg(tracee, SYSARG_RESULT, status);
 			set_sysnum(tracee, PR_void);
 			config->wait_state = WSTATE_NOT_WAITING;
 			return 1;
+		}
 		default:
 			assert(!"Bad wait_state on SYSCALL_ENTER_START");
 		}
@@ -271,18 +277,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			config->wait_state = WSTATE_NOT_WAITING;
 			int status = config->status_after_wait;
 			if (config->chain_state == CSTATE_MSGRCV_RETRY) {
-				if (status == -EAGAIN) {
-					status = sysvipc_msgrcv_retry(tracee, config);
-
-					/* Retry handler requested wait? This is uncommon path
-					 * (but can happen due to e.g. concurrent msgrcv consuming message),
-					 * do a spurious wakeup */
-					if (config->wait_reason != WR_NOT_WAITING) {
-						status = -EINTR;
-						config->wait_reason = WR_NOT_WAITING;
-					}
-				}
-				config->chain_state = CSTATE_NOT_CHAINED;
+				status = sysvipc_msgrcv_retry(tracee, config);
 			}
 			poke_reg(tracee, SYSARG_RESULT, status);
 			return 1;
