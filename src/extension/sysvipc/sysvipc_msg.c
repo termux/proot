@@ -248,11 +248,29 @@ int sysvipc_msgrcv(Tracee *tracee, struct SysVIpcConfig *config) {
 }
 
 int sysvipc_msgrcv_retry(Tracee *tracee, struct SysVIpcConfig *config) {
-	size_t queue_index = config->waiting_object_index;
-	assert(queue_index < talloc_array_length(config->ipc_namespace->queues));
-	struct SysVIpcMsgQueue *queue = &config->ipc_namespace->queues[queue_index];
-	assert(queue->valid);
-	return sysvipc_do_msgrcv(tracee, config, queue_index, queue);
+	assert(config->chain_state == CSTATE_MSGRCV_RETRY);
+
+	int status = config->status_after_wait;
+
+	if (status == -EAGAIN) {
+		size_t queue_index = config->waiting_object_index;
+		assert(queue_index < talloc_array_length(config->ipc_namespace->queues));
+		struct SysVIpcMsgQueue *queue = &config->ipc_namespace->queues[queue_index];
+		assert(queue->valid);
+		status = sysvipc_do_msgrcv(tracee, config, queue_index, queue);
+
+		/* Retry handler requested wait? This is uncommon path
+		 * (but can happen due to e.g. concurrent msgrcv consuming message),
+		 * do a spurious wakeup */
+		if (config->wait_reason != WR_NOT_WAITING) {
+			status = -EINTR;
+			config->wait_reason = WR_NOT_WAITING;
+		}
+	}
+
+	config->chain_state = CSTATE_NOT_CHAINED;
+
+	return status;
 }
 
 int sysvipc_msgctl(Tracee *tracee, struct SysVIpcConfig *config) {
