@@ -602,6 +602,28 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 		break;
 #endif
+	case PR_rt_sigprocmask:
+	{
+		word_t how = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t sigset_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t sigsetsize = peek_reg(tracee, CURRENT, SYSARG_4);
+		if ((how == SIG_BLOCK || how == SIG_SETMASK) && sigset_addr != 0 && sigsetsize == sizeof(sigset_t)) {
+			sigset_t mask;
+			if (read_data(tracee, &mask, sigset_addr, sizeof(sigset_t)) == 0) {
+				if (sigismember(&mask, SIGSYS)) {
+					sigdelset(&mask, SIGSYS);
+					word_t new_sigset_addr = alloc_mem(tracee, sizeof(sigset_t));
+					if (new_sigset_addr) {
+						if (write_data(tracee, new_sigset_addr, &mask, sizeof(sigset_t)) == 0) {
+							poke_reg(tracee, SYSARG_2, new_sigset_addr);
+						}
+					}
+				}
+			}
+
+		}
+		break;
+	}
 	}
 
 end:

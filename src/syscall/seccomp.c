@@ -390,6 +390,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_renameat,		FILTER_SYSEXIT },
 	{ PR_renameat2,		FILTER_SYSEXIT },
 	{ PR_rmdir,		0 },
+	{ PR_rt_sigprocmask,	0 },
 	{ PR_setrlimit,		FILTER_SYSEXIT },
 	{ PR_setxattr,		0 },
 	{ PR_socketcall,	FILTER_SYSEXIT },

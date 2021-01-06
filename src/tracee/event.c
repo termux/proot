@@ -655,12 +655,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					translate_syscall(tracee);
 				}
 
-				if (tracee->skip_next_seccomp_signal || (seccomp_after_ptrace_enter && siginfo.si_syscall == SYSCALL_AVOIDER)) {
-					VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
+				if (tracee->skip_next_seccomp_signal || (seccomp_after_ptrace_enter && (word_t) siginfo.si_syscall == SYSCALL_AVOIDER)) {
+					VERBOSE(tracee, 4, "vpid %" PRIu64 ": suppressed SIGSYS after void syscall", tracee->vpid);
 					tracee->skip_next_seccomp_signal = false;
 					signal = 0;
-				} else {
+				} else if (siginfo.si_errno == 0) {
 					signal = handle_seccomp_event(tracee);
+				} else {
+					VERBOSE(tracee, 1, "vpid %" PRIu64 ": non-system seccomp SIGSYS (si_errno=%d)", tracee->vpid, siginfo.si_errno);
 				}
 			} else {
 				VERBOSE(tracee, 1, "non-seccomp SIGSYS");
