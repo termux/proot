@@ -265,6 +265,7 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config);
 void sysvipc_shm_inherit_process(struct SysVIpcProcess *parent, struct SysVIpcProcess *child);
 void sysvipc_shm_remove_mappings_from_process(struct SysVIpcProcess *process);
 void sysvipc_shm_fill_proc(FILE *proc_file, struct SysVIpcNamespace *ipc_namespace);
+int sysvipc_shm_namespace_destructor(struct SysVIpcNamespace *ipc_namespace);
 
 #endif // SYSVIPC_INTERNAL_H
 
