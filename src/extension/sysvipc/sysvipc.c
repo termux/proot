@@ -163,6 +163,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = talloc_zero(extension, struct SysVIpcConfig);
 		config->ipc_namespace = talloc_zero(config, struct SysVIpcNamespace);
+		talloc_set_destructor(config->ipc_namespace, sysvipc_shm_namespace_destructor);
 		config->process = talloc_zero(config, struct SysVIpcProcess);
 		config->process->pgid = tracee->pid;
 		extension->config = config;

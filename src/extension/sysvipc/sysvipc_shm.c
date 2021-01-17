@@ -595,6 +595,22 @@ void sysvipc_shm_fill_proc(FILE *proc_file, struct SysVIpcNamespace *ipc_namespa
 	}
 }
 
+int sysvipc_shm_namespace_destructor(struct SysVIpcNamespace *ipc_namespace) {
+	struct SysVIpcSharedMem *shms = ipc_namespace->shms;
+	size_t shm_index = 0;
+	size_t num_shms = talloc_array_length(shms);
+	for (; shm_index < num_shms; shm_index++) {
+		struct SysVIpcSharedMem *shm = &shms[shm_index];
+		if (shm->valid) {
+			struct SysVIpcSharedMemMap *mapping;
+			LIST_FOREACH(mapping, shm->mappings, link_shmid) {
+				talloc_set_destructor(mapping, NULL);
+			}
+		}
+	}
+	return 0;
+}
+
 static int sysvipc_shm_do_allocate(size_t size, int shmid) {
 #ifdef __ANDROID__
 	int fd = open("/dev/ashmem", O_RDWR, 0);
