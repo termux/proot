@@ -320,7 +320,7 @@ static int handle_sysexit_end(Tracee *tracee)
 		Reg sysarg_stat;
 		Reg sysarg_path;
 		int status;
-		struct stat statl;
+		struct stat statl = {};
 		ssize_t size;
 		char original[PATH_MAX];
 		char intermediate[PATH_MAX];
@@ -340,7 +340,8 @@ static int handle_sysexit_end(Tracee *tracee)
 					VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
 					return 0; // Don't alter syscall result
 				}
-				if (strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
+				if (strlen(original) > strlen(DELETED_SUFFIX) &&
+						strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
 					original[strlen(original) - strlen(DELETED_SUFFIX)] = '\0';
 			#endif
 			#ifdef USERLAND
