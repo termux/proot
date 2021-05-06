@@ -164,7 +164,7 @@ void mod_port(Tracee *tracee, bool is_socketcall, bool is_bind, bool is_udp, str
                 if(is_bind) {
                     printf("\nATTENTION: A bind system call was requested on port: %d\n", ntohs(in->sin_port));
                     in->sin_port = htons(ntohs(in->sin_port) + PORT_ADDITION);
-                    printf("The port has been changed. If connecting from outside GNURoot, use: %d\n\n", ntohs(in->sin_port));
+                    printf("The port has been changed. If connecting from outside Termux, use: %d\n\n", ntohs(in->sin_port));
                 }
                 else
                    in->sin_port = htons(ntohs(in->sin_port) + PORT_ADDITION); 
@@ -194,7 +194,7 @@ void mod_port(Tracee *tracee, bool is_socketcall, bool is_bind, bool is_udp, str
                 if(is_bind) {
                     printf("\nATTENTION: A bind system call was requested on port: %d\n", ntohs(in6->sin6_port));
                     in6->sin6_port = htons(ntohs(in6->sin6_port) + PORT_ADDITION);
-                    printf("The port has been changed. If connecting from outside GNURoot, use: %d\n\n", ntohs(in6->sin6_port));
+                    printf("The port has been changed. If connecting from outside Termux, use: %d\n\n", ntohs(in6->sin6_port));
                 }
                 else
                     in6->sin6_port = htons(ntohs(in6->sin6_port) + PORT_ADDITION);
