@@ -132,8 +132,8 @@ typedef unsigned char byte_t;
 
     #define HOST_ELF_MACHINE {183, 0};
     #define RED_ZONE_SIZE 0
-    #define OFFSETOF_STAT_UID_32 0
-    #define OFFSETOF_STAT_GID_32 0
+    #define OFFSETOF_STAT_UID_32 24
+    #define OFFSETOF_STAT_GID_32 28
 
     #define LOADER_ADDRESS     0x2000000000
     #define EXEC_PIC_ADDRESS   0x3000000000
