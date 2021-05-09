@@ -282,6 +282,23 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 }
 
 /**
+ * sizeof(struct stat) cut to contain only fields that are at same addresses
+ * regardless of whenever tracee is 32-bit or 64-bit.
+ *
+ * This allows modification of following fields:
+ * - st_dev
+ * - st_mode
+ * - st_nlink
+ * - st_uid
+ * - st_gid
+ * - st_rdev
+ * - st_size
+ * - st_blksize
+ * - st_blocks
+ */
+#define SIZEOF_RELEVANT_STRUCT_STAT 72
+
+/**
  * Make it so fake hard links look like real hard link with respect to number of links and inode
  * This function returns -errno if an error occured, otherwise 0.
  */
@@ -298,13 +315,6 @@ static int handle_sysexit_end(Tracee *tracee)
 		if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat))
 			return 0;
 	#endif
-
-#ifdef ARCH_ARM64
-		if (tracee->is_aarch32) {
-			VERBOSE(tracee, 1, "Skipping link2symlink stat fixup on AArch32");
-			return 0;
-		}
-#endif
 
 	switch (sysnum) {
 
@@ -421,7 +431,8 @@ static int handle_sysexit_end(Tracee *tracee)
 			finalStat.st_uid = statl.st_uid;
 			finalStat.st_gid = statl.st_gid;
 		#endif
-		status = write_data(tracee, peek_reg(tracee, ORIGINAL,  sysarg_stat), &finalStat, sizeof(finalStat));
+		status = write_data(tracee, peek_reg(tracee, ORIGINAL,  sysarg_stat), &finalStat,
+			is_32on64_mode(tracee) ? SIZEOF_RELEVANT_STRUCT_STAT : sizeof(finalStat));
 		if (status < 0)
 			return status;
 
