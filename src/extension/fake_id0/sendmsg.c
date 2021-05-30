@@ -3,10 +3,13 @@
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <linux/net.h>   /* SYS_SENDMSG, */
 
+#include "cli/note.h"
 #include "tracee/mem.h"
 #include "syscall/sysnum.h"
 #include "syscall/syscall.h"
 #include "extension/fake_id0/sendmsg.h"
+
+#define MAX_CONTROLLEN 1024
 
 int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 {
@@ -52,6 +55,11 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 	if (msg.msg_control != NULL && msg.msg_controllen != 0)
 	{
 		bool did_modify = 0;
+
+		if (msg.msg_controllen > MAX_CONTROLLEN) {
+			VERBOSE(tracee, 1, "sendmsg() with msg_controllen=%zu, is_32on64_mode=%d, not doing fixup", msg.msg_controllen, is_32on64_mode(tracee));
+			return 0;
+		}
 
 		/* Read cmsg header.  */
 		char cmsg_buf[msg.msg_controllen];
