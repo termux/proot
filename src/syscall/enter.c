@@ -602,6 +602,21 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 		break;
 #endif
+	
+	case PR_memfd_create:
+		{
+			char memfd_name[20] = {};
+			if (read_string(tracee, memfd_name, peek_reg(tracee, CURRENT, SYSARG_1), sizeof(memfd_name) - 1) < 0) {
+				/* Failed to read memfd name, do nothing and let normal memfd proceed.  */
+				break;
+			}
+			/* If this memfd is one of those used by Qt/QML for executable code,
+			 * deny memfd_create() call and let Qt fall back to anonymous mmap.  */
+			if (0 == strcmp(memfd_name, "JITCode:QtQml")) {
+				status = -EACCES;
+			}
+			break;
+		}
 	}
 
 end:
