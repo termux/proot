@@ -368,6 +368,9 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_lsetxattr,		0 },
 	{ PR_lstat,		0 },
 	{ PR_lstat64,		0 },
+#ifdef __ANDROID__
+	{ PR_memfd_create,	0 },
+#endif
 	{ PR_mkdir,		0 },
 	{ PR_mkdirat,		0 },
 	{ PR_mknod,		0 },
