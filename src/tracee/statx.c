@@ -8,6 +8,7 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 	struct statx_syscall_state state = {};
 	char guest_path[PATH_MAX] = {};
 	struct stat stat_buf = {};
+	bool do_fstat = false;
 
 	/* Read arguments and translate path */
 	word_t flags = peek_reg(tracee, regVersion, SYSARG_3);
@@ -27,6 +28,7 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 			return -ENOENT;
 		}
 		status = readlink_proc_pid_fd(tracee->pid, dirfd, state.host_path);
+		do_fstat = true;
 	} else {
 		if (status >= PATH_MAX) {
 			return -ENAMETOOLONG;
@@ -39,12 +41,18 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 
 	if (from_sigsys || peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0) {
 		/* Call [l]stat() on translated path */
-		if (do_lstat) {
+		if (do_fstat) {
+			char link[32] = {}; /* 32 > sizeof("/proc//cwd") + sizeof(#ULONG_MAX) */
+			snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, (int) dirfd);
+			status = stat(link, &stat_buf);
+		} else if (do_lstat) {
 			status = lstat(state.host_path, &stat_buf);
 		} else {
 			status = stat(state.host_path, &stat_buf);
 		}
 		if (status < 0) {
+			status = -errno;
+			if (status >= 0) status = -EPERM;
 			return status;
 		}
 
