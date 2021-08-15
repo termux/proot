@@ -501,6 +501,110 @@ static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 }
 
 /**
+ * Handler for linkat(..., "/proc/X/fd/Y", ..., AT_SYMLINK_FOLLOW)
+ *
+ * Returns:
+ *    1 if operation was handled successfully
+ *      (Syscall should be marked as successful without further actions)
+ *    0 if this wasn't linkat from /proc//fd
+ *      (Caller should proceed with usual link2symlink)
+ *   <0 if operation failed
+ *      (Syscall should be marked as failed without further actions)
+ */
+static int handle_linkat_from_proc_fd(Tracee *tracee) {
+	/* Read source path, return if it doesn't belong to /proc  */
+	char proc_path[128];
+	ssize_t size = read_string(tracee, proc_path, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(proc_path));
+	if (size <= 0 || size >= (ssize_t) sizeof(proc_path)) {
+		return 0;
+	}
+	if (compare_paths(proc_path, "/proc") != PATH2_IS_PREFIX) {
+		return 0;
+	}
+
+	/* Ensure provided path is symlink to " (deleted)" file  */
+	char target_path[PATH_MAX] = {};
+	int status = readlink(proc_path, target_path, sizeof(target_path));
+	if (status < 10 || status >= (ssize_t) sizeof(target_path)) {
+		return 0;
+	}
+	if (0 != memcmp(&target_path[status - 10], DELETED_SUFFIX, 10)) {
+		return 0;
+	}
+
+	/* Read stats of source file, ensure it is regular file  */
+	struct stat stats = {};
+	if (0 != stat(proc_path, &stats)) {
+		return 0;
+	}
+	if (!S_ISREG(stats.st_mode)) {
+		return 0;
+	}
+
+	/* Read path of target file (already translated by proot)  */
+	size = read_string(tracee, target_path, peek_reg(tracee, CURRENT, SYSARG_4), PATH_MAX);
+	if (size < 0 || size >= (ssize_t) sizeof(target_path)) {
+		return 0;
+	}
+
+	/* Open source file for reading  */
+	int source_fd = open(proc_path, O_RDONLY);
+	if (source_fd < 0) {
+		return 0;
+	}
+
+	/* Point of no return, below we no longer are allowed to "return 0",
+	 * any errors will be propagated to caller
+	 *
+	 * Delete target file (we'll be replacing it).
+	 * Ignore result of unlink, file could or could not exist,
+	 * we'll report failure of open though  */
+	unlink(target_path);
+
+	/* Open target file for writing  */
+	int target_fd = open(target_path, O_WRONLY|O_CREAT|O_EXCL, stats.st_mode & 0777);
+	if (target_fd < 0) {
+		status = -errno;
+		if (status >= 0)
+			status = -EPERM;
+		close(source_fd);
+		return status;
+	}
+
+	/* Copy contents of file  */
+	char buf[4096];
+	int nread;
+	while (0 != (nread = read(source_fd, buf, sizeof(buf)))) {
+		if (nread < 0) {
+			status = -errno;
+			if (status >= 0)
+				status = -EPERM;
+			close(source_fd);
+			close(target_fd);
+			return status;
+		}
+		int pos = 0;
+		while (pos < nread) {
+			int nwrite = write(target_fd, buf + pos, nread - pos);
+			if (nwrite <= 0) {
+				status = -errno;
+				if (status >= 0)
+					status = -EPERM;
+				close(source_fd);
+				close(target_fd);
+				return status;
+			}
+			pos += nwrite;
+		}
+	}
+
+	/* Copy successful, nothing more to be done for this syscall  */
+	close(source_fd);
+	close(target_fd);
+	return 1;
+}
+
+/**
  * Handler for this @extension.  It is triggered each time an @event
  * occurred.  See ExtensionEvent for the meaning of @data1 and @data2.
  */
@@ -612,6 +716,17 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			break;
 
 		case PR_linkat:
+			/*
+			 * Handle linkat(..., "/proc/X/fd/Y", ..., AT_SYMLINK_FOLLOW)
+			 */
+			if (peek_reg(tracee, CURRENT, SYSARG_5) & AT_SYMLINK_FOLLOW) {
+				status = handle_linkat_from_proc_fd(tracee);
+				if (status < 0)
+					return status;
+				if (status == 1)
+					return 0;
+			}
+
 			/* Convert:
 			 *
 			 *     int linkat(int olddirfd, const char *oldpath,
