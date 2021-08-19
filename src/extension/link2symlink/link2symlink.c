@@ -723,8 +723,11 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 				status = handle_linkat_from_proc_fd(tracee);
 				if (status < 0)
 					return status;
-				if (status == 1)
+				if (status == 1) {
+					set_sysnum(tracee, PR_void);
+					poke_reg(tracee, SYSARG_RESULT, 0);
 					return 0;
+				}
 			}
 
 			/* Convert:
