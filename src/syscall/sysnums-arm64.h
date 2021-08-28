@@ -278,5 +278,4 @@ static const Sysnum sysnums_arm64[] = {
 	[ 289 ] = PR_pkey_alloc,
 	[ 290 ] = PR_pkey_free,
 	[ 291 ] = PR_statx,
-	[ 439 ] = PR_faccessat2,
 };
