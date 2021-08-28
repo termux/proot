@@ -270,7 +270,6 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_access,		FILTER_SYSEXIT },
 	{ PR_creat,		FILTER_SYSEXIT },
 	{ PR_faccessat,		FILTER_SYSEXIT },
-	{ PR_faccessat2,	FILTER_SYSEXIT },
 	{ PR_link,		FILTER_SYSEXIT },
 	{ PR_linkat,		FILTER_SYSEXIT },
 	{ PR_mkdir,		FILTER_SYSEXIT },
@@ -645,7 +644,6 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return handle_access_enter_end(tracee, SYSARG_1, SYSARG_2, IGNORE_SYSARG, config);
 	/* int faccessat(int dirfd, const char *pathname, int mode, int flags) */
 	case PR_faccessat:
-	case PR_faccessat2:
 		return handle_access_enter_end(tracee, SYSARG_2, SYSARG_3, SYSARG_1, config); 
 
 	/* handle_exec(tracee, filename_sysarg, config) */
