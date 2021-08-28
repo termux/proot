@@ -417,6 +417,7 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_fchmodat:
 	case PR_faccessat:
+	case PR_faccessat2:
 	case PR_futimesat:
 	case PR_mknodat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -618,6 +619,7 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 		}
 	}
+
 
 end:
 	status2 = notify_extensions(tracee, SYSCALL_ENTER_END, status, 0);
