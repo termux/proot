@@ -339,4 +339,5 @@ static const Sysnum sysnums_sh4[] = {
 	[ 364 ] = PR_setns,
 	[ 365 ] = PR_process_vm_readv,
 	[ 366 ] = PR_process_vm_writev,
+	[ 439 ] = PR_faccessat2,
 };
