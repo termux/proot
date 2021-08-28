@@ -334,4 +334,5 @@ static const Sysnum sysnums_x86_64[] = {
 	[ 330 ] = PR_pkey_alloc,
 	[ 331 ] = PR_pkey_free,
 	[ 332 ] = PR_statx,
+	[ 439 ] = PR_faccessat2,
 };
