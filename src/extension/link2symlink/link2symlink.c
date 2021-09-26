@@ -6,11 +6,13 @@
 #include <sys/stat.h>  /* lstat(2), */
 #include <errno.h>     /* E*, */
 #include <limits.h>    /* PATH_MAX, */
+#include <ctype.h>     /* isdigit, */
 
 #include "cli/note.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
+#include "tracee/statx.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "path/path.h"
@@ -444,6 +446,33 @@ static int handle_sysexit_end(Tracee *tracee)
 	}
 }
 
+static void link2symlink_handle_statx(struct statx_syscall_state *state)
+{
+	if (!(state->statx_buf.stx_mask & STATX_NLINK))
+		return;
+
+	const char *path_ending = strrchr(state->host_path, '/');
+	if (NULL == path_ending)
+		return;
+
+	size_t ending_len = strlen(path_ending);
+	if (ending_len < strlen(PREFIX) + 6) /* 6 = strlen("/") + strlen(".0002") */
+		return;
+
+	if (0 != strncmp(path_ending + 1, PREFIX, strlen(PREFIX)))
+		return;
+
+	if (path_ending[ending_len - 5] != '.')
+		return;
+
+	for (size_t i = 1; i <= 4; i++) {
+		if (!isdigit(path_ending[ending_len - i]))
+			return;
+	}
+
+	state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
+}
+
 /**
  * When @translated_path is a faked hard-link, replace it with the
  * point it (internally) points to.
@@ -769,6 +798,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 
 	case TRANSLATED_PATH:
 		translated_path(TRACEE(extension), (char *) data1);
+		return 0;
+
+	case STATX_SYSCALL:
+		link2symlink_handle_statx((struct statx_syscall_state *) data1);
 		return 0;
 
 	default:
