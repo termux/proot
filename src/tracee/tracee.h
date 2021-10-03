@@ -261,6 +261,7 @@ typedef struct tracee {
 	/* Path to the executable, à la /proc/self/exe.  */
 	char *exe;
 	char *new_exe;
+	char *host_exe;
 
 
 	/**********************************************************************
@@ -269,6 +270,7 @@ typedef struct tracee {
 
 	/* Runner command-line.  */
 	char **qemu;
+	bool skip_proot_loader;
 
 	/* Path to glue between the guest rootfs and the host rootfs.  */
 	const char *glue;

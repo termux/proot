@@ -387,6 +387,10 @@ static int expand_runner(Tracee* tracee, char host_path[PATH_MAX], char user_pat
 		size_t nb_qemu_args;
 		size_t i;
 
+		if (getenv("PROOT_USE_LOADER_FOR_QEMU") == NULL) {
+			tracee->skip_proot_loader = true;
+		}
+
 		status = fetch_array_of_xpointers(tracee, &argv, SYSARG_2, 0);
 		if (status < 0)
 			return status;
@@ -441,8 +445,12 @@ static int expand_runner(Tracee* tracee, char host_path[PATH_MAX], char user_pat
 
 		strcpy(host_path, tracee->qemu[0]);
 
-		strcpy(user_path, HOST_ROOTFS);
-		strcat(user_path, host_path);
+		if (tracee->skip_proot_loader) {
+			strcpy(user_path, host_path);
+		} else {
+			strcpy(user_path, HOST_ROOTFS);
+			strcat(user_path, host_path);
+		}
 	}
 
 	/* Provide information to the host dynamic linker to find host
@@ -628,6 +636,9 @@ int translate_execve_enter(Tracee *tracee)
 	/* Remember the new value for "/proc/self/exe".  It points to
 	 * a canonicalized guest path, hence detranslate_path()
 	 * instead of using user_path directly.  */
+	talloc_unlink(tracee, tracee->host_exe);
+	tracee->host_exe = talloc_strdup(tracee, host_path);
+
 	strcpy(new_exe, host_path);
 	status = detranslate_path(tracee, new_exe, NULL);
 	if (status >= 0) {
@@ -637,6 +648,7 @@ int translate_execve_enter(Tracee *tracee)
 	else
 		tracee->new_exe = NULL;
 
+	tracee->skip_proot_loader = false;
 	if (tracee->qemu != NULL) {
 		status = expand_runner(tracee, host_path, user_path);
 		if (status < 0)
@@ -644,6 +656,17 @@ int translate_execve_enter(Tracee *tracee)
 	}
 
 	talloc_unlink(tracee, tracee->load_info);
+
+	if (tracee->skip_proot_loader) {
+		TALLOC_FREE(tracee->load_info);
+		tracee->heap->disabled = true;
+
+		status = set_sysarg_path(tracee, host_path, SYSARG_1);
+		if (status < 0)
+			return status;
+
+		return 0;
+	}
 
 	tracee->load_info = talloc_zero(tracee, LoadInfo);
 	if (tracee->load_info == NULL)
