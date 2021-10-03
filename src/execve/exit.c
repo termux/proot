@@ -400,6 +400,11 @@ void translate_execve_exit(Tracee *tracee)
 	word_t syscall_result;
 	int status;
 
+	if (tracee->skip_proot_loader) {
+		tracee->restore_original_regs = false;
+		return;
+	}
+
 	if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tracee)) {
 		/* Be sure not to confuse the ptracer with an
 		 * unexpected syscall/returned value.  */

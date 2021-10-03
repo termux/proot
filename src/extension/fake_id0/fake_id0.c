@@ -1051,9 +1051,10 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 
 	/* This has to be done before PRoot pushes the load
 	 * script into tracee's stack.  */
-	adjust_elf_auxv(tracee, config);
+	if (!tracee->skip_proot_loader)
+		adjust_elf_auxv(tracee, config);
 
-	status = stat(tracee->load_info->host_path, &mode);
+	status = stat(tracee->host_exe, &mode);
 	if (status < 0)
 		return 0; /* Not fatal.  */
 
