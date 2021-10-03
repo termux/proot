@@ -1,4 +1,5 @@
-#include <errno.h>     /* E*, */
+#include <errno.h>          /* E*, */
+#include <sys/sysmacros.h>  /* major, minor, */
 
 #include "tracee/statx.h"
 #include "tracee/mem.h"
@@ -94,7 +95,7 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 			state.statx_buf.stx_mtime.tv_sec = stat_buf.st_mtim.tv_sec;
 			state.statx_buf.stx_mtime.tv_nsec = stat_buf.st_mtim.tv_nsec;
 		}
-		if (mask & STATX_BTIME) {
+		if (mask & STATX_CTIME) {
 			state.statx_buf.stx_ctime.tv_sec = stat_buf.st_ctim.tv_sec;
 			state.statx_buf.stx_ctime.tv_nsec = stat_buf.st_ctim.tv_nsec;
 		}
@@ -112,6 +113,8 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 			state.statx_buf.stx_btime.tv_sec = stat_buf.st_ctim.tv_sec;
 			state.statx_buf.stx_btime.tv_nsec = stat_buf.st_ctim.tv_nsec;
 		}
+		state.statx_buf.stx_rdev_major = major(stat_buf.st_rdev);
+		state.statx_buf.stx_rdev_minor = minor(stat_buf.st_rdev);
 		state.updated_stats = true;
 	} else {
 		status = read_data(tracee, &state.statx_buf, peek_reg(tracee, ORIGINAL, SYSARG_5), sizeof(struct statx));
