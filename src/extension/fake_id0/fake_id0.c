@@ -99,8 +99,8 @@
 	/* "If the effective UID of the caller is root, the real UID	\
 	 * and saved set-user-ID are also set." -- man setuid */	\
 	#if (config->euid == 0) {					\
-	#	config->r ## id = id;					\
-	#	config->s ## id = id;					\
+		config->r ## id = id;					\
+		config->s ## id = id;					\
 	#}								\
 									\
 	/* "whenever the effective user ID is changed, fsuid will also	\
