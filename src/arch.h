@@ -101,7 +101,7 @@ typedef unsigned char byte_t;
     #define OFFSETOF_STAT_GID_32 0
     #define EM_ARM 40
 
-    #define LOADER_ADDRESS 0x10000000
+    #define LOADER_ADDRESS 0x20000000
 
     #define EXEC_PIC_ADDRESS   0x0f000000
     #define INTERP_PIC_ADDRESS 0x1f000000
