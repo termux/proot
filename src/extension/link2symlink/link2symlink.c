@@ -78,7 +78,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 	/* Sanity check: directories can't be linked.  */
 	status = lstat(original, &statl);
 	if (status < 0)
-		return status;
+		return errno > 0 ? -errno : -ENOENT;
 	if (S_ISDIR(statl.st_mode))
 		return -EPERM;
 
