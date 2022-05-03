@@ -510,7 +510,11 @@ int rebuild_host_ldso_paths(Tracee *tracee, const char host_path[PATH_MAX], Arra
 					"/lib/i386-linux-gnu:/usr/lib/i386-linux-gnu:"
 #endif
 					"/lib32:/usr/lib32:/usr/local/lib32"
-					":/lib:/usr/lib:/usr/local/lib");
+					":/lib:/usr/lib:/usr/local/lib"
+#ifdef __ANDROID__
+					":/system/lib"
+#endif
+					);
 	else
 		status = add_host_ldso_paths(host_ldso_paths,
 #if defined(ARCH_X86_64)
@@ -519,7 +523,11 @@ int rebuild_host_ldso_paths(Tracee *tracee, const char host_path[PATH_MAX], Arra
 					"/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:"
 #endif
 					"/lib64:/usr/lib64:/usr/local/lib64"
-					":/lib:/usr/lib:/usr/local/lib");
+					":/lib:/usr/lib:/usr/local/lib"
+#ifdef __ANDROID__
+					":/system/lib64"
+#endif
+					);
 	if (status < 0)
 		return 0; /* Not fatal.  */
 
