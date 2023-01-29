@@ -157,6 +157,15 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 		status = -ENOENT;
 	} else {
 		status = lstat(host_path, &statl);
+		/* /linkerconfig directory is present and accessible on Android,
+		 * but cannot be stat()'d, use hardcoded stat if access was denied
+		 *
+		 * https://github.com/termux/proot/issues/254
+		 */
+		if (status < 0 && errno == EACCES && strcmp(host_path, "/linkerconfig") == 0) {
+			status = 0;
+			statl.st_mode = S_IFDIR;
+		}
 	}
 
 	/* Build the glue between the hostfs and the guestfs during
