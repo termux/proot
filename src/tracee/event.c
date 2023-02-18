@@ -507,7 +507,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
 					/* Redeliver signal suppressed during
 					 * syscall chain once it's finished.  */
-					if (tracee->chain.suppressed_signal && tracee->chain.syscalls == NULL) {
+					if (tracee->chain.suppressed_signal && tracee->chain.syscalls == NULL && !tracee->restore_original_regs_after_seccomp_event) {
 						signal = tracee->chain.suppressed_signal;
 						tracee->chain.suppressed_signal = 0;
 						VERBOSE(tracee, 6, "vpid %" PRIu64 ": redelivering suppressed signal %d", tracee->vpid, signal);
@@ -671,7 +671,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		default:
 			/* Deliver this signal as-is,
 			 * unless we're chaining syscall.  */
-			if (tracee->chain.syscalls != NULL) {
+			if (tracee->chain.syscalls != NULL || tracee->restore_original_regs_after_seccomp_event) {
 				VERBOSE(tracee, 5,
 						"vpid %" PRIu64 ": suppressing signal during chain signal=%d, prev suppressed_signal=%d",
 						tracee->vpid, signal, tracee->chain.suppressed_signal);

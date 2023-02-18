@@ -30,7 +30,8 @@ static int handle_seccomp_event_common(Tracee *tracee);
 void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
 
-	/* Enable restore regs at end of replaced call.  */
+	/* Enable restore regs at end of replaced call.
+	 * This also defers delivering of signals until restarted syscall finishes.  */
 	tracee->restore_original_regs_after_seccomp_event = true;
 	tracee->restart_how = PTRACE_SYSCALL;
 
