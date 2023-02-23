@@ -55,6 +55,7 @@ OBJECTS += \
 	ptrace/user.o		\
 	ptrace/wait.o		\
 	extension/extension.o	\
+	extension/ashmem_memfd/ashmem_memfd.o \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
 	extension/fake_id0/chroot.o \
