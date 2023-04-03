@@ -500,7 +500,7 @@ static int adjust_elf_auxv(Tracee *tracee, Config *config)
 	return 0;
 }
 
-static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
+static int handle_perm_err_exit_end(Tracee *tracee, Config *config, bool even_if_not_root) {
 	word_t result;
 
 	/* Override only permission errors.  */
@@ -521,7 +521,7 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config) {
 
 	/* Force success if the tracee was supposed to have
 	 * the capability.  */
-	if (config->euid == 0) /* TODO: || HAS_CAP(...) */
+	if (even_if_not_root || config->euid == 0) /* TODO: || HAS_CAP(...) */
 		poke_reg(tracee, SYSARG_RESULT, 0);
 
 	return 0;
@@ -908,9 +908,6 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_mknod:
 	case PR_mknodat:
 	case PR_capset:
-	case PR_setxattr:
-	case PR_lsetxattr:
-	case PR_fsetxattr:
 	case PR_chmod:
 	case PR_chown:
 	case PR_fchmod:
@@ -921,7 +918,12 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_lchown32:
 	case PR_fchmodat:
 	case PR_fchownat: 
-		return handle_perm_err_exit_end(tracee, config);
+		return handle_perm_err_exit_end(tracee, config, false);
+
+	case PR_setxattr:
+	case PR_lsetxattr:
+	case PR_fsetxattr:
+		return handle_perm_err_exit_end(tracee, config, true);
 
 	case PR_socket: 
 		return handle_socket_exit_end(tracee, config);

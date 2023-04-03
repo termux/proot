@@ -23,6 +23,7 @@
 #include <errno.h>       /* errno(3), E* */
 #include <sys/utsname.h> /* struct utsname, */
 #include <linux/net.h>   /* SYS_*, */
+#include <linux/ioctl.h> /* _IOW, */
 #include <string.h>      /* strlen(3), */
 
 #include "cli/note.h"
@@ -535,6 +536,13 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_statx:
 		status = handle_statx_syscall(tracee, false);
 		break;
+
+	case PR_ioctl:
+		if (peek_reg(tracee, ORIGINAL, SYSARG_2) == _IOW(0x94, 9, int) /* FICLONE */ &&
+				(int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == -EACCES) {
+			poke_reg(tracee, SYSARG_RESULT, -EOPNOTSUPP);
+		}
+		goto end;
 
 	default:
 		goto end;

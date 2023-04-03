@@ -356,7 +356,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_getxattr,		0 },
 	{ PR_inotify_add_watch,	0 },
 #ifdef __ANDROID__
-	{ PR_ioctl,		0 },
+	{ PR_ioctl,		FILTER_SYSEXIT },
 #endif
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },
