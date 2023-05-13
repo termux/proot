@@ -30,6 +30,7 @@
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <termios.h>     /* TCSETS, TCSANOW */
 
+#include "cli/note.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
@@ -124,6 +125,20 @@ int translate_syscall_enter(Tracee *tracee)
 		break;
 
 	case PR_execve:
+		status = translate_execve_enter(tracee);
+		break;
+
+	case PR_execveat:
+		if ((int) peek_reg(tracee, CURRENT, SYSARG_1) == AT_FDCWD) {
+			set_sysnum(tracee, PR_execve);
+			poke_reg(tracee, SYSARG_1, peek_reg(tracee, CURRENT, SYSARG_2));
+			poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_3));
+			poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_4));
+		} else {
+			note(tracee, ERROR, SYSTEM, "execveat() with non-AT_FDCWD fd is not currently supported");
+			status = -ENOSYS;
+			break;
+		}
 		status = translate_execve_enter(tracee);
 		break;
 
