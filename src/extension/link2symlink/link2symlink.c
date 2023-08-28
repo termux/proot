@@ -28,6 +28,8 @@
 #endif 
 #define DELETED_SUFFIX " (deleted)"
 
+static int decrement_link_count(Tracee *tracee, Reg sysarg);
+
 /**
  * Copy the contents of the @symlink into @value (nul terminated).
  * This function returns -errno if an error occured, otherwise 0.
@@ -52,7 +54,7 @@ static int my_readlink(const char symlink[PATH_MAX], char value[PATH_MAX])
  * point to the new location.  This function returns -errno if an
  * error occured, otherwise 0.
  */
-static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
+static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sysarg)
 {
 	char original[PATH_MAX];
 	char intermediate[PATH_MAX];
@@ -179,9 +181,19 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 			return status;
 	}
 
-	status = set_sysarg_path(tracee, intermediate, sysarg);
-	if (status < 0)
+	/* Perform symlink() operation within PRoot.  */
+	status = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
+	if (status >= 0) {
+		status = symlink(intermediate, final);
+		if (status < 0) status = -errno;
+	}
+	if (status < 0) {
+		status = -errno;
+		decrement_link_count(tracee, sysarg);
 		return status;
+	}
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	set_sysnum(tracee, PR_void);
 
 	return 0;
 }
@@ -737,11 +749,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			 *     int symlink(const char *oldpath, const char *newpath);
 			 */
 
-			status = move_and_symlink_path(tracee, SYSARG_1);
+			status = move_and_symlink_path(tracee, SYSARG_1, SYSARG_2);
 			if (status < 0)
 				return status;
 
-			set_sysnum(tracee, PR_symlink);
 			break;
 
 		case PR_linkat:
@@ -775,15 +786,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			 *   newdirfd + newpath -> newpath
 			 */
 
-			status = move_and_symlink_path(tracee, SYSARG_2);
+			status = move_and_symlink_path(tracee, SYSARG_2, SYSARG_4);
 			if (status < 0)
 				return status;
 
-			poke_reg(tracee, SYSARG_1, peek_reg(tracee, CURRENT, SYSARG_2));
-			poke_reg(tracee, SYSARG_2, AT_FDCWD);
-			poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_4));
-
-			set_sysnum(tracee, PR_symlinkat);
 			break;
 
 		default:
