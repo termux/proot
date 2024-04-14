@@ -481,6 +481,9 @@ int main(int argc, char *const argv[])
 	if (status < 0)
 		goto error;
 
+	if (NULL == getenv("PROOT_NO_MOUNTINFO"))
+		initialize_extension(tracee, mountinfo_callback, NULL);
+
 	/* Start the first tracee.  */
 	status = launch_process(tracee, &argv[status]);
 	if (status < 0) {
