@@ -631,6 +631,14 @@ int translate_syscall_enter(Tracee *tracee)
 			if (0 == strncmp(memfd_name, "JITCode:", 8)) {
 				status = -EACCES;
 			}
+			/* php8.3 attempts using memfd as lock through fcntl(F_SETLKW),
+			 * which is not allowed on Android,
+			 * deny memfd_create() call and let php fall back to open(O_TMPFILE).
+			 * https://github.com/php/php-src/blob/26c432d850c153aaf79a1b24e4753bc0533e02b0/ext/opcache/zend_shared_alloc.c#L91
+			 */
+			if (0 == strcmp(memfd_name, "opcache_lock")) {
+				status = -EACCES;
+			}
 			break;
 		}
 	}
