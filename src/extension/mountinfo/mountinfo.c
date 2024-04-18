@@ -78,6 +78,38 @@ static void mountinfo_check_open_path(Tracee *tracee, char path[PATH_MAX]) {
 end_line_scan: ;
 		}
 
+		/* Once root was added, rescan and add other standard mounts  */
+		if (found_line) {
+			fseek(real_mountinfo_fp, 0, SEEK_SET);
+			while ((line_len = getline(&line, &line_buf_len, real_mountinfo_fp)) > 0) {
+				char *chunk = line;
+				/* Skip columns before 'root'  */
+				for (int i = 0; i < 4 && chunk - line < line_len; i++) {
+					chunk = strchr(chunk, ' ');
+					if (chunk == NULL) goto end_line_scan2;
+					chunk++;
+				}
+
+				/* Match path  */
+				char *chunk_end = strchr(chunk, ' ');
+				if (chunk_end == NULL) continue;
+
+				size_t mount_len = chunk_end - chunk;
+				if (
+						(mount_len == 4 && 0 == memcmp(chunk, "/dev", 4)) ||
+						(mount_len >= 5 && 0 == memcmp(chunk, "/dev/", 5)) ||
+						(mount_len == 5 && 0 == memcmp(chunk, "/proc", 5)) ||
+						(mount_len == 4 && 0 == memcmp(chunk, "/sys", 4)) ||
+						(mount_len >= 5 && 0 == memcmp(chunk, "/sys/", 5)) ||
+						(mount_len == 4 && 0 == memcmp(chunk, "/tmp", 4))
+						) {
+					/* Copy line into new file verbatim  */
+					fwrite(line, line_len, 1, new_mountinfo_fp);
+				}
+end_line_scan2: ;
+			}
+		}
+
 		free(line);
 		fclose(new_mountinfo_fp);
 		fclose(real_mountinfo_fp);
