@@ -491,6 +491,15 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 
+	case PR_epoll_wait:
+	{
+		set_sysnum(tracee, PR_epoll_pwait);
+		poke_reg(tracee, SYSARG_5, 0);
+		poke_reg(tracee, SYSARG_6, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
 	case PR_time:
 	{
 		time_t t = time(NULL);
