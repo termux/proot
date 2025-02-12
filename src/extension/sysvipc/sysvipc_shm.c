@@ -27,6 +27,10 @@
 #include <unistd.h> /* ftruncate */
 #endif
 
+#if defined(WITH_LIBANDROID_SHMEM)
+#include <sys/shm.h>
+#endif
+
 
 #define SYSVIPC_MAX_SHM_SIZE 100 * 4096
 
@@ -94,16 +98,30 @@ enum SysVIpcShmHelperRequestOp {
 	SHMHELPER_DISTRIBUTE,
 	SHMHELPER_ALLOC,
 	SHMHELPER_FREE,
+	SHMHELPER_LIBANDROID_SHMGET,
+	SHMHELPER_LIBANDROID_SHMAT,
+	SHMHELPER_LIBANDROID_SHMDT,
+	SHMHELPER_LIBANDROID_SHMCTL_RMID,
+	SHMHELPER_LIBANDROID_SHMCTL_STAT,
 };
 struct SysVIpcShmHelperRequest {
 	enum SysVIpcShmHelperRequestOp op;
 	int fd;
 	size_t size;
+	word_t key;
+};
+struct SysVIpcShmHelperShmatResponse {
+	int fd;
+	size_t size;
+};
+struct SysVIpcShmHelperShctlStatResponse {
+	size_t size;
+	int status;
 };
 #define SYSVIPC_SHMHELPER_SOCKET_LEN 108
 
 static struct sockaddr_un sysvipc_shm_helper_addr;
-static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *request)
+static void sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *request, void *response, size_t response_size)
 {
 	static bool launched_helper;
 	static int proot2helper;
@@ -113,12 +131,12 @@ static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *reque
 		int pipe_proot2helper[2];
 		int pipe_helper2proot[2];
 		if (pipe2(pipe_proot2helper, O_CLOEXEC) < 0) {
-			return -1;
+			return;
 		}
 		if (pipe2(pipe_helper2proot, O_CLOEXEC) < 0) {
 			close(pipe_proot2helper[0]);
 			close(pipe_proot2helper[1]);
-			return -1;
+			return;
 		}
 		pid_t forked = fork();
 		if (forked == 0) {
@@ -149,7 +167,7 @@ static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *reque
 			close(pipe_proot2helper[1]);
 			close(pipe_helper2proot[0]);
 			close(pipe_helper2proot[1]);
-			return -1;
+			return;
 		} else {
 			close(pipe_proot2helper[0]);
 			close(pipe_helper2proot[1]);
@@ -157,7 +175,7 @@ static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *reque
 			if (nread != SYSVIPC_SHMHELPER_SOCKET_LEN) {
 				close(pipe_proot2helper[1]);
 				close(pipe_helper2proot[0]);
-				return -1;
+				return;
 			}
 			sysvipc_shm_helper_addr.sun_family = AF_UNIX;
 			launched_helper = true;
@@ -167,12 +185,14 @@ static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *reque
 	}
 
 	write(proot2helper, request, sizeof(*request));
-	if (request->op == SHMHELPER_ALLOC) {
-		int fd = -1;
-		read(helper2proot, &fd, sizeof(fd));
-		return fd;
+	while (response_size) {
+		int n_read = TEMP_FAILURE_RETRY(read(helper2proot, response, response_size));
+		if (n_read <= 0) {
+			break;
+		}
+		response += n_read;
+		response_size -= n_read;
 	}
-	return 0;
 }
 
 int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
@@ -180,6 +200,17 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 	word_t shm_key = peek_reg(tracee, CURRENT, SYSARG_1);
 	size_t shm_size = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t shmflg = peek_reg(tracee, CURRENT, SYSARG_3);
+	if (config->ipc_namespace->shm_use_libandroid) {
+		struct SysVIpcShmHelperRequest request = {
+			.op = SHMHELPER_LIBANDROID_SHMGET,
+			.fd = shmflg,
+			.size = shm_size,
+			.key = shm_key,
+		};
+		int response = -EIO;
+		sysvipc_shm_send_helper_request(&request, &response, sizeof(response));
+		return response;
+	}
 	struct SysVIpcSharedMem *shms = config->ipc_namespace->shms;
 	size_t unused_slot = 0;
 	size_t shm_index = 0;
@@ -215,7 +246,8 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 			.fd = IPC_OBJECT_ID(shm_index, shm),
 			.size = shm_size
 		};
-		shm->fd = sysvipc_shm_send_helper_request(&request);
+		shm->fd = -1;
+		sysvipc_shm_send_helper_request(&request, &shm->fd, sizeof(shm->fd));
 		if (shm->fd < 0) {
 			return -ENOSPC;
 		}
@@ -239,6 +271,7 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 	return IPC_OBJECT_ID(shm_index, shm);
 }
 
+/* Only used when shm_use_libandroid is false */
 static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
 {
 	assert(LIST_EMPTY(shm->mappings));
@@ -248,7 +281,7 @@ static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
 		.op = SHMHELPER_FREE,
 		.fd = shm->fd,
 	};
-	sysvipc_shm_send_helper_request(&request);
+	sysvipc_shm_send_helper_request(&request, NULL, 0);
 
 	/* Mark shm as freed  */
 	TALLOC_FREE(shm->mappings);
@@ -263,8 +296,29 @@ static int sysvipc_shm_memmap_destructor(struct SysVIpcSharedMemMap *mapping) {
 	LIST_REMOVE(mapping, link_process);
 
 	struct SysVIpcSharedMem *shm = &mapping->ipc_namespace->shms[mapping->shm_index];
-	if (shm->rmid_pending && LIST_EMPTY(shm->mappings)) {
-		sysvipc_do_rmid(shm);
+	if (LIST_EMPTY(shm->mappings)) {
+		if (!mapping->ipc_namespace->shm_use_libandroid) {
+			if (shm->rmid_pending) {
+				sysvipc_do_rmid(shm);
+			}
+		} else {
+			{
+				struct SysVIpcShmHelperRequest request = {
+					.op = SHMHELPER_LIBANDROID_SHMDT,
+					.fd = shm->fd
+				};
+				sysvipc_shm_send_helper_request(&request, NULL, 0);
+			}
+			if (shm->rmid_pending) {
+				struct SysVIpcShmHelperRequest request = {
+					.op = SHMHELPER_LIBANDROID_SHMCTL_RMID,
+					.key = shm->key
+				};
+				sysvipc_shm_send_helper_request(&request, NULL, 0);
+			}
+			shm->valid = false;
+			shm->rmid_pending = false;
+		}
 	}
 	return 0;
 }
@@ -288,7 +342,57 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 {
 	size_t shm_index;
 	struct SysVIpcSharedMem *shm;
-	LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+	if (!config->ipc_namespace->shm_use_libandroid) {
+		LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+	} else {
+		int object_id = peek_reg(tracee, CURRENT, SYSARG_1);
+		struct SysVIpcSharedMem *shms = config->ipc_namespace->shms;
+		size_t unused_slot = 0;
+		size_t num_shms = talloc_array_length(shms);
+		bool found_shm = false;
+		bool found_unused_slot = false;
+		for (; shm_index < num_shms; shm_index++) {
+			if (shms[shm_index].valid) {
+				if(shms[shm_index].key == (int32_t) object_id) {
+					found_shm = true;
+					break;
+				}
+			} else if (!found_unused_slot) {
+				unused_slot = shm_index;
+				found_unused_slot = true;
+			}
+		}
+		if (!found_shm) {
+			struct SysVIpcShmHelperRequest request = {
+				.op = SHMHELPER_LIBANDROID_SHMAT,
+				.key = object_id
+			};
+			struct SysVIpcShmHelperShmatResponse response = {
+				.fd = -EIO
+			};
+			sysvipc_shm_send_helper_request(&request, &response, sizeof(response));
+			if (response.fd < 0) {
+				return response.fd;
+			}
+			if (found_unused_slot) {
+				shm_index = unused_slot;
+				shm = &shms[shm_index];
+			} else {
+				shm_index = num_shms;
+				config->ipc_namespace->shms = shms = talloc_realloc(config->ipc_namespace, shms, struct SysVIpcSharedMem, num_shms + 1);
+				shm = &shms[shm_index];
+				memset(shm, 0, sizeof(struct SysVIpcSharedMem));
+				shm->mappings = talloc_zero(config->ipc_namespace, struct SysVIpcSharedMemMaps);
+				LIST_INIT(shm->mappings);
+			}
+			shm->valid = true;
+			shm->key = object_id;
+			shm->fd = response.fd;
+			shm->stats.shm_segsz = response.size;
+		} else {
+			shm = &config->ipc_namespace->shms[shm_index];
+		}
+	}
 
 	config->waiting_object_index = shm_index;
 
@@ -369,9 +473,7 @@ int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)
 			.op = SHMHELPER_DISTRIBUTE,
 			.fd = shm->fd,
 		};
-		if (sysvipc_shm_send_helper_request(&request) < 0) {
-			goto fail_close_socket;
-		}
+		sysvipc_shm_send_helper_request(&request, NULL, 0);
 
 		register_chained_syscall(tracee, PR_recvmsg, config->shmat_socket_fd, pointers.msghdr_ptr, 0, 0, 0, 0);
 		config->chain_state = CSTATE_SHMAT_RECVMSG;
@@ -478,9 +580,22 @@ static void sysvipc_shm_update_stats(struct SysVIpcSharedMem *shm)
 
 int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 {
+	int object_id = peek_reg(tracee, CURRENT, SYSARG_1);
 	size_t shm_index;
-	struct SysVIpcSharedMem *shm;
-	LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+	struct SysVIpcSharedMem *shm = NULL;
+	if (!config->ipc_namespace->shm_use_libandroid) {
+		LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+		assert(shm != NULL);
+	} else {
+		struct SysVIpcSharedMem *shms = config->ipc_namespace->shms;
+		size_t num_shms = talloc_array_length(shms);
+		for (; shm_index < num_shms; shm_index++) {
+			if (shms[shm_index].valid && shms[shm_index].key == (int32_t) object_id) {
+				shm = &shms[shm_index];
+				break;
+			}
+		}
+	}
 
 	int cmd = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t buf = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -489,9 +604,22 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 	case IPC_RMID:
 	case IPC_RMID | SYSVIPC_IPC_64:
 	{
+		/* If this is libandroid-shmem memory that is not mapped
+		 * by any process under PRoot, pass request directly to libandroid-shmem  */
+		if (shm == NULL) {
+			struct SysVIpcShmHelperRequest request = {
+				.op = SHMHELPER_LIBANDROID_SHMCTL_RMID,
+				.key = object_id
+			};
+			sysvipc_shm_send_helper_request(&request, NULL, 0);
+			return 0;
+		}
+
 		/* Perform rmid only if this region is not mapped,
 		 * otherwise set flag to do so once all maps are unmapped */
 		if (LIST_EMPTY(shm->mappings)) {
+			/* If libandroid-shmem mode shm should be removed upon unmap */
+			assert(!config->ipc_namespace->shm_use_libandroid);
 			sysvipc_do_rmid(shm);
 		} else {
 			shm->rmid_pending = true;
@@ -501,11 +629,36 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 	}
 	case IPC_STAT:
 	{
-		/* Update shm_nattch */
-		sysvipc_shm_update_stats(shm);
+		struct SysVIpcShmidDs local_stats = {};
+		struct SysVIpcShmidDs *stats;
+		if (shm != NULL) {
+			/* Update shm_nattch */
+			sysvipc_shm_update_stats(shm);
+
+			stats = &shm->stats;
+		} else {
+			assert(config->ipc_namespace->shm_use_libandroid);
+			stats = &local_stats;
+			struct SysVIpcShmHelperRequest request = {
+				.op = SHMHELPER_LIBANDROID_SHMCTL_STAT,
+				.key = object_id
+			};
+			struct SysVIpcShmHelperShctlStatResponse response = {
+				.status = -EIO
+			};
+			sysvipc_shm_send_helper_request(&request, &response, sizeof(response));
+			if (response.status < 0) {
+				return response.status;
+			}
+			stats->shm_segsz = response.size;
+		}
+
+		if (config->ipc_namespace->shm_use_libandroid) {
+			stats->shm_perm.mode = 0666;
+		}
 
 		/* Copy stats to user  */
-		int status = write_data(tracee, buf, &shm->stats, sizeof(struct SysVIpcShmidDs));
+		int status = write_data(tracee, buf, &stats, sizeof(struct SysVIpcShmidDs));
 		if (status < 0) return status;
 		return 0;
 	}
@@ -555,6 +708,13 @@ void sysvipc_shm_fill_proc(FILE *proc_file, struct SysVIpcNamespace *ipc_namespa
 		proc_file,
 		"       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n"
 	);
+
+	if (ipc_namespace->shm_use_libandroid) {
+		/*
+		 * In libandroid-shmem share mode we don't support querying existing SHM regions
+		 */
+		return;
+	}
 
 	size_t page_size = sysconf(_SC_PAGESIZE);
 	struct SysVIpcSharedMem *shms = ipc_namespace->shms;
@@ -738,6 +898,42 @@ void sysvipc_shm_helper_main() {
 			close(client_fd);
 			break;
 		}
+#if defined(WITH_LIBANDROID_SHMEM)
+		case SHMHELPER_LIBANDROID_SHMGET:
+		{
+			int response = shmget(request.key, request.size, request.fd);
+			if (response == -1) response = -errno;
+			write(1, &response, sizeof(int));
+			break;
+		}
+		case SHMHELPER_LIBANDROID_SHMAT:
+		{
+			struct SysVIpcShmHelperShmatResponse response = {};
+			response.fd = libandroid_shmat_fd(request.key, &response.size);
+			write(1, &response, sizeof(response));
+			break;
+		}
+		case SHMHELPER_LIBANDROID_SHMDT:
+		{
+			libandroid_shmdt_fd(request.fd);
+			break;
+		}
+		case SHMHELPER_LIBANDROID_SHMCTL_RMID:
+		{
+			shmctl(request.key, IPC_RMID, 0);
+			break;
+		}
+		case SHMHELPER_LIBANDROID_SHMCTL_STAT:
+		{
+			struct shmid_ds stats = {};
+			struct SysVIpcShmHelperShctlStatResponse response = {};
+			response.status = shmctl(request.key, IPC_STAT, &stats);
+			if (response.status == -1) {
+				response.status = -errno;
+			}
+			response.size = stats.shm_segsz;
+		}
+#endif
 		default:
 			fprintf(stderr, "proot-shm-helper: Bad request\n");
 			break;
