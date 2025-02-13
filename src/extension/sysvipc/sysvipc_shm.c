@@ -351,7 +351,7 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 		size_t num_shms = talloc_array_length(shms);
 		bool found_shm = false;
 		bool found_unused_slot = false;
-		for (; shm_index < num_shms; shm_index++) {
+		for (shm_index = 0; shm_index < num_shms; shm_index++) {
 			if (shms[shm_index].valid) {
 				if(shms[shm_index].key == (int32_t) object_id) {
 					found_shm = true;
@@ -589,7 +589,7 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 	} else {
 		struct SysVIpcSharedMem *shms = config->ipc_namespace->shms;
 		size_t num_shms = talloc_array_length(shms);
-		for (; shm_index < num_shms; shm_index++) {
+		for (shm_index = 0; shm_index < num_shms; shm_index++) {
 			if (shms[shm_index].valid && shms[shm_index].key == (int32_t) object_id) {
 				shm = &shms[shm_index];
 				break;
