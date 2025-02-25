@@ -1,8 +1,8 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <string.h>
 #include <sys/syscall.h>  /* __NR_memfd_create,  */
-#include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
 #include <linux/memfd.h>  /* MFD_CLOEXEC  */
 
 #include <talloc.h>
@@ -13,6 +13,7 @@
 #include "tracee/seccomp.h"
 #include "syscall/chain.h"
 #include "syscall/syscall.h" /* set_sysarg_data,  */
+#include "ashmem.h" /* ASHMEM_GET_SIZE,  */
 
 enum AshmemMemfdChainState {
 	CS_IDLE,
