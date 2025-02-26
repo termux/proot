@@ -21,6 +21,7 @@
  */
 
 #include <sched.h>      /* CLONE_*,  */
+#include <stdio.h>
 #include <sys/types.h>  /* pid_t, */
 #include <sys/ptrace.h> /* ptrace(1), PTRACE_*, */
 #include <sys/types.h>  /* waitpid(2), */
@@ -107,6 +108,28 @@ int launch_process(Tracee *tracee, char *const argv[])
 	default: /* parent */
 		/* We know the pid of the first tracee now.  */
 		tracee->pid = pid;
+
+		char *init_pid = getenv("PROOT_WRITE_INIT_PID");
+		if (NULL != init_pid) {
+			FILE *fp;
+			unsigned long written;
+			char pid_buf[64];
+			int length = snprintf(pid_buf, sizeof(pid_buf) - 1, "%d", (int)pid);
+
+			fp = fopen(init_pid, "w");
+			if (NULL == fp) {
+				note(tracee, ERROR, SYSTEM, "PROOT_WRITE_INIT_PID: unable to write init pid");
+				return -errno;
+			}
+
+			written = fwrite(pid_buf, sizeof(char), length, fp);
+			if (written != (unsigned long)length) {
+				note(tracee, ERROR, SYSTEM, "PROOT_WRITE_INIT_PID: did not write the full pid, expected=%d, wrote=%ld", length, written);
+				return -1;
+			}
+			fclose(fp);
+		}
+
 		return 0;
 	}
 
