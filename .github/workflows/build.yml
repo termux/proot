@@ -1,0 +1,45 @@
+name: Build binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/cache@v4
+      with:
+        path: build/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build
+      run: ANDROID_API=30 ARCH=x86_64 ./hack/build-android.sh
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: proot-android-x86_64
+        path: ./src/proot
+
+  build-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/cache@v4
+      with:
+        path: build/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build
+      run: ANDROID_API=30 ARCH=aarch64 ./hack/build-android.sh
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: proot-android-aarch64
+        path: ./src/proot
