@@ -824,7 +824,7 @@ Thanks
 ------
 
 Huge thanks to Rémi DURAFFORT for all the tests, bug reports, fixes,
-and for hosting http://proot.me.
+and for hosting the legacy help pages.
 
 Thanks to Thomas P. HIGDON for the advanced investigation on a really
 tricky bug (red zone corruption).

@@ -250,7 +250,7 @@ static void check_architecture(Tracee *tracee)
 
 	note(tracee, INFO, USER,
 		"Get a 64-bit version that supports 32-bit binaries here: "
-		"http://static.proot.me/proot-x86_64");
+		"https://proot-me.github.io/");
 }
 
 /**

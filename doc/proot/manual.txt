@@ -487,23 +487,7 @@ Downloads
 PRoot
 -----
 
-The latest release of PRoot is packaged on http://packages.proot.me
-and sources are hosted on http://scm.proot.me.  It is also available
-as highly compatible static binaries:
-
-* for x86_64: http://portable.proot.me/proot-x86_64
-
-* for x86: http://portable.proot.me/proot-x86
-
-* for ARM: http://portable.proot.me/proot-arm
-
-* other architectures: on demand.
-
-Such binaries are created using the following build-system:
-http://build.proot.me.  It makes sure that they can run on any distros
-powered by the Linux kernel version 2.6.0 or later, nothing more.
-Ultimately these binaries can even run on Linux systems where no
-libraries are installed.
+For the latest downloads, please visit https://proot-me.github.io/#downloads .
 
 Rootfs
 ------
@@ -657,7 +641,7 @@ bindfs(1), fakeroot(1), fakechroot(1)
 Colophon
 ========
 
-Visit http://proot.me for help, bug reports, suggestions, patches, ...
+Visit https://proot-me.github.io for help, bug reports, suggestions, patches, ...
 Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.
 
 ::
