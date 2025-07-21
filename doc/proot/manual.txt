@@ -641,7 +641,7 @@ bindfs(1), fakeroot(1), fakechroot(1)
 Colophon
 ========
 
-Visit https://proot-me.github.io for help, bug reports, suggestions, patches, ...
+Visit https://github.com/termux/proot for help, bug reports, suggestions, patches, ...
 Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.
 
 ::
