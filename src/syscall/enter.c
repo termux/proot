@@ -616,6 +616,11 @@ int translate_syscall_enter(Tracee *tracee)
 		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS + 2 /* + TCSAFLUSH */) {
 			poke_reg(tracee, SYSARG_2, TCSETS + TCSANOW);
 		}
+
+		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCGETS2) {
+			poke_reg(tracee, SYSARG_2, TCGETS);
+		}
+
 		break;
 #endif
 	
