@@ -656,6 +656,13 @@ int translate_syscall_enter(Tracee *tracee)
 			if (0 == strcmp(memfd_name, "opcache_lock")) {
 				status = -EACCES;
 			}
+			/* apk-tools v3 use memfd_create + execveat, which is not supported under PRoot
+			 * https://github.com/termux/proot-distro/issues/595#issuecomment-3705344471
+			 * https://git.alpinelinux.org/apk-tools/tree/src/package.c?h=v3.0.3#n737
+			 */
+			if (0 == strncmp(memfd_name, "lib/apk/exec/", 13)) {
+				status = -EACCES;
+			}
 			break;
 		}
 	}
