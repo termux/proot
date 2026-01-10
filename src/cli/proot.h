@@ -4,6 +4,7 @@
 #define PROOT_CLI_H
 
 #include "cli/cli.h"
+#include "execve/binfmt.h"
 
 #ifndef VERSION
 #define VERSION "5.1.0"
@@ -67,6 +68,7 @@ static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char
 static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_p(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_binfmt_rules(Tracee *tracee, const struct Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -284,6 +286,22 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .description = "Correct the size returned from lstat for symbolic links.",
           .detail = "",
         },
+		{
+			.class = "Extension options",
+			.arguments = {
+				{ .name = "--binfmt-rules", .separator = ' ', .value = "path" },
+				{ .name = NULL, .separator = '\0', .value = NULL }
+			},
+			.handler = handle_option_binfmt_rules,
+			.description = "Load binfmt_misc rules from the specified file.",
+			.detail = "\tThis option allows loading binfmt_misc rules from a file.\n\
+\tEach rule in the file should follow this format:\n\
+\n\
+\t:name:type:offset:magic:mask:interpreter:\n\
+\n\
+\tThis is useful for adding support for executing foreign\n\
+\tbinary formats within the proot environment.",
+		},
 	{ .class = "Alias options",
 	  .arguments = {
 		{ .name = "-R", .separator = ' ', .value = "path" },

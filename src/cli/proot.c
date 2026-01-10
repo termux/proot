@@ -20,6 +20,7 @@
  * 02110-1301 USA.
  */
 
+#include <stdlib.h>
 #include <string.h>    /* str*(3), */
 #include <assert.h>    /* assert(3), */
 #include <stdio.h>     /* printf(3), fflush(3), */
@@ -333,6 +334,11 @@ static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *va
 {
         (void) initialize_extension(tracee, port_switch_callback, NULL);
         return 0;
+}
+
+static int handle_option_binfmt_rules(Tracee *tracee UNUSED, const struct Cli *cli UNUSED, const char *value) {
+	atexit(clear_binfmt_rule_list);
+	return read_binfmt_rules_from_file(value);
 }
 
 /**
