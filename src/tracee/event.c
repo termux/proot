@@ -212,6 +212,66 @@ static void print_talloc_hierarchy(int signum, siginfo_t *siginfo UNUSED, void *
 
 static int last_exit_status = -1;
 
+/*
+ * Batch event processing to fix the PTRACE_EVENT_CLONE vs SIGSTOP race.
+ *
+ * When a multi-threaded process (e.g. Node.js starting its libuv thread pool)
+ * calls clone(CLONE_VM|CLONE_THREAD|...) in rapid succession the kernel
+ * delivers a PTRACE_EVENT_CLONE to the parent AND a SIGSTOP to the new child.
+ * These two events can be returned by waitpid(2) in either order.  PRoot's
+ * SIGSTOP_PENDING mechanism handles this for a single thread, but with four
+ * threads created at once the interleaving of multiple SIGSTOP and
+ * PTRACE_EVENT_CLONE events can leave a child permanently in ptrace-stop
+ * with no further waitpid(2) report — a deadlock.
+ *
+ * Fix: after waking from a blocking waitpid(2), drain all additional pending
+ * events using WNOHANG, sort the batch so that PTRACE_EVENT_CLONE/FORK/VFORK
+ * events precede any SIGSTOP events, then process in that order.  This
+ * guarantees new_child() is called before the child's initial SIGSTOP is
+ * handled, so tracee->exe != NULL and the SIGSTOP_IGNORED path is taken
+ * directly rather than falling into SIGSTOP_PENDING.
+ */
+#define MAX_BATCH_EVENTS 64
+
+typedef struct {
+	pid_t pid;
+	int   status;
+} PendingEvent;
+
+/* Lower value = process first. */
+static int event_priority(int status)
+{
+	int sig;
+
+	/* Exited / killed processes: process after all stops. */
+	if (!WIFSTOPPED(status))
+		return 4;
+
+	/* Extract signal+ptrace-event bits as done in handle_tracee_event(). */
+	sig = (status & 0xfff00) >> 8;
+
+	/* Parent's clone notification must arrive before the child's SIGSTOP
+	 * so new_child() can set tracee->exe before the SIGSTOP handler runs. */
+	if (sig == (SIGTRAP | PTRACE_EVENT_CLONE << 8) ||
+	    sig == (SIGTRAP | PTRACE_EVENT_FORK  << 8) ||
+	    sig == (SIGTRAP | PTRACE_EVENT_VFORK << 8))
+		return 0;
+
+	/* SIGSTOP gets lowest stop priority: it may be a new child's first stop
+	 * and we want its parent's PTRACE_EVENT_CLONE processed first. */
+	if (sig == SIGSTOP)
+		return 3;
+
+	return 2;  /* all other stops: normal priority */
+}
+
+static int cmp_pending_events(const void *a, const void *b)
+{
+	const PendingEvent *ea = (const PendingEvent *)a;
+	const PendingEvent *eb = (const PendingEvent *)b;
+	return event_priority(ea->status) - event_priority(eb->status);
+}
+
 /**
  * Check if this instance of PRoot can *technically* handle @tracee.
  */
@@ -321,42 +381,80 @@ int event_loop()
 	}
 
 	while (1) {
-		int tracee_status;
-		Tracee *tracee;
-		int signal;
-		pid_t pid;
+		PendingEvent batch[MAX_BATCH_EVENTS];
+		int batch_count = 0;
+		int i;
 
 		/* This is the only safe place to free tracees.  */
 		free_terminated_tracees();
 
-		/* Wait for the next tracee's stop. */
-		pid = waitpid(-1, &tracee_status, __WALL);
-		if (pid < 0) {
-			if (errno != ECHILD) {
-				note(NULL, ERROR, SYSTEM, "waitpid()");
-				return EXIT_FAILURE;
+		/* Block until at least one tracee stops. */
+		{
+			pid_t pid;
+			int   tracee_status;
+
+			pid = waitpid(-1, &tracee_status, __WALL);
+			if (pid < 0) {
+				if (errno != ECHILD) {
+					note(NULL, ERROR, SYSTEM, "waitpid()");
+					return EXIT_FAILURE;
+				}
+				break;
 			}
-			break;
+			batch[0].pid    = pid;
+			batch[0].status = tracee_status;
+			batch_count     = 1;
 		}
 
-		/* Get information about this tracee. */
-		tracee = get_tracee(NULL, pid, true);
-		assert(tracee != NULL);
+		/* Drain any additional events that are already pending.
+		 * Each stopped tracee contributes at most one event here since
+		 * no tracee has been restarted yet in this iteration.  */
+		while (batch_count < MAX_BATCH_EVENTS) {
+			pid_t pid;
+			int   tracee_status;
 
-		tracee->running = false;
+			pid = waitpid(-1, &tracee_status, __WALL | WNOHANG);
+			if (pid <= 0)
+				break;
+			batch[batch_count].pid    = pid;
+			batch[batch_count].status = tracee_status;
+			batch_count++;
+		}
 
-		status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
-		if (status != 0)
-			continue;
+		/* Sort: PTRACE_EVENT_CLONE/FORK/VFORK before SIGSTOP.
+		 * Ensures new_child() sets exe != NULL before the child's
+		 * initial SIGSTOP is processed, avoiding a deadlock where
+		 * the child is left in SIGSTOP_PENDING with no future
+		 * waitpid(2) report to wake it.  */
+		if (batch_count > 1)
+			qsort(batch, batch_count, sizeof(PendingEvent),
+			      cmp_pending_events);
 
-		if (tracee->as_ptracee.ptracer != NULL) {
-			bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
-			if (keep_stopped)
+		/* Process events in priority order. */
+		for (i = 0; i < batch_count; i++) {
+			Tracee *tracee;
+			int signal;
+
+			tracee = get_tracee(NULL, batch[i].pid, true);
+			assert(tracee != NULL);
+
+			tracee->running = false;
+
+			status = notify_extensions(tracee, NEW_STATUS,
+						   batch[i].status, 0);
+			if (status != 0)
 				continue;
-		}
 
-		signal = handle_tracee_event(tracee, tracee_status);
-		(void) restart_tracee(tracee, signal);
+			if (tracee->as_ptracee.ptracer != NULL) {
+				bool keep_stopped = handle_ptracee_event(tracee,
+								batch[i].status);
+				if (keep_stopped)
+					continue;
+			}
+
+			signal = handle_tracee_event(tracee, batch[i].status);
+			(void) restart_tracee(tracee, signal);
+		}
 	}
 
 	return last_exit_status;
