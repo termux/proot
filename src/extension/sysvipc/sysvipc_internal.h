@@ -39,6 +39,7 @@ struct SysVIpcSemaphore {
 	bool valid;
 	uint16_t *sems;
 	int nsems;
+	struct SysVIpcSemidDs stats;
 };
 
 /*****************

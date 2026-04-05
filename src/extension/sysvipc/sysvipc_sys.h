@@ -72,6 +72,16 @@ struct  SysVIpcSeminfo
 };
 
 
+struct SysVIpcSemidDs
+{
+	struct ipc_perm sem_perm;		/* operation permission struct */
+	int64_t sem_otime;			/* time of last semop() */
+	int64_t sem_ctime;			/* time of last change by semctl() */
+	uint64_t sem_nsems;			/* number of semaphores in set */
+	uint64_t __glibc_reserved3;
+	uint64_t __glibc_reserved4;
+};
+
 struct SysVIpcShmidDs
 {
 	struct ipc_perm shm_perm;		/* operation permission struct */

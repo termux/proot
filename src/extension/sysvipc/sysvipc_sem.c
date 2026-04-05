@@ -6,6 +6,7 @@
 #include <sys/errno.h> /* E* */
 #include <string.h> /* memset */
 #include <assert.h> /* assert */
+#include <time.h> /* time */
 
 #define SYSVIPC_MAX_SEMS 512
 #define SYSVIPC_MAX_NSEMS 512
@@ -59,6 +60,10 @@ int sysvipc_semget(Tracee *tracee, struct SysVIpcConfig *config) {
 		semaphore->sems = talloc_array(config->ipc_namespace, uint16_t, nsems);
 		memset(semaphore->sems, 0, nsems * sizeof(uint16_t));
 		semaphore->nsems = nsems;
+		memset(&semaphore->stats, 0, sizeof(semaphore->stats));
+		semaphore->stats.sem_ctime = time(NULL);
+		semaphore->stats.sem_nsems = nsems;
+		semaphore->stats.sem_perm.mode = semflg & 0777;
 	} else {
 		if ((semflg & IPC_CREAT) && (semflg & IPC_EXCL)) {
 			return -EEXIST;
@@ -115,6 +120,7 @@ static int sysvipc_sem_check(struct SysVIpcConfig *config, struct SysVIpcSemapho
 		}
 	}
 	memcpy(semaphore->sems, new_sems, semaphore->nsems * sizeof(uint16_t));
+	semaphore->stats.sem_otime = time(NULL);
 
 	return 0;
 }
@@ -211,6 +217,7 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 		if (cmdarg > SYSVIPC_MAX_SEMVAL) return -ERANGE;
 		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
 		semaphore->sems[semnum] = cmdarg;
+		semaphore->stats.sem_ctime = time(NULL);
 		return 0;
 	}
 	case SYSVIPC_GETALL:
@@ -237,14 +244,68 @@ int sysvipc_semctl(Tracee *tracee, struct SysVIpcConfig *config) {
 		TALLOC_FREE(semaphore->sems);
 		return 0;
 	}
-#if 0
 	case IPC_STAT:
+	case SYSVIPC_SEM_STAT:
+	case SYSVIPC_SEM_STAT_ANY:
 	{
-		int status = write_data(tracee, buf, &queue->stats, sizeof(struct msqid_ds));
+		semaphore->stats.sem_nsems = semaphore->nsems;
+		int status = write_data(tracee, cmdarg, &semaphore->stats, sizeof(struct SysVIpcSemidDs));
 		if (status < 0) return status;
+		if ((cmd & ~SYSVIPC_IPC_64) == SYSVIPC_SEM_STAT || (cmd & ~SYSVIPC_IPC_64) == SYSVIPC_SEM_STAT_ANY) {
+			return IPC_OBJECT_ID(semaphore_index, semaphore);
+		}
 		return 0;
 	}
-#endif
+	case IPC_SET:
+	{
+		struct SysVIpcSemidDs buf;
+		int status = read_data(tracee, &buf, cmdarg, sizeof(struct SysVIpcSemidDs));
+		if (status < 0) return status;
+		semaphore->stats.sem_perm.uid = buf.sem_perm.uid;
+		semaphore->stats.sem_perm.gid = buf.sem_perm.gid;
+		semaphore->stats.sem_perm.mode = buf.sem_perm.mode & 0777;
+		semaphore->stats.sem_ctime = time(NULL);
+		return 0;
+	}
+	case SYSVIPC_GETPID:
+	{
+		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
+		return 0; /* sempid not tracked, return 0 */
+	}
+	case SYSVIPC_GETNCNT:
+	{
+		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
+		int count = 0;
+		Tracee *waiting_tracee;
+		struct SysVIpcConfig *waiting_config;
+		SYSVIPC_FOREACH_TRACEE(waiting_tracee, waiting_config, config->ipc_namespace) {
+			if (
+					waiting_config->wait_reason == WR_WAIT_SEMOP &&
+					waiting_config->waiting_object_index == semaphore_index) {
+				char wait_type = 0;
+				sysvipc_sem_check(waiting_config, semaphore, &wait_type);
+				if (wait_type == 'n') count++;
+			}
+		}
+		return count;
+	}
+	case SYSVIPC_GETZCNT:
+	{
+		if (semnum < 0 || semnum >= semaphore->nsems) return -EINVAL;
+		int count = 0;
+		Tracee *waiting_tracee;
+		struct SysVIpcConfig *waiting_config;
+		SYSVIPC_FOREACH_TRACEE(waiting_tracee, waiting_config, config->ipc_namespace) {
+			if (
+					waiting_config->wait_reason == WR_WAIT_SEMOP &&
+					waiting_config->waiting_object_index == semaphore_index) {
+				char wait_type = 0;
+				sysvipc_sem_check(waiting_config, semaphore, &wait_type);
+				if (wait_type == 'z') count++;
+			}
+		}
+		return count;
+	}
 	case SYSVIPC_IPC_INFO:
 	case SYSVIPC_SEM_INFO:
 	{
