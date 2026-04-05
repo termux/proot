@@ -20,6 +20,7 @@
 #include <string.h> /* memset */
 #include <time.h> /* time */
 #include <fcntl.h> /* open, fcntl */
+#include <pthread.h> /* pthread_create */
 
 #ifdef __ANDROID__
 #include <linux/ashmem.h> /* ASHMEM_* */
@@ -103,13 +104,39 @@ struct SysVIpcShmHelperRequest {
 #define SYSVIPC_SHMHELPER_SOCKET_LEN 108
 
 static struct sockaddr_un sysvipc_shm_helper_addr;
+
+/* X11 SHM bridge: socket_id used to generate Termux:X11-compatible shmids */
+static int sysvipc_x11_socket_id = 0;
+
+static bool sysvipc_helper_launched = false;
+static int sysvipc_proot2helper;
+static int sysvipc_helper2proot;
+
+/* Ensure the helper process is launched and X11 bridge socket_id is known */
+static int sysvipc_shm_ensure_helper(void);
+
 static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *request)
 {
-	static bool launched_helper;
-	static int proot2helper;
-	static int helper2proot;
+	if (!sysvipc_helper_launched) {
+		if (sysvipc_shm_ensure_helper() < 0)
+			return -1;
+	}
 
-	if (!launched_helper) {
+	write(sysvipc_proot2helper, request, sizeof(*request));
+	if (request->op == SHMHELPER_ALLOC) {
+		int fd = -1;
+		read(sysvipc_helper2proot, &fd, sizeof(fd));
+		return fd;
+	}
+	return 0;
+}
+
+static int sysvipc_shm_ensure_helper(void)
+{
+	if (sysvipc_helper_launched)
+		return 0;
+
+	{
 		int pipe_proot2helper[2];
 		int pipe_helper2proot[2];
 		if (pipe2(pipe_proot2helper, O_CLOEXEC) < 0) {
@@ -160,20 +187,18 @@ static int sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *reque
 				return -1;
 			}
 			sysvipc_shm_helper_addr.sun_family = AF_UNIX;
-			launched_helper = true;
-			proot2helper = pipe_proot2helper[1];
-			helper2proot = pipe_helper2proot[0];
+			/* Read the X11 bridge socket_id from the helper */
+			int id_nread = read(pipe_helper2proot[0], &sysvipc_x11_socket_id, sizeof(int));
+			sysvipc_helper_launched = true;
+			sysvipc_proot2helper = pipe_proot2helper[1];
+			sysvipc_helper2proot = pipe_helper2proot[0];
 		}
-	}
-
-	write(proot2helper, request, sizeof(*request));
-	if (request->op == SHMHELPER_ALLOC) {
-		int fd = -1;
-		read(helper2proot, &fd, sizeof(fd));
-		return fd;
 	}
 	return 0;
 }
+
+/* Counter for generating Termux:X11-compatible shmids */
+static int sysvipc_shm_counter = 0;
 
 int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 {
@@ -210,9 +235,19 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 			memset(&shms[shm_index], 0, sizeof(shms[shm_index]));
 		}
 		shm = &shms[shm_index];
+
+		/* Ensure helper is launched first so sysvipc_x11_socket_id
+		 * is available for generating compatible shmids */
+		sysvipc_shm_ensure_helper();
+
+		/* Generate Termux:X11-compatible shmid:
+		 * upper 16 bits = socket_id, lower 15 bits = counter */
+		sysvipc_shm_counter = (sysvipc_shm_counter + 1) & 0x7fff;
+		shm->x11_shmid = sysvipc_x11_socket_id * 0x10000 + sysvipc_shm_counter;
+
 		struct SysVIpcShmHelperRequest request = {
 			.op = SHMHELPER_ALLOC,
-			.fd = IPC_OBJECT_ID(shm_index, shm),
+			.fd = shm->x11_shmid,
 			.size = shm_size
 		};
 		shm->fd = sysvipc_shm_send_helper_request(&request);
@@ -236,7 +271,7 @@ int sysvipc_shmget(Tracee *tracee, struct SysVIpcConfig *config)
 			return -EINVAL;
 		}
 	}
-	return IPC_OBJECT_ID(shm_index, shm);
+	return shm->x11_shmid;
 }
 
 static void sysvipc_do_rmid(struct SysVIpcSharedMem *shm)
@@ -288,7 +323,7 @@ int sysvipc_shmat(Tracee *tracee, struct SysVIpcConfig *config)
 {
 	size_t shm_index;
 	struct SysVIpcSharedMem *shm;
-	LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+	LOOKUP_SHM_OBJECT(shm_index, shm, config->ipc_namespace->shms)
 
 	config->waiting_object_index = shm_index;
 
@@ -480,7 +515,7 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 {
 	size_t shm_index;
 	struct SysVIpcSharedMem *shm;
-	LOOKUP_IPC_OBJECT(shm_index, shm, config->ipc_namespace->shms)
+	LOOKUP_SHM_OBJECT(shm_index, shm, config->ipc_namespace->shms)
 
 	int cmd = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t buf = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -643,6 +678,133 @@ static int sysvipc_shm_do_allocate(size_t size, int shmid) {
 #endif
 }
 
+/*
+ * X11 SHM Bridge
+ *
+ * Creates a listener on an abstract Unix socket using Termux:X11's
+ * protocol, so the X11 server can find and attach SHM segments
+ * created by processes inside proot.
+ *
+ * Protocol: client sends shmid (int), server responds with
+ * key (key_t) + fd (SCM_RIGHTS).
+ */
+#define X11BRIDGE_SOCKNAME "/dev/shm/%08x"
+#define X11BRIDGE_MAX_SEGMENTS 256
+
+static struct {
+	int shmid;
+	int fd;
+	key_t key;
+	int in_use;
+} x11bridge_segments[X11BRIDGE_MAX_SEGMENTS];
+
+static pthread_mutex_t x11bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int x11bridge_socket_id = 0;
+
+static void x11bridge_register(int shmid, int fd, key_t key) {
+	pthread_mutex_lock(&x11bridge_mutex);
+	for (int i = 0; i < X11BRIDGE_MAX_SEGMENTS; i++) {
+		if (!x11bridge_segments[i].in_use) {
+			x11bridge_segments[i].shmid = shmid;
+			x11bridge_segments[i].fd = fd;
+			x11bridge_segments[i].key = key;
+			x11bridge_segments[i].in_use = 1;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&x11bridge_mutex);
+}
+
+static void x11bridge_unregister_by_fd(int fd) {
+	pthread_mutex_lock(&x11bridge_mutex);
+	for (int i = 0; i < X11BRIDGE_MAX_SEGMENTS; i++) {
+		if (x11bridge_segments[i].in_use && x11bridge_segments[i].fd == fd) {
+			x11bridge_segments[i].in_use = 0;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&x11bridge_mutex);
+}
+
+static void* x11bridge_thread(void* arg) {
+	int listen_sock = *(int*)arg;
+	free(arg);
+	for (;;) {
+		struct sockaddr_un client_addr;
+		socklen_t addr_len = sizeof(client_addr);
+		int client = accept(listen_sock, (struct sockaddr*)&client_addr, &addr_len);
+		if (client < 0) break;
+
+		int shmid;
+		if (recv(client, &shmid, sizeof(shmid), 0) != sizeof(shmid)) {
+			close(client);
+			continue;
+		}
+
+		pthread_mutex_lock(&x11bridge_mutex);
+		for (int i = 0; i < X11BRIDGE_MAX_SEGMENTS; i++) {
+			if (x11bridge_segments[i].in_use && x11bridge_segments[i].shmid == shmid) {
+				key_t key = x11bridge_segments[i].key;
+				int fd = x11bridge_segments[i].fd;
+				pthread_mutex_unlock(&x11bridge_mutex);
+
+				/* Send key */
+				write(client, &key, sizeof(key_t));
+
+				/* Send fd via SCM_RIGHTS */
+				char nothing = '!';
+				struct iovec iov = { .iov_base = &nothing, .iov_len = 1 };
+				struct {
+					struct cmsghdr align;
+					int fd[1];
+				} anc;
+				struct msghdr msg = {
+					.msg_iov = &iov, .msg_iovlen = 1,
+					.msg_control = &anc,
+					.msg_controllen = sizeof(struct cmsghdr) + sizeof(int)
+				};
+				struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+				cmsg->cmsg_len = msg.msg_controllen;
+				cmsg->cmsg_level = SOL_SOCKET;
+				cmsg->cmsg_type = SCM_RIGHTS;
+				((int*)CMSG_DATA(cmsg))[0] = fd;
+				sendmsg(client, &msg, 0);
+				goto next;
+			}
+		}
+		pthread_mutex_unlock(&x11bridge_mutex);
+next:
+		close(client);
+	}
+	return NULL;
+}
+
+static int x11bridge_start(void) {
+	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sock < 0) return 0;
+
+	struct sockaddr_un addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+
+	int i;
+	for (i = 0; i < 4096; i++) {
+		x11bridge_socket_id = (getpid() + i) & 0xffff;
+		sprintf(&addr.sun_path[1], X11BRIDGE_SOCKNAME, x11bridge_socket_id);
+		int len = sizeof(addr.sun_family) + strlen(&addr.sun_path[1]) + 1;
+		if (bind(sock, (struct sockaddr*)&addr, len) == 0) break;
+	}
+	if (i == 4096) { close(sock); return 0; }
+	if (listen(sock, 4) != 0) { close(sock); return 0; }
+
+	int *sock_arg = malloc(sizeof(int));
+	*sock_arg = sock;
+	pthread_t tid;
+	pthread_create(&tid, NULL, x11bridge_thread, sock_arg);
+	pthread_detach(tid);
+	return x11bridge_socket_id;
+}
+
 void sysvipc_shm_helper_main() {
 	char *path;
 	int socket_server_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -655,7 +817,6 @@ void sysvipc_shm_helper_main() {
 
 		if (strlen(path) > SYSVIPC_SHMHELPER_SOCKET_LEN) {
 			close(socket_server_fd);
-			fprintf(stderr, "proot-shm-helper: Temporary path too long\n");
 			_exit(1);
 		}
 
@@ -682,6 +843,11 @@ void sysvipc_shm_helper_main() {
 	}
 
 	write(1, addr.sun_path, SYSVIPC_SHMHELPER_SOCKET_LEN);
+
+	/* Start X11 SHM bridge and send socket_id to proot */
+	int bridge_id = x11bridge_start();
+	write(1, &bridge_id, sizeof(int));
+
 	for (;;) {
 		struct SysVIpcShmHelperRequest request;
 		int status = TEMP_FAILURE_RETRY(read(0, &request, sizeof(request)));
@@ -693,7 +859,6 @@ void sysvipc_shm_helper_main() {
 			break;
 		}
 		if (status != sizeof(request)) {
-			fprintf(stderr, "proot-shm-helper: Incomplete request\n");
 			break;
 		}
 		switch (request.op) {
@@ -701,9 +866,14 @@ void sysvipc_shm_helper_main() {
 		{
 			int fd = sysvipc_shm_do_allocate(request.size, request.fd);
 			write(1, &fd, sizeof(int));
+			if (fd >= 0) {
+				/* Register in X11 bridge so Termux:X11 can find it */
+				x11bridge_register(request.fd, fd, IPC_PRIVATE);
+			}
 			break;
 		}
 		case SHMHELPER_FREE:
+			x11bridge_unregister_by_fd(request.fd);
 			close(request.fd);
 			break;
 		case SHMHELPER_DISTRIBUTE:
@@ -739,7 +909,6 @@ void sysvipc_shm_helper_main() {
 			break;
 		}
 		default:
-			fprintf(stderr, "proot-shm-helper: Bad request\n");
 			break;
 		}
 	}

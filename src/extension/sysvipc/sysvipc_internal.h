@@ -92,6 +92,7 @@ struct SysVIpcSharedMem {
 	bool valid;
 	bool rmid_pending;
 	int fd;
+	int x11_shmid; /* Termux:X11-compatible shmid for MIT-SHM */
 	struct SysVIpcShmidDs stats;
 
 	/**
@@ -223,6 +224,26 @@ struct SysVIpcConfig {
 
 #define IPC_OBJECT_ID(index, object) \
 	((index + 1) | (object->generation << 12))
+
+/**
+ * Find SHM object by x11_shmid (Termux:X11-compatible shmid).
+ */
+#define LOOKUP_SHM_OBJECT(out_index, out_object, objects_array) \
+{ \
+	int object_id = peek_reg(tracee, CURRENT, SYSARG_1); \
+	int num_objects = (int)talloc_array_length(objects_array); \
+	out_index = (size_t)-1; \
+	for (int _i = 0; _i < num_objects; _i++) { \
+		if ((objects_array)[_i].valid && (objects_array)[_i].x11_shmid == object_id) { \
+			out_index = _i; \
+			break; \
+		} \
+	} \
+	if (out_index == (size_t)-1) { \
+		return -EINVAL; \
+	} \
+	out_object = &(objects_array)[out_index]; \
+}
 
 /**
  * Iterate over all Tracees in given SysVIpc namespace
