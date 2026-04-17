@@ -243,21 +243,36 @@ void translate_syscall(Tracee *tracee)
 				tracee->restart_how = PTRACE_SYSCALL;
 			}
 
-			/* Set syscall arguments to make it fail
-			 * TODO: More reliable way to make invalid arguments
-			 * For most syscalls we set all args to -1
-			 * Hoping there is among them invalid request/address/fd/value that will make syscall fail */
+			/* Handle syscall rejection when sysnum can't be modified.
+			 *
+			 * Normal path: proot sets sysnum to PR_void so the kernel runs
+			 * a harmless no-op, then overrides x0 at sysexit with the real
+			 * error code. On some kernels the NT_ARM_SYSTEM_CALL regset is
+			 * absent, so the NT_PRSTATUS push carrying x8=-1 (PR_void) is
+			 * rejected with EINVAL and we land in this workaround branch.
+			 *
+			 * Legacy strategy was to poke all 6 syscall args to -1, "betting"
+			 * that at least one would make the syscall fail naturally.
+			 * But this strategy also pushed x8=-1 through NT_PRSTATUS
+			 * (push_specific_regs writes the whole CURRENT regs block),
+			 * and some kernels treat "x8=-1 (invalid sysnum)" as a trigger
+			 * for a non-standard signal delivery path
+			 * , synthesizing a SIGSEGV that kills
+			 * the tracee before it executes a single user-mode instruction.
+			 *
+			 * Correct strategy: restore x8 to the original sysnum so the
+			 * kernel actually runs the rejected syscall, and poke all 6
+			 * args to -1 so the syscall fails naturally inside the kernel
+			 * (EFAULT/EBADF/EINVAL). The real error code is written to x0
+			 * by proot at sysexit.
+			 * */
+			poke_reg(tracee, SYSARG_NUM, orig_sysnum); /* restore sysnum; x8=-1 triggers non-standard signal path on some kernels */
 			poke_reg(tracee, SYSARG_1, -1);
 			poke_reg(tracee, SYSARG_2, -1);
 			poke_reg(tracee, SYSARG_3, -1);
 			poke_reg(tracee, SYSARG_4, -1);
 			poke_reg(tracee, SYSARG_5, -1);
 			poke_reg(tracee, SYSARG_6, -1);
-
-			if (get_sysnum(tracee, ORIGINAL) == PR_brk) {
-				/* For brk() we pass 0 as first arg; this is used to query value without changing it */
-				poke_reg(tracee, SYSARG_1, 0);
-			}
 
 			/* Push regs again without changing syscall */
 			push_regs_status = push_specific_regs(tracee, false);
