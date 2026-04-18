@@ -243,28 +243,48 @@ void translate_syscall(Tracee *tracee)
 				tracee->restart_how = PTRACE_SYSCALL;
 			}
 
-			/* Handle syscall rejection when sysnum can't be modified.
+			/* Handle syscall rejection when the syscall number can't be modified.
 			 *
-			 * Normal path: proot sets sysnum to PR_void so the kernel runs
-			 * a harmless no-op, then overrides x0 at sysexit with the real
-			 * error code. On some kernels the NT_ARM_SYSTEM_CALL regset is
-			 * absent, so the NT_PRSTATUS push carrying x8=-1 (PR_void) is
-			 * rejected with EINVAL and we land in this workaround branch.
+			 * Normal path: proot sets the syscall number to PR_void so the
+			 * kernel runs a harmless no-op, then overrides the return-value
+			 * register at sysexit with the real error code. On some kernels
+			 * the dedicated syscall-number regset is absent/refused (on
+			 * arm64 this is PTRACE_SETREGSET(NT_ARM_SYSTEM_CALL) returning
+			 * EINVAL; see push_specific_regs() in tracee/reg.c which bails
+			 * out before even attempting the general-register push), and
+			 * we land in this workaround branch.
 			 *
 			 * Legacy strategy was to poke all 6 syscall args to -1 and
-			 * re-push NT_PRSTATUS, keeping x8=-1 so the kernel still saw
-			 * an illegal sysnum and rejected the call with ENOSYS. That
-			 * works on stock kernels, but on some kernels x8=-1 on restart
-			 * triggers a non-standard signal delivery path that
-			 * synthesizes a SIGSEGV and kills the tracee before it
-			 * executes a single user-mode instruction.
+			 * re-push the general register state while keeping the syscall
+			 * number set to PR_void, so the kernel still saw an illegal
+			 * syscall number and rejected the call with ENOSYS. That works
+			 * on stock kernels, but on some kernels restarting with the
+			 * syscall-number register set to PR_void triggers a
+			 * non-standard signal delivery path that synthesizes a SIGSEGV
+			 * and kills the tracee before it executes a single user-mode
+			 * instruction.
 			 *
-			 * Correct strategy: restore x8 to the original sysnum so the
+			 * Correct strategy: restore the original syscall number so the
 			 * kernel actually runs the rejected syscall, and poke all 6
 			 * args to -1 so the syscall fails naturally inside the kernel
-			 * (EFAULT/EBADF/EINVAL). The real error code is written to x0
-			 * by proot at sysexit. */
-			poke_reg(tracee, SYSARG_NUM, orig_sysnum); /* restore sysnum; x8=-1 triggers non-standard signal path on some kernels */
+			 * (EFAULT/EBADF/EINVAL). The real error code is written to the
+			 * return-value register by proot at sysexit.
+			 *
+			 * Known limitation:
+			 * syscalls that ignore arguments (e.g. getpid/sync) or take
+			 * fewer than 6 args will not necessarily fail inside the
+			 * kernel, so they will actually execute with whatever state
+			 * the tracee already has. We accept this: (a) the legacy
+			 * "keep sysnum=PR_void" path is strictly worse on affected
+			 * kernels — it kills the tracee with SIGSEGV; (b) -1 in every
+			 * arg slot already traps the overwhelming majority of
+			 * side-effectful syscalls at the kernel's parameter-validation
+			 * stage (EBADF/EFAULT/EINVAL); (c) we have no empirically
+			 * grounded list of syscalls that both reach this suppression
+			 * path and cause harmful side effects when run with poisoned
+			 * args, so a speculative allow/deny list would be dead code.
+			 * The real return value is still overridden at sysexit. */
+			poke_reg(tracee, SYSARG_NUM, orig_sysnum); /* restore original sysnum; PR_void in the syscall-number register triggers a non-standard SIGSEGV path on some kernels */
 			poke_reg(tracee, SYSARG_1, -1);
 			poke_reg(tracee, SYSARG_2, -1);
 			poke_reg(tracee, SYSARG_3, -1);
