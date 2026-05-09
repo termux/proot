@@ -24,6 +24,7 @@
 #include <sys/utsname.h> /* struct utsname, */
 #include <linux/net.h>   /* SYS_*, */
 #include <linux/ioctl.h> /* _IOW, */
+#include <linux/prctl.h> /* PR_GET_AUXV, */
 #include <string.h>      /* strlen(3), */
 
 #include "cli/note.h"
@@ -460,6 +461,52 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_execveat:
 		translate_execve_exit(tracee);
 		goto end;
+
+	case PR_prctl: {
+		word_t option;
+		word_t buf_addr;
+		word_t buf_max;
+		word_t offset;
+		word_t entry_size;
+		word_t type;
+
+		/* Only intercept PR_GET_AUXV. */
+		option = peek_reg(tracee, ORIGINAL, SYSARG_1);
+		if (option != PR_GET_AUXV)
+			goto end;
+
+		/* Error or no execfn to fix: nothing to do. */
+		if ((int) syscall_result < 0)
+			goto end;
+		if (tracee->execfn_addr == 0)
+			goto end;
+
+		/* PR_GET_AUXV returns the auxv size; if it exceeds the buffer
+		 * arg, the kernel did not write anything (buffer too small). */
+		buf_max = peek_reg(tracee, ORIGINAL, SYSARG_3);
+		if (syscall_result > buf_max)
+			goto end;
+
+		/* Scan the returned auxv buffer for AT_EXECFN and patch its
+		 * value to point to argv[0] instead of the loader temp file. */
+		buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		entry_size = 2 * sizeof_word(tracee);
+
+		for (offset = 0; offset + entry_size <= syscall_result; offset += entry_size) {
+			errno = 0;
+			type = peek_word(tracee, buf_addr + offset);
+			if (errno != 0)
+				break;
+			if (type == AT_NULL)
+				break;
+			if (type == AT_EXECFN) {
+				poke_word(tracee, buf_addr + offset + sizeof_word(tracee),
+					  tracee->execfn_addr);
+				break;
+			}
+		}
+		goto end;
+	}
 
 	case PR_ptrace:
 		status = translate_ptrace_exit(tracee);
