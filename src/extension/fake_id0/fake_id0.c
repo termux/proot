@@ -713,6 +713,47 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return handle_chown_enter_end(tracee, config, uid_sysarg, gid_sysarg);
 #endif
 
+#ifndef USERLAND
+	case PR_openat: {
+		char path[PATH_MAX];
+		char prefix[64];
+		char *end;
+		int fd_num;
+
+		/* Only apply when the tracee has fake root (DAC override). */
+		if (config->euid != 0)
+			return 0;
+
+		/* Read the translated (host) path from the CURRENT registers.
+		 * helper_functions.h is USERLAND-only so use read_string directly. */
+		if (read_string(tracee, path,
+				peek_reg(tracee, CURRENT, SYSARG_2),
+				PATH_MAX) < 0)
+			return 0;
+
+		/* Check if the path is /proc/<tracee->pid>/fd/<N>.  This
+		 * arises when the guest opens /dev/stderr, /dev/stdout, or
+		 * /proc/self/fd/N — e.g. when a log file is a symlink to
+		 * /dev/stderr (common in containerised nginx/apache images).
+		 * The kernel rejects opening these paths when the underlying
+		 * fd target (e.g. a pty owned by root) isn't accessible to
+		 * the real non-root uid.  Using dup(N) sidesteps that check
+		 * because the fd is already open. */
+		snprintf(prefix, sizeof(prefix), "/proc/%d/fd/", tracee->pid);
+		if (strncmp(path, prefix, strlen(prefix)) != 0)
+			return 0;
+
+		errno = 0;
+		fd_num = (int) strtol(path + strlen(prefix), &end, 10);
+		if (errno != 0 || end == path + strlen(prefix) || *end != '\0' || fd_num < 0)
+			return 0;
+
+		set_sysnum(tracee, PR_dup);
+		poke_reg(tracee, SYSARG_1, (word_t) fd_num);
+		return 0;
+	}
+#endif /* ifndef USERLAND */
+
 	case PR_setgroups:
 	case PR_setgroups32:
 	case PR_getgroups:
