@@ -401,12 +401,11 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
-		if (tracee->execfn_addr != 0) {
-			(void) read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX);
-			if (strcmp(path, "/proc/self/auxv") == 0) {
-				tracee->sysexit_pending = true;
-				tracee->restart_how = PTRACE_SYSCALL;
-			}
+		if (tracee->execfn_addr != 0
+		    && read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX) > 0
+		    && strcmp(path, "/proc/self/auxv") == 0) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
 		}
 
 		if (   ((flags & O_NOFOLLOW) != 0)
