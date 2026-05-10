@@ -89,7 +89,7 @@
 	 * CAP_SETUID capability) and uid does not match the real UID	\
 	 * or saved set-user-ID of the calling process." -- man		\
 	 * setuid */							\
-	allowed = (config->euid == 0 /* TODO: || HAS_CAP(SETUID) */	\
+	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
 		|| id == config->r ## id				\
 		|| id == config->e ## id				\
 		|| id == config->s ## id);				\
@@ -149,7 +149,7 @@
 	 *								\
 	 * Is it possible to "ruid <- euid" and "euid <- suid" at the	\
 	 * same time?  */						\
-	allowed = (config->euid == 0 /* TODO: || HAS_CAP(SETUID) */	\
+	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
 		|| (UNCHANGED_ID(e ## id) && UNCHANGED_ID(r ## id))	\
 		|| (r ## id == config->e ## id && (e ## id == config->r ## id || UNCHANGED_ID(e ## id))) \
 		|| (e ## id == config->r ## id && (r ## id == config->e ## id || UNCHANGED_ID(r ## id))) \
@@ -207,7 +207,7 @@
 	 * Privileged processes (on Linux, those having the CAP_SETUID	\
 	 * capability) may set the real UID, effective UID, and saved	\
 	 * set-user-ID to arbitrary values." -- man setresuid */	\
-	allowed = (config->euid == 0 /* || HAS_CAP(SETUID) */		\
+	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
 		|| ((UNSET_ID(r ## type ## id) || EQUALS_ANY_ID(r ## type ## id, type)) \
 		 && (UNSET_ID(e ## type ## id) || EQUALS_ANY_ID(e ## type ## id, type)) \
 		 && (UNSET_ID(s ## type ## id) || EQUALS_ANY_ID(s ## type ## id, type)))); \
@@ -246,7 +246,7 @@
 	 * superuser or if fsuid matches either the real user ID,	\
 	 * effective user ID, saved set-user-ID, or the current value	\
 	 * of fsuid." -- man setfsuid */				\
-	allowed = (config->euid == 0 /* TODO: || HAS_CAP(SETUID) */	\
+	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
 		|| fs ## type ## id == config->fs ## type ## id		\
 		|| EQUALS_ANY_ID(fs ## type ## id, type));		\
 	if (allowed)							\
@@ -1112,6 +1112,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->euid  = uid;
 		config->suid  = uid;
 		config->fsuid = uid;
+		config->initial_euid = uid;
 		config->rgid  = gid;
 		config->egid  = gid;
 		config->sgid  = gid;
