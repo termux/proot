@@ -215,6 +215,17 @@ typedef struct tracee {
 	 * execve sysexit.  */
 	struct load_info *load_info;
 
+	/* Address of argv[0] string in the tracee's initial stack, captured
+	 * at execve sysexit. Used to fix AT_EXECFN in prctl(PR_GET_AUXV)
+	 * responses: the kernel's saved auxv has AT_EXECFN pointing to the
+	 * loader temp file, but we want it to point to the actual program name. */
+	word_t execfn_addr;
+
+	/* fd the tracee used to open /proc/self/auxv, tracked so that read()
+	 * calls on it can have AT_EXECFN patched (fallback for kernels < 6.4
+	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
+	int auxv_fd;
+
 #ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;
 	bool pokedata_workaround_cancelled_syscall;

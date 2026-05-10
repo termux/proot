@@ -401,6 +401,13 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
+		if (tracee->execfn_addr != 0
+		    && read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX) > 0
+		    && strcmp(path, "/proc/self/auxv") == 0) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
 		if (   ((flags & O_NOFOLLOW) != 0)
 		    || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
@@ -523,6 +530,11 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
+		if (tracee->execfn_addr != 0 && strcmp(path, "/proc/self/auxv") == 0) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
 		if (   ((flags & O_NOFOLLOW) != 0)
 			|| ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
@@ -608,6 +620,14 @@ int translate_syscall_enter(Tracee *tracee)
 			set_sysnum(tracee, PR_void);
 			status = 0;
 		}
+		/* Need sysexit to patch AT_EXECFN in the returned buffer. */
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
+#endif
+		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_AUXV) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
 		break;
 
 #ifdef __ANDROID__
@@ -665,6 +685,13 @@ int translate_syscall_enter(Tracee *tracee)
 			}
 			break;
 		}
+	case PR_close:
+		/* Stop tracking auxv_fd once the tracee closes it. */
+		if (tracee->auxv_fd >= 0
+		    && (int) peek_reg(tracee, CURRENT, SYSARG_1) == tracee->auxv_fd)
+			tracee->auxv_fd = -1;
+		break;
+
 	}
 
 

@@ -596,6 +596,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			tracee->restart_how = PTRACE_CONT;
 			translate_syscall(tracee);
 
+			/* Sysenter handler may have requested sysexit
+			 * interception by setting sysexit_pending.  */
+			if (tracee->sysexit_pending)
+				tracee->restart_how = PTRACE_SYSCALL;
+
 			/* This syscall has disabled seccomp, so move
 			 * the ptrace flow back to the common path to
 			 * ensure its sysexit will be handled.  */
