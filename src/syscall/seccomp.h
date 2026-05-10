@@ -42,6 +42,9 @@ typedef struct {
 #define FILTERED_SYSNUM_END { PR_void, 0 }
 
 #define FILTER_SYSEXIT  0x1
+/* Use SECCOMP_RET_TRAP instead of SECCOMP_RET_TRACE so proot's filter
+ * wins over an Android system filter that returns SECCOMP_RET_ERRNO. */
+#define FILTER_BLOCK    0x2
 
 extern int enable_syscall_filtering(const Tracee *tracee);
 

@@ -102,6 +102,13 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 	if (syscall > UINT32_MAX)
 		return -ERANGE;
 
+	/* FILTER_BLOCK: use SECCOMP_RET_TRAP so proot's filter wins over an
+	 * Android system policy that returns SECCOMP_RET_ERRNO (0x00050000).
+	 * SECCOMP_RET_TRAP (0x00030000) has a lower value and takes priority. */
+	uint32_t action = (flag & FILTER_BLOCK)
+		? SECCOMP_RET_TRAP
+		: (uint32_t)(SECCOMP_RET_TRACE | (flag & FILTER_SYSEXIT));
+
 	#define LENGTH_TRACE_SYSCALL 2
 	struct sock_filter statements[LENGTH_TRACE_SYSCALL] = {
 		/* Compare the accumulator with the expected syscall:
@@ -109,7 +116,7 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, 1),
 
 		/* Notify the tracer.  */
-		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag)
+		BPF_STMT(BPF_RET + BPF_K, action)
 	};
 
 	DEBUG_FILTER("FILTER:     trace if syscall == %ld\n", syscall);
