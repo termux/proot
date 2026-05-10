@@ -622,6 +622,9 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 		}
 		/* Need sysexit to patch AT_EXECFN in the returned buffer. */
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
+#endif
 		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_AUXV) {
 			tracee->sysexit_pending = true;
 			tracee->restart_how = PTRACE_SYSCALL;
