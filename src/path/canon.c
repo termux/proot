@@ -203,6 +203,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	Finality finality;
 	const char *cursor;
 	int status;
+	unsigned int symlinks_followed = 0;
 
 	/* Avoid infinite loop on circular links.  */
 	if (recursion_level > MAXSYMLINKS)
@@ -332,7 +333,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + 1);
+		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
 		if (status < 0)
 			return status;
 
