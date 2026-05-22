@@ -23,6 +23,8 @@
 #include <assert.h>      /* assert(3), */
 #include <stdint.h>      /* intptr_t, */
 #include <errno.h>       /* E*, */
+#include <stdio.h>       /* FILE, fopen(3), fgets(3), sscanf(3), fclose(3), */
+#include <fcntl.h>       /* O_PATH, */
 #include <sys/stat.h>    /* chmod(2), stat(2) */
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <unistd.h>      /* get*id(2),  */
@@ -747,6 +749,36 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		fd_num = (int) strtol(path + strlen(prefix), &end, 10);
 		if (errno != 0 || end == path + strlen(prefix) || *end != '\0' || fd_num < 0)
 			return 0;
+
+		/* If the existing fd was opened with O_PATH, dup() inherits
+		 * that flag and lseek/read/write on the duplicate return
+		 * EBADF.  This breaks the safe_open() pattern used by e.g.
+		 * systemd-machine-id-setup, which opens a file with O_PATH
+		 * first and then reopens it via /proc/self/fd/N with real
+		 * access flags.  Skip the substitution in that case — the
+		 * kernel reopens the underlying file with the requested
+		 * flags, and override_permissions() ran during the original
+		 * O_PATH open so the file is still accessible to the real
+		 * uid. */
+		{
+			char fdinfo_path[64];
+			char line[64];
+			unsigned int existing_flags = 0;
+			FILE *fdinfo;
+
+			snprintf(fdinfo_path, sizeof(fdinfo_path),
+				 "/proc/%d/fdinfo/%d", tracee->pid, fd_num);
+			fdinfo = fopen(fdinfo_path, "r");
+			if (fdinfo != NULL) {
+				while (fgets(line, sizeof(line), fdinfo) != NULL) {
+					if (sscanf(line, "flags: %o", &existing_flags) == 1)
+						break;
+				}
+				fclose(fdinfo);
+			}
+			if (existing_flags & O_PATH)
+				return 0;
+		}
 
 		set_sysnum(tracee, PR_dup);
 		poke_reg(tracee, SYSARG_1, (word_t) fd_num);
