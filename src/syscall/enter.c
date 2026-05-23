@@ -239,6 +239,52 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 }
 
 /**
+ * Read mount(2) arguments from the @tracee's registers and apply
+ * emulate_mount().  Safe to call from both the normal sysenter path
+ * and the SIGSYS handler (Android's parent seccomp filter traps
+ * mount, so the syscall never reaches our regular case).
+ */
+void apply_emulated_mount(Tracee *tracee)
+{
+	char src_user[PATH_MAX];
+	char target_user[PATH_MAX];
+	char fstype[256];
+	word_t fstype_addr;
+	unsigned long flags;
+
+	fstype[0] = '\0';
+
+	if (get_sysarg_path(tracee, src_user, SYSARG_1) < 0)
+		return;
+	if (get_sysarg_path(tracee, target_user, SYSARG_2) < 0)
+		return;
+
+	fstype_addr = peek_reg(tracee, CURRENT, SYSARG_3);
+	if (fstype_addr != 0)
+		(void) read_string(tracee, fstype, fstype_addr, sizeof(fstype) - 1);
+	flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+	emulate_mount(tracee, src_user, target_user, fstype, flags);
+}
+
+/**
+ * Read pivot_root(2) arguments from the @tracee's registers and apply
+ * emulate_pivot_root().  See apply_emulated_mount() for context.
+ */
+void apply_emulated_pivot_root(Tracee *tracee)
+{
+	char new_root_user[PATH_MAX];
+	char put_old_user[PATH_MAX];
+
+	if (get_sysarg_path(tracee, new_root_user, SYSARG_1) < 0)
+		return;
+	if (get_sysarg_path(tracee, put_old_user, SYSARG_2) < 0)
+		return;
+
+	emulate_pivot_root(tracee, new_root_user, put_old_user);
+}
+
+/**
  * Detect /proc/<pid|self>/{uid_map,gid_map,setgroups}, which sandbox
  * helpers like bubblewrap write to during user-namespace setup.  The
  * tracee cannot really create namespaces under PRoot, so silently
@@ -640,44 +686,19 @@ int translate_syscall_enter(Tracee *tracee)
 	/* mount(2) and pivot_root(2) are emulated by translating them
 	 * into PRoot bindings (see emulate_mount/emulate_pivot_root)
 	 * so the resulting paths actually become accessible.  */
-	case PR_mount: {
-		char src_user[PATH_MAX];
-		char target_user[PATH_MAX];
-		char fstype[256];
-		word_t fstype_addr;
-		unsigned long flags;
-
-		fstype[0] = '\0';
-
-		if (get_sysarg_path(tracee, src_user, SYSARG_1) >= 0
-		    && get_sysarg_path(tracee, target_user, SYSARG_2) >= 0) {
-			fstype_addr = peek_reg(tracee, CURRENT, SYSARG_3);
-			if (fstype_addr != 0)
-				(void) read_string(tracee, fstype, fstype_addr,
-						   sizeof(fstype) - 1);
-			flags = peek_reg(tracee, CURRENT, SYSARG_4);
-			emulate_mount(tracee, src_user, target_user, fstype, flags);
-		}
-
+	case PR_mount:
+		apply_emulated_mount(tracee);
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
-	}
 
-	case PR_pivot_root: {
-		char new_root_user[PATH_MAX];
-		char put_old_user[PATH_MAX];
-
-		if (get_sysarg_path(tracee, new_root_user, SYSARG_1) >= 0
-		    && get_sysarg_path(tracee, put_old_user, SYSARG_2) >= 0)
-			emulate_pivot_root(tracee, new_root_user, put_old_user);
-
+	case PR_pivot_root:
+		apply_emulated_pivot_root(tracee);
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
-	}
 
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);

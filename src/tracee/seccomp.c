@@ -187,6 +187,28 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, 0);
 		break;
 
+	/* The Android parent process commonly installs a seccomp
+	 * filter that traps mount/umount/pivot_root/unshare/setns
+	 * with SIGSYS.  Mirror what enter.c does for these: pretend
+	 * they succeeded and apply the mount/pivot_root binding
+	 * emulation so sandbox helpers like bubblewrap can proceed.  */
+	case PR_mount:
+		apply_emulated_mount(tracee);
+		set_result_after_seccomp(tracee, 0);
+		break;
+
+	case PR_pivot_root:
+		apply_emulated_pivot_root(tracee);
+		set_result_after_seccomp(tracee, 0);
+		break;
+
+	case PR_umount:
+	case PR_umount2:
+	case PR_unshare:
+	case PR_setns:
+		set_result_after_seccomp(tracee, 0);
+		break;
+
 	case PR_getpgrp:
 		/* Query value with getpgid and set it as result.  */
 		set_result_after_seccomp(tracee, getpgid(tracee->pid));
