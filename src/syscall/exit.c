@@ -244,6 +244,15 @@ void translate_syscall_exit(Tracee *tracee)
 
 	case PR_fchdir:
 	case PR_chdir:
+	/* These syscalls are voided in enter.c; make sure the
+	 * tracee always sees a 0 return value even on kernels where
+	 * the SYSCALL_AVOIDER trick leaks -ENOSYS through.  */
+	case PR_unshare:
+	case PR_setns:
+	case PR_mount:
+	case PR_umount:
+	case PR_umount2:
+	case PR_pivot_root:
 		/* These syscalls are fully emulated, see enter.c for details
 		 * (like errors).  */
 		status = 0;

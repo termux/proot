@@ -356,6 +356,7 @@ int translate_syscall_enter(Tracee *tracee)
 		break;
 
 	case PR_getcwd:
+		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
@@ -426,6 +427,7 @@ int translate_syscall_enter(Tracee *tracee)
 		tracee->fs->cwd = tmp;
 		talloc_set_name_const(tracee->fs->cwd, "$cwd");
 
+		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
