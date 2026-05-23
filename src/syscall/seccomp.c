@@ -414,6 +414,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_umount,		0 },
 	{ PR_umount2,		0 },
 	{ PR_uname,		FILTER_SYSEXIT },
+	{ PR_unshare,		0 },
+	{ PR_setns,		0 },
 	{ PR_unlink,		0 },
 	{ PR_unlinkat,		0 },
 	{ PR_uselib,		0 },

@@ -27,7 +27,9 @@
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
+#include <stdbool.h>     /* bool */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
+#include <sys/mount.h>   /* MS_BIND, MS_REMOUNT, ... */
 #include <termios.h>     /* TCSETS, TCSANOW */
 
 #include "cli/note.h"
@@ -46,6 +48,8 @@
 #include "tracee/event.h"
 #include "path/path.h"
 #include "path/canon.h"
+#include "path/binding.h"
+#include "path/temp.h"
 #include "arch.h"
 
 /**
@@ -86,6 +90,187 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 		return status;
 
 	return translate_path2(tracee, AT_FDCWD, old_path, reg, type);
+}
+
+/**
+ * Canonicalize @user_path as a guest path, relative to the @tracee's
+ * cwd when @user_path is relative.  Stores the result in @guest_path
+ * with any trailing "/" or "/." stripped, so it can be used as a
+ * binding key.  Returns 0 on success, -errno otherwise.
+ */
+static int guest_canonicalize(Tracee *tracee, const char *user_path,
+			      char guest_path[PATH_MAX])
+{
+	int status;
+
+	if (user_path[0] == '/')
+		strcpy(guest_path, "/");
+	else {
+		status = getcwd2(tracee, guest_path);
+		if (status < 0)
+			return status;
+	}
+
+	status = canonicalize(tracee, user_path, true, guest_path, 0);
+	if (status < 0)
+		return status;
+
+	chop_finality(guest_path);
+	return 0;
+}
+
+/**
+ * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
+ * PRoot binding from a host directory to the canonicalized target.
+ * Bind mounts use the translated source; "proc"/"sysfs" use the
+ * matching host file-system; "tmpfs"/"devpts"/"devtmpfs" get a fresh
+ * empty directory.  Any other case is silently ignored: the caller
+ * will still see the syscall succeed (we always void it).
+ */
+static void emulate_mount(Tracee *tracee, const char *src_user,
+			  const char *target_user, const char *fstype,
+			  unsigned long flags)
+{
+	char host_path[PATH_MAX];
+	char guest_path[PATH_MAX];
+	const char *tmpdir;
+
+	if ((flags & MS_REMOUNT) != 0)
+		return;
+
+	if ((flags & MS_BIND) != 0) {
+		if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
+			return;
+	}
+	else if (strcmp(fstype, "proc") == 0)
+		strcpy(host_path, "/proc");
+	else if (strcmp(fstype, "sysfs") == 0)
+		strcpy(host_path, "/sys");
+	else if (   strcmp(fstype, "tmpfs") == 0
+		 || strcmp(fstype, "devpts") == 0
+		 || strcmp(fstype, "devtmpfs") == 0) {
+		tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
+		if (tmpdir == NULL)
+			return;
+		strncpy(host_path, tmpdir, PATH_MAX - 1);
+		host_path[PATH_MAX - 1] = '\0';
+	}
+	else
+		return;
+
+	chop_finality(host_path);
+
+	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+		return;
+
+	(void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+}
+
+/**
+ * Emulate pivot_root(@new_root_user, @put_old_user) by changing the
+ * tracee's root binding to point at @new_root_user (translated to
+ * host) and re-exposing the previous root at @put_old_user, so that
+ * sandbox helpers like bubblewrap can keep accessing the prior
+ * file-system through the agreed "oldroot" path.
+ */
+static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
+			       const char *put_old_user)
+{
+	char new_root_host[PATH_MAX];
+	char new_root_guest[PATH_MAX];
+	char put_old_guest[PATH_MAX];
+	char old_root_host[PATH_MAX];
+	Binding *root_binding;
+	size_t prefix_len;
+	const char *put_old_after;
+
+	if (translate_path(tracee, new_root_host, AT_FDCWD, new_root_user, true) < 0)
+		return;
+	chop_finality(new_root_host);
+
+	if (guest_canonicalize(tracee, new_root_user, new_root_guest) < 0)
+		return;
+
+	/* put_old is relative to new_root, so resolve it against
+	 * new_root_guest rather than the current cwd. */
+	if (put_old_user[0] == '/')
+		strcpy(put_old_guest, "/");
+	else
+		strcpy(put_old_guest, new_root_guest);
+	if (canonicalize(tracee, put_old_user, true, put_old_guest, 0) < 0)
+		return;
+
+	root_binding = get_binding(tracee, GUEST, "/");
+	if (root_binding == NULL)
+		return;
+	strncpy(old_root_host, root_binding->host.path, PATH_MAX - 1);
+	old_root_host[PATH_MAX - 1] = '\0';
+
+	remove_binding_from_all_lists(tracee, root_binding);
+	(void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
+
+	/* If put_old is a path strictly under new_root, expose the
+	 * previous root there.  The pivot_root(".", ".") trick used to
+	 * detach the old root leaves new_root and put_old equal; in
+	 * that case there is nowhere to expose the old root. */
+	prefix_len = strlen(new_root_guest);
+	if (   prefix_len > 0
+	    && strncmp(put_old_guest, new_root_guest, prefix_len) == 0
+	    && (   put_old_guest[prefix_len] == '/'
+		|| (prefix_len == 1 && new_root_guest[0] == '/'))) {
+		put_old_after = put_old_guest + (prefix_len == 1 ? 0 : prefix_len);
+		if (put_old_after[0] == '/' && put_old_after[1] != '\0')
+			(void) insort_binding3(tracee, tracee->fs,
+					       old_root_host, put_old_after);
+	}
+}
+
+/**
+ * Detect /proc/<pid|self>/{uid_map,gid_map,setgroups}, which sandbox
+ * helpers like bubblewrap write to during user-namespace setup.  The
+ * tracee cannot really create namespaces under PRoot, so silently
+ * redirect those writes to /dev/null.
+ */
+static bool is_proc_userns_file(const char *path)
+{
+	const char *p;
+	const char *suffix;
+
+	if (strncmp(path, "/proc/", 6) != 0)
+		return false;
+	p = path + 6;
+
+	if (strncmp(p, "self/", 5) == 0)
+		p += 5;
+	else {
+		const char *digits = p;
+		while (*p >= '0' && *p <= '9')
+			p++;
+		if (p == digits || *p != '/')
+			return false;
+		p++;
+	}
+
+	suffix = p;
+	return strcmp(suffix, "uid_map") == 0
+	    || strcmp(suffix, "gid_map") == 0
+	    || strcmp(suffix, "setgroups") == 0;
+}
+
+/**
+ * Redirect openat()/open() of /proc/.../uid_map etc. to /dev/null so
+ * that writes appear to succeed.  @reg holds the path argument; the
+ * path has already been translated to host form.
+ */
+static void maybe_redirect_userns_file(Tracee *tracee, Reg reg)
+{
+	char host_path[PATH_MAX];
+
+	if (get_sysarg_path(tracee, host_path, reg) < 0)
+		return;
+	if (!is_proc_userns_file(host_path))
+		return;
+	(void) set_sysarg_path(tracee, "/dev/null", reg);
 }
 
 /**
@@ -391,13 +576,65 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_swapon:
 	case PR_truncate:
 	case PR_truncate64:
-	case PR_umount:
-	case PR_umount2:
 	case PR_uselib:
 	case PR_utime:
 	case PR_utimes:
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
+
+	/* Pretend namespace/unmount syscalls succeed without doing
+	 * anything; PRoot can't really create namespaces, and sandbox
+	 * helpers like bubblewrap only check the return value.  */
+	case PR_unshare:
+	case PR_setns:
+	case PR_umount:
+	case PR_umount2:
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		status = 0;
+		break;
+
+	/* mount(2) and pivot_root(2) are emulated by translating them
+	 * into PRoot bindings (see emulate_mount/emulate_pivot_root)
+	 * so the resulting paths actually become accessible.  */
+	case PR_mount: {
+		char src_user[PATH_MAX];
+		char target_user[PATH_MAX];
+		char fstype[256];
+		word_t fstype_addr;
+		unsigned long flags;
+
+		fstype[0] = '\0';
+
+		if (get_sysarg_path(tracee, src_user, SYSARG_1) >= 0
+		    && get_sysarg_path(tracee, target_user, SYSARG_2) >= 0) {
+			fstype_addr = peek_reg(tracee, CURRENT, SYSARG_3);
+			if (fstype_addr != 0)
+				(void) read_string(tracee, fstype, fstype_addr,
+						   sizeof(fstype) - 1);
+			flags = peek_reg(tracee, CURRENT, SYSARG_4);
+			emulate_mount(tracee, src_user, target_user, fstype, flags);
+		}
+
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		status = 0;
+		break;
+	}
+
+	case PR_pivot_root: {
+		char new_root_user[PATH_MAX];
+		char put_old_user[PATH_MAX];
+
+		if (get_sysarg_path(tracee, new_root_user, SYSARG_1) >= 0
+		    && get_sysarg_path(tracee, put_old_user, SYSARG_2) >= 0)
+			emulate_pivot_root(tracee, new_root_user, put_old_user);
+
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		status = 0;
+		break;
+	}
 
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
@@ -414,6 +651,8 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		else
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
+		if (status >= 0)
+			maybe_redirect_userns_file(tracee, SYSARG_1);
 		break;
 
 	case PR_fchownat:
@@ -477,14 +716,6 @@ int translate_syscall_enter(Tracee *tracee)
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		break;
 
-	case PR_pivot_root:
-		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
-		if (status < 0)
-			break;
-
-		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
-		break;
-
 	case PR_linkat:
 		olddirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		newdirfd = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -506,21 +737,6 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
-		break;
-
-	case PR_mount:
-		status = get_sysarg_path(tracee, path, SYSARG_1);
-		if (status < 0)
-			break;
-
-		/* The following check covers only 90% of the cases. */
-		if (path[0] == '/' || path[0] == '.') {
-			status = translate_path2(tracee, AT_FDCWD, path, SYSARG_1, REGULAR);
-			if (status < 0)
-				break;
-		}
-
-		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
 		break;
 
 	case PR_openat2: {
@@ -564,6 +780,8 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+		if (status >= 0)
+			maybe_redirect_userns_file(tracee, SYSARG_2);
 		break;
 
 	case PR_readlinkat:
@@ -641,6 +859,7 @@ int translate_syscall_enter(Tracee *tracee)
 		/* Prevent tracees from setting dumpable flag.
 		 * (Otherwise it could break tracee memory access)  */
 		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_DUMPABLE) {
+			poke_reg(tracee, SYSARG_RESULT, 0);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 		}
