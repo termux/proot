@@ -109,6 +109,18 @@ typedef struct tracee {
 	 * stay scoped to the would-be namespace.  Reset once consumed.  */
 	bool clone_stripped_newns;
 
+	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
+	 * sandbox helpers like bubblewrap that try to bring up the
+	 * loopback interface inside their would-be net namespace.
+	 * fake_netlink_fds holds the fds of sockets we silently
+	 * redirected from AF_NETLINK to AF_UNIX/SOCK_DGRAM; see
+	 * enter.c / exit.c for the intercepts.  */
+#define MAX_FAKE_NETLINK_FDS 8
+	int fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+	int fake_netlink_fds_count;
+	bool pending_fake_netlink_socket;
+	uint32_t fake_netlink_pending_seq;
+
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
 		size_t nb_ptracees;

@@ -674,6 +674,29 @@ void translate_syscall_exit(Tracee *tracee)
 		}
 		goto end;
 
+	case PR_socket:
+		/* Record the fd we substituted for an AF_NETLINK request.  */
+		if (tracee->pending_fake_netlink_socket) {
+			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+			if (fd >= 0) {
+				int i;
+				if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+					/* Avoid duplicates.  */
+					bool present = false;
+					for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
+						if (tracee->fake_netlink_fds[i] == fd) {
+							present = true;
+							break;
+						}
+					}
+					if (!present)
+						tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++] = fd;
+				}
+			}
+			tracee->pending_fake_netlink_socket = false;
+		}
+		goto end;
+
 	default:
 		goto end;
 	}

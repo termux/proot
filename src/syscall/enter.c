@@ -28,10 +28,15 @@
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
 #include <stdbool.h>     /* bool */
+#include <stdint.h>      /* uint32_t */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <sys/mount.h>   /* MS_BIND, MS_REMOUNT, ... */
+#include <sys/socket.h>  /* AF_NETLINK, AF_UNIX, SOCK_DGRAM, SOCK_CLOEXEC */
 #include <sched.h>       /* CLONE_NEW*, */
 #include <termios.h>     /* TCSETS, TCSANOW */
+#include <linux/netlink.h> /* struct nlmsghdr, NLMSG_ERROR, struct nlmsgerr */
+#include <linux/sockios.h> /* SIOCGIFINDEX */
+#include <net/if.h>      /* struct ifreq, IFNAMSIZ */
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -370,6 +375,99 @@ void apply_emulated_pivot_root(Tracee *tracee)
 }
 
 /**
+ * Helpers for emulating AF_NETLINK / NETLINK_ROUTE traffic.  The
+ * tracee asks for a real netlink socket which Android usually denies
+ * with EACCES (no CAP_NET_ADMIN); we silently substitute an
+ * AF_UNIX/SOCK_DGRAM socket and intercept the few netlink-shaped
+ * syscalls bubblewrap's loopback_setup() actually makes
+ * (bind/sendto/recvfrom), synthesising an NLMSG_ERROR success reply.
+ */
+
+static bool is_fake_netlink_fd(const Tracee *tracee, int fd)
+{
+	int i;
+	if (fd < 0)
+		return false;
+	for (i = 0; i < tracee->fake_netlink_fds_count; i++)
+		if (tracee->fake_netlink_fds[i] == fd)
+			return true;
+	return false;
+}
+
+static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
+{
+	int i;
+	for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
+		if (tracee->fake_netlink_fds[i] == fd) {
+			tracee->fake_netlink_fds[i] =
+				tracee->fake_netlink_fds[--tracee->fake_netlink_fds_count];
+			return;
+		}
+	}
+}
+
+/**
+ * Write a synthetic NLMSG_ERROR reply (with error=0) into the
+ * tracee's buffer, mirroring the @seq the caller used in its request.
+ * Returns the number of bytes written, or 0 on failure.
+ *
+ * bubblewrap's rtnl_read_reply checks both the sequence number AND
+ * that nlmsg_pid matches the tracee's own pid, so set them both.
+ */
+static size_t write_fake_netlink_ack(Tracee *tracee, word_t buf_addr,
+				     word_t buf_len, uint32_t seq)
+{
+	struct {
+		struct nlmsghdr hdr;
+		struct nlmsgerr err;
+	} reply;
+	size_t reply_len = sizeof(reply);
+
+	if (buf_len < reply_len)
+		return 0;
+
+	memset(&reply, 0, sizeof(reply));
+	reply.hdr.nlmsg_len   = reply_len;
+	reply.hdr.nlmsg_type  = NLMSG_ERROR;
+	reply.hdr.nlmsg_flags = 0;
+	reply.hdr.nlmsg_seq   = seq;
+	reply.hdr.nlmsg_pid   = (uint32_t) tracee->pid;
+	reply.err.error       = 0;
+	/* reply.err.msg is the (zeroed) header of the original request;
+	 * loopback_setup() only checks the error field.  */
+
+	if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
+		return 0;
+	return reply_len;
+}
+
+/**
+ * If @cmd is SIOCGIFINDEX for "lo", fake an answer of 1 in the
+ * tracee's ifreq buffer.  Android often denies this ioctl when the
+ * caller lacks CAP_NET_ADMIN; bubblewrap's loopback_setup() calls
+ * if_nametoindex("lo") which goes through this ioctl and bails out
+ * with "Permission denied" on failure.
+ */
+static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)
+{
+	struct ifreq ifr;
+
+	if (cmd != SIOCGIFINDEX)
+		return false;
+	if (arg == 0)
+		return false;
+	if (read_data(tracee, &ifr, arg, sizeof(ifr)) < 0)
+		return false;
+	if (strncmp(ifr.ifr_name, "lo", IFNAMSIZ) != 0)
+		return false;
+
+	ifr.ifr_ifindex = 1;
+	if (write_data(tracee, arg, &ifr, sizeof(ifr)) < 0)
+		return false;
+	return true;
+}
+
+/**
  * Detect /proc/<pid|self>/{uid_map,gid_map,setgroups}, which sandbox
  * helpers like bubblewrap write to during user-namespace setup.  The
  * tracee cannot really create namespaces under PRoot, so silently
@@ -569,6 +667,17 @@ int translate_syscall_enter(Tracee *tracee)
 		word_t address;
 		word_t size;
 
+		/* If we already redirected this fd to AF_UNIX as part
+		 * of the AF_NETLINK emulation, fail the bind silently
+		 * (the kernel would otherwise refuse our sockaddr_nl). */
+		if (syscall_number == PR_bind
+		    && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
+
 		address = peek_reg(tracee, CURRENT, SYSARG_2);
 		size    = peek_reg(tracee, CURRENT, SYSARG_3);
 
@@ -623,6 +732,89 @@ int translate_syscall_enter(Tracee *tracee)
 		 * (unused) before the kernel updates it.  */
 		poke_reg(tracee, SYSARG_6, size);
 
+		status = 0;
+		break;
+	}
+
+	/* Substitute an AF_UNIX/SOCK_DGRAM socket for AF_NETLINK
+	 * requests so the kernel doesn't reject them with EACCES on
+	 * Android, then track the resulting fd so bind/sendto/recvfrom
+	 * on it can be faked too.  */
+	case PR_socket: {
+		word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+		if (domain == AF_NETLINK) {
+			word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
+			poke_reg(tracee, SYSARG_1, AF_UNIX);
+			poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
+			poke_reg(tracee, SYSARG_3, 0);
+			tracee->pending_fake_netlink_socket = true;
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+		status = 0;
+		break;
+	}
+
+	case PR_sendto: {
+		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		if (is_fake_netlink_fd(tracee, fd)) {
+			word_t buf  = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t len  = peek_reg(tracee, CURRENT, SYSARG_3);
+			struct nlmsghdr hdr;
+
+			if (buf != 0 && len >= sizeof(hdr)
+			    && read_data(tracee, &hdr, buf, sizeof(hdr)) == 0)
+				tracee->fake_netlink_pending_seq = hdr.nlmsg_seq;
+
+			poke_reg(tracee, SYSARG_RESULT, len);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
+		status = 0;
+		break;
+	}
+
+	case PR_sendmsg: {
+		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		if (is_fake_netlink_fd(tracee, fd)) {
+			/* Pretend we sent everything.  bubblewrap only
+			 * uses sendto(); we accept sendmsg too just in
+			 * case.  */
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
+		status = 0;
+		break;
+	}
+
+	case PR_recvfrom: {
+		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		if (is_fake_netlink_fd(tracee, fd)) {
+			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
+			size_t n = write_fake_netlink_ack(tracee, buf, len,
+							  tracee->fake_netlink_pending_seq);
+			poke_reg(tracee, SYSARG_RESULT, (word_t) n);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
+		status = 0;
+		break;
+	}
+
+	case PR_recvmsg: {
+		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		if (is_fake_netlink_fd(tracee, fd)) {
+			/* Same fallback as sendmsg: return EOF.  */
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
 		status = 0;
 		break;
 	}
@@ -1059,31 +1251,39 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 		break;
 
+	case PR_ioctl: {
+		word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
+
+		/* SIOCGIFINDEX for "lo": Android often denies this with
+		 * EACCES; fake an answer of 1 so bubblewrap's
+		 * loopback_setup() can proceed.  */
+		if (cmd == SIOCGIFINDEX && maybe_fake_siocgifindex(tracee, cmd, arg)) {
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			set_sysnum(tracee, PR_void);
+			break;
+		}
+
 #ifdef __ANDROID__
-	case PR_ioctl:
 		/* Using literal value because Termux build system patches TCSAFLUSH */
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS + 2 /* + TCSAFLUSH */) {
+		if (cmd == TCSETS + 2 /* + TCSAFLUSH */)
 			poke_reg(tracee, SYSARG_2, TCSETS + TCSANOW);
-		}
 
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCGETS2) {
+		if (cmd == TCGETS2)
 			poke_reg(tracee, SYSARG_2, TCGETS);
-		}
 
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS2) {
+		if (cmd == TCSETS2)
 			poke_reg(tracee, SYSARG_2, TCSETS);
-		}
 
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSW2) {
+		if (cmd == TCSETSW2)
 			poke_reg(tracee, SYSARG_2, TCSETSW);
-		}
 
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSF2) {
+		if (cmd == TCSETSF2)
 			poke_reg(tracee, SYSARG_2, TCSETS);
-		}
+#endif
 
 		break;
-#endif
+	}
 	
 	case PR_memfd_create:
 		{
@@ -1114,12 +1314,20 @@ int translate_syscall_enter(Tracee *tracee)
 			}
 			break;
 		}
-	case PR_close:
+	case PR_close: {
+		int closed_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+
 		/* Stop tracking auxv_fd once the tracee closes it. */
-		if (tracee->auxv_fd >= 0
-		    && (int) peek_reg(tracee, CURRENT, SYSARG_1) == tracee->auxv_fd)
+		if (tracee->auxv_fd >= 0 && closed_fd == tracee->auxv_fd)
 			tracee->auxv_fd = -1;
+
+		/* Drop the fd from the fake-AF_NETLINK tracking set,
+		 * otherwise its number could be reused for an unrelated
+		 * file and we'd keep intercepting sendto/recvfrom on
+		 * it.  */
+		unmark_fake_netlink_fd(tracee, closed_fd);
 		break;
+	}
 
 	}
 
