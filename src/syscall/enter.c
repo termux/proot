@@ -30,6 +30,7 @@
 #include <stdbool.h>     /* bool */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <sys/mount.h>   /* MS_BIND, MS_REMOUNT, ... */
+#include <sched.h>       /* CLONE_NEW*, */
 #include <termios.h>     /* TCSETS, TCSANOW */
 
 #include "cli/note.h"
@@ -51,6 +52,18 @@
 #include "path/binding.h"
 #include "path/temp.h"
 #include "arch.h"
+
+/* Older kernel headers may lack these. */
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+
+#define CLONE_NS_MASK (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
+		       CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
+		       CLONE_NEWCGROUP | CLONE_NEWTIME)
 
 /**
  * Translate @path and put the result in the @tracee's memory address
@@ -593,6 +606,34 @@ int translate_syscall_enter(Tracee *tracee)
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
+
+	/* Strip CLONE_NEW* flags from clone(2)/clone3(2) so the
+	 * syscall doesn't fail with EPERM on kernels that disallow
+	 * unprivileged namespace creation (typical on Android).  The
+	 * fork/thread itself still proceeds normally and PRoot keeps
+	 * tracking the child through PTRACE_EVENT_CLONE.  */
+	case PR_clone: {
+		word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
+		if ((flags & CLONE_NS_MASK) != 0)
+			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
+		status = 0;
+		break;
+	}
+
+	case PR_clone3: {
+		word_t args_addr = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t flags;
+
+		if (args_addr != 0) {
+			errno = 0;
+			flags = peek_word(tracee, args_addr);
+			if (errno == 0 && (flags & CLONE_NS_MASK) != 0)
+				poke_word(tracee, args_addr,
+					  flags & ~(word_t) CLONE_NS_MASK);
+		}
+		status = 0;
+		break;
+	}
 
 	/* mount(2) and pivot_root(2) are emulated by translating them
 	 * into PRoot bindings (see emulate_mount/emulate_pivot_root)

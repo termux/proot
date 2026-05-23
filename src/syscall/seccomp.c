@@ -340,6 +340,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_chown,		0 },
 	{ PR_chown32,		0 },
 	{ PR_chroot,		0 },
+	{ PR_clone,		0 },
+	{ PR_clone3,		0 },
 	{ PR_close,		0 },
 	{ PR_connect,		0 },
 	{ PR_creat,		0 },
