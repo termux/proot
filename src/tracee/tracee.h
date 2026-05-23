@@ -103,6 +103,12 @@ typedef struct tracee {
 	/* Is it a "clone", i.e has the same parent as its creator.  */
 	bool clone;
 
+	/* Set when the current clone(2)/clone3(2) had CLONE_NEW* flags
+	 * stripped (see translate_syscall_enter); the new child should
+	 * get its own copy of the bindings so emulated mount(2) calls
+	 * stay scoped to the would-be namespace.  Reset once consumed.  */
+	bool clone_stripped_newns;
+
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
 		size_t nb_ptracees;

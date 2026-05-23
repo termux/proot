@@ -275,6 +275,53 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 }
 
 /**
+ * Emulate umount(@target_user) by removing the matching binding (if
+ * any) so that a subsequent access to @target_user no longer goes
+ * through the now-unmounted location.  This is the inverse of
+ * emulate_mount().  Bindings put in place at PRoot startup
+ * (recommended -R bindings, the rootfs itself) are NOT removed: we
+ * only drop runtime bindings whose guest path exactly matches.
+ */
+static void emulate_umount(Tracee *tracee, const char *target_user)
+{
+	char guest_path[PATH_MAX];
+	Binding *binding;
+
+	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+		return;
+
+	/* Never drop the root binding.  */
+	if (strcmp(guest_path, "/") == 0)
+		return;
+
+	binding = get_binding(tracee, GUEST, guest_path);
+	if (binding == NULL)
+		return;
+
+	/* Only drop the binding if its guest path is exactly the
+	 * unmount target; otherwise we'd unbind something the tracee
+	 * didn't ask to unmount (e.g. its containing rootfs).  */
+	if (strcmp(binding->guest.path, guest_path) != 0)
+		return;
+
+	remove_binding_from_all_lists(tracee, binding);
+}
+
+/**
+ * Read umount(2)/umount2(2) arguments from the @tracee's registers
+ * and apply emulate_umount().
+ */
+void apply_emulated_umount(Tracee *tracee)
+{
+	char target_user[PATH_MAX];
+
+	if (get_sysarg_path(tracee, target_user, SYSARG_1) < 0)
+		return;
+
+	emulate_umount(tracee, target_user);
+}
+
+/**
  * Read mount(2) arguments from the @tracee's registers and apply
  * emulate_mount().  Safe to call from both the normal sysenter path
  * and the SIGSYS handler (Android's parent seccomp filter traps
@@ -679,13 +726,19 @@ int translate_syscall_enter(Tracee *tracee)
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
 
-	/* Pretend namespace/unmount syscalls succeed without doing
-	 * anything; PRoot can't really create namespaces, and sandbox
-	 * helpers like bubblewrap only check the return value.  */
+	/* Pretend namespace syscalls succeed without doing anything;
+	 * PRoot can't really create namespaces, and sandbox helpers
+	 * like bubblewrap only check the return value.  */
 	case PR_unshare:
 	case PR_setns:
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		status = 0;
+		break;
+
 	case PR_umount:
 	case PR_umount2:
+		apply_emulated_umount(tracee);
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;
@@ -695,11 +748,17 @@ int translate_syscall_enter(Tracee *tracee)
 	 * syscall doesn't fail with EPERM on kernels that disallow
 	 * unprivileged namespace creation (typical on Android).  The
 	 * fork/thread itself still proceeds normally and PRoot keeps
-	 * tracking the child through PTRACE_EVENT_CLONE.  */
+	 * tracking the child through PTRACE_EVENT_CLONE.  When the
+	 * caller asked for CLONE_NEWNS, remember it on the tracee so
+	 * the new child gets isolated bindings (otherwise emulated
+	 * mount(2) calls in the child would leak into the parent).  */
 	case PR_clone: {
 		word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
-		if ((flags & CLONE_NS_MASK) != 0)
+		if ((flags & CLONE_NS_MASK) != 0) {
+			if ((flags & CLONE_NEWNS) != 0)
+				tracee->clone_stripped_newns = true;
 			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
+		}
 		status = 0;
 		break;
 	}
@@ -711,9 +770,12 @@ int translate_syscall_enter(Tracee *tracee)
 		if (args_addr != 0) {
 			errno = 0;
 			flags = peek_word(tracee, args_addr);
-			if (errno == 0 && (flags & CLONE_NS_MASK) != 0)
+			if (errno == 0 && (flags & CLONE_NS_MASK) != 0) {
+				if ((flags & CLONE_NEWNS) != 0)
+					tracee->clone_stripped_newns = true;
 				poke_word(tracee, args_addr,
 					  flags & ~(word_t) CLONE_NS_MASK);
+			}
 		}
 		status = 0;
 		break;
