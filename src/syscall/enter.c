@@ -232,9 +232,45 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	    && (   put_old_guest[prefix_len] == '/'
 		|| (prefix_len == 1 && new_root_guest[0] == '/'))) {
 		put_old_after = put_old_guest + (prefix_len == 1 ? 0 : prefix_len);
-		if (put_old_after[0] == '/' && put_old_after[1] != '\0')
+		if (put_old_after[0] == '/' && put_old_after[1] != '\0') {
+			Binding *iter;
+			Binding *next;
+			size_t put_old_len = strlen(put_old_after);
+			char aliased[PATH_MAX];
+
 			(void) insort_binding3(tracee, tracee->fs,
 					       old_root_host, put_old_after);
+
+			/* Snapshot existing non-root bindings and
+			 * re-expose each one at put_old_after/<guest>,
+			 * so sandbox helpers can still reach the host
+			 * /proc, /dev, ... through the agreed
+			 * "oldroot" prefix.  Iterate carefully: we
+			 * mutate the same list we walk.  */
+			for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+			     iter != (void *) tracee->fs->bindings.guest;
+			     iter = next) {
+				next = CIRCLEQ_NEXT(iter, link.guest);
+
+				if (strcmp(iter->guest.path, "/") == 0)
+					continue;
+				/* Skip the binding we just added for
+				 * put_old itself, and anything already
+				 * sitting under put_old.  */
+				if (strncmp(iter->guest.path, put_old_after, put_old_len) == 0
+				    && (iter->guest.path[put_old_len] == '\0'
+					|| iter->guest.path[put_old_len] == '/'))
+					continue;
+
+				if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
+						      put_old_after, iter->guest.path)
+				    >= sizeof(aliased))
+					continue;
+
+				(void) insort_binding3(tracee, tracee->fs,
+						       iter->host.path, aliased);
+			}
+		}
 	}
 }
 
