@@ -159,9 +159,11 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 		strcpy(host_path, "/proc");
 	else if (strcmp(fstype, "sysfs") == 0)
 		strcpy(host_path, "/sys");
-	else if (   strcmp(fstype, "tmpfs") == 0
-		 || strcmp(fstype, "devpts") == 0
-		 || strcmp(fstype, "devtmpfs") == 0) {
+	else if (strcmp(fstype, "devtmpfs") == 0)
+		strcpy(host_path, "/dev");
+	else if (strcmp(fstype, "devpts") == 0)
+		strcpy(host_path, "/dev/pts");
+	else if (strcmp(fstype, "tmpfs") == 0) {
 		tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
 		if (tmpdir == NULL)
 			return;
