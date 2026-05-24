@@ -25,6 +25,7 @@
 #include <sys/un.h>      /* struct sockaddr_un, */
 #include <linux/net.h>   /* SYS_*, */
 #include <fcntl.h>       /* AT_FDCWD, */
+#include <unistd.h>      /* close(2), */
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
 #include <stdbool.h>     /* bool */
@@ -375,34 +376,43 @@ void apply_emulated_pivot_root(Tracee *tracee)
 }
 
 /**
- * Helpers for emulating AF_NETLINK / NETLINK_ROUTE traffic.  The
- * tracee asks for a real netlink socket which Android usually denies
- * with EACCES (no CAP_NET_ADMIN); we silently substitute an
- * AF_UNIX/SOCK_DGRAM socket and intercept the few netlink-shaped
- * syscalls bubblewrap's loopback_setup() actually makes
- * (bind/sendto/recvfrom), synthesising an NLMSG_ERROR success reply.
+ * Helpers for emulating AF_NETLINK / NETLINK_ROUTE traffic.  Some
+ * environments deny the tracee a real netlink socket (Android's
+ * SELinux policy on untrusted_app domains, seccomp filters inherited
+ * from a Termux-like launcher, hardened containers, ...); in that
+ * case we silently substitute an AF_UNIX/SOCK_DGRAM socket and
+ * intercept the few netlink-shaped syscalls bubblewrap's
+ * loopback_setup() actually makes (bind/sendto/recvfrom),
+ * synthesising an NLMSG_ERROR success reply.
  *
- * Only kick in when the host kernel actually denies AF_NETLINK
- * (Termux/Android with restrictive seccomp).  On stock Linux the
- * tracee can open NETLINK_ROUTE just fine and our rewrite would only
- * break legitimate users like c-ares (dnf, getaddrinfo, ...).
+ * The substitution only happens when the host kernel actually
+ * refuses AF_NETLINK; otherwise the tracee gets a real netlink
+ * socket and ordinary users like c-ares (dnf, getaddrinfo, ...)
+ * keep working.
  */
 
-static bool host_blocks_af_netlink(void)
+static bool host_blocks_af_netlink(const Tracee *tracee)
 {
-	static int cached = -1; /* -1: unknown, 0: works, 1: blocked */
+	enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
+	static int cached = PROBE_UNKNOWN;
 	int fd;
+	int saved_errno;
 
-	if (cached != -1)
-		return cached == 1;
+	if (cached != PROBE_UNKNOWN)
+		return cached == PROBE_BLOCKED;
 
 	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
 	if (fd >= 0) {
 		close(fd);
-		cached = 0;
+		cached = PROBE_ALLOWED;
 		return false;
 	}
-	cached = 1;
+
+	saved_errno = errno;
+	cached = PROBE_BLOCKED;
+	VERBOSE(tracee, 1, "AF_NETLINK denied by host (%s); enabling "
+			   "AF_UNIX fallback for sandbox helpers",
+		strerror(saved_errno));
 	return true;
 }
 
@@ -765,7 +775,7 @@ int translate_syscall_enter(Tracee *tracee)
 	 * on it can be faked too.  */
 	case PR_socket: {
 		word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-		if (domain == AF_NETLINK && host_blocks_af_netlink()) {
+		if (domain == AF_NETLINK && host_blocks_af_netlink(tracee)) {
 			word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
 			poke_reg(tracee, SYSARG_1, AF_UNIX);
 			poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
