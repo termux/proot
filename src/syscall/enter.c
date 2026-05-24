@@ -381,7 +381,30 @@ void apply_emulated_pivot_root(Tracee *tracee)
  * AF_UNIX/SOCK_DGRAM socket and intercept the few netlink-shaped
  * syscalls bubblewrap's loopback_setup() actually makes
  * (bind/sendto/recvfrom), synthesising an NLMSG_ERROR success reply.
+ *
+ * Only kick in when the host kernel actually denies AF_NETLINK
+ * (Termux/Android with restrictive seccomp).  On stock Linux the
+ * tracee can open NETLINK_ROUTE just fine and our rewrite would only
+ * break legitimate users like c-ares (dnf, getaddrinfo, ...).
  */
+
+static bool host_blocks_af_netlink(void)
+{
+	static int cached = -1; /* -1: unknown, 0: works, 1: blocked */
+	int fd;
+
+	if (cached != -1)
+		return cached == 1;
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (fd >= 0) {
+		close(fd);
+		cached = 0;
+		return false;
+	}
+	cached = 1;
+	return true;
+}
 
 static bool is_fake_netlink_fd(const Tracee *tracee, int fd)
 {
@@ -742,7 +765,7 @@ int translate_syscall_enter(Tracee *tracee)
 	 * on it can be faked too.  */
 	case PR_socket: {
 		word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-		if (domain == AF_NETLINK) {
+		if (domain == AF_NETLINK && host_blocks_af_netlink()) {
 			word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
 			poke_reg(tracee, SYSARG_1, AF_UNIX);
 			poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
