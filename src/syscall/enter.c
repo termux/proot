@@ -772,10 +772,17 @@ int translate_syscall_enter(Tracee *tracee)
 	/* Substitute an AF_UNIX/SOCK_DGRAM socket for AF_NETLINK
 	 * requests so the kernel doesn't reject them with EACCES on
 	 * Android, then track the resulting fd so bind/sendto/recvfrom
-	 * on it can be faked too.  */
+	 * on it can be faked too.  Only NETLINK_ROUTE is emulated (it's
+	 * what bubblewrap's loopback_setup needs); pass other netlink
+	 * protocols (NETLINK_AUDIT, NETLINK_KOBJECT_UEVENT, ...) through
+	 * untouched so the tracee gets the real kernel error / behavior
+	 * for them.  */
 	case PR_socket: {
 		word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-		if (domain == AF_NETLINK && host_blocks_af_netlink(tracee)) {
+		word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
+		if (   domain == AF_NETLINK
+		    && protocol == NETLINK_ROUTE
+		    && host_blocks_af_netlink(tracee)) {
 			word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
 			poke_reg(tracee, SYSARG_1, AF_UNIX);
 			poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
