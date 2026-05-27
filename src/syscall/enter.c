@@ -399,24 +399,44 @@ static bool host_blocks_af_netlink(const Tracee *tracee)
 {
 	enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
 	static int cached = PROBE_UNKNOWN;
+	struct sockaddr_nl snl;
+	const char *blocked_op;
 	int fd;
 	int saved_errno;
 
 	if (cached != PROBE_UNKNOWN)
 		return cached == PROBE_BLOCKED;
 
+	/* Mirror what bubblewrap's loopback_setup() does: socket() then
+	 * bind() with nl_groups == 0.  Some hosts permit socket creation
+	 * but reject bind() under separate SELinux/AppArmor/seccomp
+	 * checks, so probing socket() alone would wrongly classify them
+	 * as "AF_NETLINK works" and leave the tracee to fail later.  */
 	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-	if (fd >= 0) {
-		close(fd);
-		cached = PROBE_ALLOWED;
-		return false;
+	if (fd < 0) {
+		saved_errno = errno;
+		blocked_op = "socket";
+		goto blocked;
 	}
 
-	saved_errno = errno;
+	memset(&snl, 0, sizeof(snl));
+	snl.nl_family = AF_NETLINK;
+	if (bind(fd, (struct sockaddr *) &snl, sizeof(snl)) < 0) {
+		saved_errno = errno;
+		close(fd);
+		blocked_op = "bind";
+		goto blocked;
+	}
+
+	close(fd);
+	cached = PROBE_ALLOWED;
+	return false;
+
+blocked:
 	cached = PROBE_BLOCKED;
-	VERBOSE(tracee, 1, "AF_NETLINK denied by host (%s); enabling "
+	VERBOSE(tracee, 1, "AF_NETLINK %s denied by host (%s); enabling "
 			   "AF_UNIX fallback for sandbox helpers",
-		strerror(saved_errno));
+		blocked_op, strerror(saved_errno));
 	return true;
 }
 
