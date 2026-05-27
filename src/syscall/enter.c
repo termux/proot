@@ -480,22 +480,28 @@ static size_t write_fake_netlink_ack(Tracee *tracee, word_t buf_addr,
  * caller lacks CAP_NET_ADMIN; bubblewrap's loopback_setup() calls
  * if_nametoindex("lo") which goes through this ioctl and bails out
  * with "Permission denied" on failure.
+ *
+ * Only touch the ifr_name (read) and ifr_ifindex (write) fields,
+ * both at fixed offsets — sizeof(struct ifreq) differs between
+ * 32- and 64-bit ABIs (the trailing union contains pointer-sized
+ * members), and reading/writing the whole struct from PRoot would
+ * overrun the tracee's buffer when the two ABIs disagree.
  */
 static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)
 {
-	struct ifreq ifr;
+	char name[IFNAMSIZ];
+	int ifindex = 1;
 
 	if (cmd != SIOCGIFINDEX)
 		return false;
 	if (arg == 0)
 		return false;
-	if (read_data(tracee, &ifr, arg, sizeof(ifr)) < 0)
+	if (read_data(tracee, name, arg, sizeof(name)) < 0)
 		return false;
-	if (strncmp(ifr.ifr_name, "lo", IFNAMSIZ) != 0)
+	if (strncmp(name, "lo", IFNAMSIZ) != 0)
 		return false;
 
-	ifr.ifr_ifindex = 1;
-	if (write_data(tracee, arg, &ifr, sizeof(ifr)) < 0)
+	if (write_data(tracee, arg + IFNAMSIZ, &ifindex, sizeof(ifindex)) < 0)
 		return false;
 	return true;
 }
