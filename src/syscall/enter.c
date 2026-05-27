@@ -344,6 +344,10 @@ void apply_emulated_mount(Tracee *tracee)
 	unsigned long flags;
 
 	fstype[0] = '\0';
+	/* read_string doesn't guarantee a trailing NUL when it hits the
+	 * size limit before finding one in the tracee's memory; pin the
+	 * last byte so the downstream strcmp can't read past the buffer. */
+	fstype[sizeof(fstype) - 1] = '\0';
 
 	if (get_sysarg_path(tracee, src_user, SYSARG_1) < 0)
 		return;
