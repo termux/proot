@@ -562,7 +562,6 @@ int new_child(Tracee *parent, word_t clone_flags)
 				(void) insort_binding3(child, child->fs,
 						       iter->host.path,
 						       iter->guest.path);
-			parent->clone_stripped_newns = false;
 		}
 		else {
 			/* Bindings are shared across file-system name-spaces since a
@@ -573,6 +572,14 @@ int new_child(Tracee *parent, word_t clone_flags)
 			child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
 		}
 	}
+
+	/* Always consume the stripped-NEWNS flag once a child has been
+	 * processed, regardless of which branch above we took (the flag
+	 * could persist otherwise — e.g. when CLONE_FS sent us straight
+	 * to the shared-fs path, or when bindings.guest wasn't ready
+	 * yet — and incorrectly isolate the bindings of an unrelated
+	 * later clone in the same parent).  */
+	parent->clone_stripped_newns = false;
 
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */
