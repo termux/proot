@@ -120,6 +120,7 @@ typedef struct tracee {
 	int fake_netlink_fds_count;
 	bool pending_fake_netlink_socket;
 	uint32_t fake_netlink_pending_seq;
+	uint16_t fake_netlink_pending_flags;
 
 	/* Support for ptrace emulation (tracer side).  */
 	struct {

@@ -385,9 +385,14 @@ void apply_emulated_pivot_root(Tracee *tracee)
  * SELinux policy on untrusted_app domains, seccomp filters inherited
  * from a Termux-like launcher, hardened containers, ...); in that
  * case we silently substitute an AF_UNIX/SOCK_DGRAM socket and
- * intercept the few netlink-shaped syscalls bubblewrap's
- * loopback_setup() actually makes (bind/sendto/recvfrom),
- * synthesising an NLMSG_ERROR success reply.
+ * intercept the netlink-shaped syscalls a tracee might issue on it
+ * (bind, sendto / sendmsg, recvfrom / recvmsg, getsockname,
+ * getpeername), synthesising responses that match what the request
+ * asked for: NLMSG_ERROR(err=0) for non-dump requests (bubblewrap's
+ * loopback_setup RTM_NEWADDR / RTM_NEWLINK) and an empty NLMSG_DONE
+ * for NLM_F_DUMP queries (apt / glibc getifaddrs RTM_GETADDR,
+ * iproute2 RTM_GETLINK), so callers see a well-formed empty result
+ * instead of a zero-byte recvmsg they treat as fatal.
  *
  * The substitution only happens when the host kernel actually
  * refuses AF_NETLINK; otherwise the tracee gets a real netlink
@@ -496,6 +501,118 @@ static size_t write_fake_netlink_ack(Tracee *tracee, word_t buf_addr,
 	if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
 		return 0;
 	return reply_len;
+}
+
+/**
+ * Write an NLMSG_DONE terminator with a zero error payload, the
+ * canonical "empty dump" response.  Used to answer requests carrying
+ * NLM_F_DUMP (e.g. iproute2's RTM_GETLINK, libc's getifaddrs() doing
+ * RTM_GETADDR): the caller sees a well-formed, empty result instead
+ * of recvmsg(2) returning 0 bytes (which they treat as a fatal
+ * "unexpected netlink response of size 0").
+ */
+static size_t write_fake_netlink_done(Tracee *tracee, word_t buf_addr,
+				      word_t buf_len, uint32_t seq)
+{
+	struct {
+		struct nlmsghdr hdr;
+		int32_t         error;
+	} reply;
+	size_t reply_len = sizeof(reply);
+
+	if (buf_len < reply_len)
+		return 0;
+
+	memset(&reply, 0, sizeof(reply));
+	reply.hdr.nlmsg_len   = reply_len;
+	reply.hdr.nlmsg_type  = NLMSG_DONE;
+	reply.hdr.nlmsg_flags = 0;
+	reply.hdr.nlmsg_seq   = seq;
+	reply.hdr.nlmsg_pid   = (uint32_t) tracee->pid;
+	reply.error           = 0;
+
+	if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
+		return 0;
+	return reply_len;
+}
+
+/**
+ * Synthesise a netlink response that matches what the tracee's most
+ * recent request asked for: NLMSG_DONE if it carried NLM_F_DUMP (the
+ * caller is iterating a dump and wants a terminator), otherwise the
+ * NLMSG_ERROR "success" ack that non-dump requests with NLM_F_ACK
+ * (including bubblewrap's RTM_NEWADDR / RTM_NEWLINK) expect.
+ */
+static size_t write_fake_netlink_response(Tracee *tracee, word_t buf_addr,
+					  word_t buf_len)
+{
+	if (tracee->fake_netlink_pending_flags & NLM_F_DUMP)
+		return write_fake_netlink_done(tracee, buf_addr, buf_len,
+					       tracee->fake_netlink_pending_seq);
+	return write_fake_netlink_ack(tracee, buf_addr, buf_len,
+				      tracee->fake_netlink_pending_seq);
+}
+
+/**
+ * Write a synthetic sockaddr_nl reply into the tracee's getsockname()
+ * / getpeername() buffer pair (@addr_ptr, @size_ptr).  The kernel
+ * would otherwise hand back the AF_UNIX sockaddr from our substituted
+ * socket (length 2), which iproute2 rejects with "Wrong address
+ * length 2".  Returns 0 on success or -errno (so the caller can
+ * propagate it as the syscall's result).
+ */
+static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
+				       word_t size_ptr)
+{
+	struct sockaddr_nl snl;
+	uint32_t in_size;
+	uint32_t out_size;
+
+	if (size_ptr == 0)
+		return -EINVAL;
+
+	in_size = peek_uint32(tracee, size_ptr);
+	if (errno != 0)
+		return -errno;
+
+	memset(&snl, 0, sizeof(snl));
+	snl.nl_family = AF_NETLINK;
+	snl.nl_pid    = (uint32_t) tracee->pid;
+
+	if (addr_ptr != 0 && in_size > 0) {
+		uint32_t copy = in_size < sizeof(snl) ? in_size : sizeof(snl);
+		if (write_data(tracee, addr_ptr, &snl, copy) < 0)
+			return -EFAULT;
+	}
+
+	/* Linux semantics: *size_ptr always reflects the real address
+	 * length even when the caller's buffer was too small.  */
+	out_size = sizeof(snl);
+	poke_uint32(tracee, size_ptr, out_size);
+	if (errno != 0)
+		return -errno;
+
+	return 0;
+}
+
+/**
+ * Parse the netlink request the tracee just sent (whether via sendto
+ * with a flat buffer or via sendmsg with an iovec) and remember its
+ * nlmsg_seq / nlmsg_flags so a later recvmsg / recvfrom on the same
+ * fake netlink fd can return a matching reply.
+ */
+static void record_fake_netlink_request(Tracee *tracee, word_t buf_addr,
+					word_t buf_len)
+{
+	struct nlmsghdr hdr;
+
+	if (buf_addr == 0 || buf_len < sizeof(hdr))
+		return;
+	if (read_data(tracee, &hdr, buf_addr, sizeof(hdr)) < 0)
+		return;
+
+	tracee->fake_netlink_pending_seq   = hdr.nlmsg_seq;
+	tracee->fake_netlink_pending_flags = hdr.nlmsg_flags;
 }
 
 /**
@@ -784,6 +901,22 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_getpeername:{
 		int size;
 
+		/* For an fd we substituted to AF_UNIX as part of the
+		 * AF_NETLINK emulation, hand back a synthetic sockaddr_nl
+		 * so callers like iproute2 don't error out with "Wrong
+		 * address length 2" on the AF_UNIX sockname.  */
+		if ((syscall_number == PR_getsockname || syscall_number == PR_getpeername)
+		    && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
+			word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t size_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+			int    rc = write_fake_netlink_sockname(tracee, addr_ptr, size_ptr);
+
+			poke_reg(tracee, SYSARG_RESULT, (word_t) rc);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+			break;
+		}
+
 		/* Remember: PEEK_WORD puts -errno in status and breaks if an
 		 * error occured.  */
 		size = (int) PEEK_WORD(peek_reg(tracee, ORIGINAL, SYSARG_3), special ? -EINVAL : 0);
@@ -828,13 +961,10 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_sendto: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		if (is_fake_netlink_fd(tracee, fd)) {
-			word_t buf  = peek_reg(tracee, CURRENT, SYSARG_2);
-			word_t len  = peek_reg(tracee, CURRENT, SYSARG_3);
-			struct nlmsghdr hdr;
+			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
 
-			if (buf != 0 && len >= sizeof(hdr)
-			    && read_data(tracee, &hdr, buf, sizeof(hdr)) == 0)
-				tracee->fake_netlink_pending_seq = hdr.nlmsg_seq;
+			record_fake_netlink_request(tracee, buf, len);
 
 			poke_reg(tracee, SYSARG_RESULT, len);
 			set_sysnum(tracee, PR_void);
@@ -848,10 +978,43 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_sendmsg: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		if (is_fake_netlink_fd(tracee, fd)) {
-			/* Pretend we sent everything.  bubblewrap only
-			 * uses sendto(); we accept sendmsg too just in
-			 * case.  */
-			poke_reg(tracee, SYSARG_RESULT, 0);
+			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+			size_t w = sizeof_word(tracee);
+			word_t total = 0;
+			word_t iov_ptr, iov_count;
+
+			/* struct msghdr layout (Linux, both ABIs):
+			 *   word  msg_name
+			 *   u32   msg_namelen  (followed by pad to word align)
+			 *   word  msg_iov
+			 *   word  msg_iovlen
+			 *   ...
+			 */
+			if (msghdr_addr != 0) {
+				iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+				iov_count = (errno == 0)
+					    ? peek_word(tracee, msghdr_addr + 3 * w)
+					    : 0;
+				errno = 0;
+
+				if (iov_ptr != 0 && iov_count > 0) {
+					word_t base = peek_word(tracee, iov_ptr);
+					word_t len  = (errno == 0)
+						      ? peek_word(tracee, iov_ptr + w)
+						      : 0;
+					errno = 0;
+
+					record_fake_netlink_request(tracee, base, len);
+					/* Use the first iovec's length as the
+					 * pretended bytes-sent.  Multi-iovec
+					 * netlink requests are unheard of for
+					 * the bwrap / glibc / iproute2 callers
+					 * we care about.  */
+					total = len;
+				}
+			}
+
+			poke_reg(tracee, SYSARG_RESULT, total);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
@@ -865,8 +1028,7 @@ int translate_syscall_enter(Tracee *tracee)
 		if (is_fake_netlink_fd(tracee, fd)) {
 			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
-			size_t n = write_fake_netlink_ack(tracee, buf, len,
-							  tracee->fake_netlink_pending_seq);
+			size_t n = write_fake_netlink_response(tracee, buf, len);
 			poke_reg(tracee, SYSARG_RESULT, (word_t) n);
 			set_sysnum(tracee, PR_void);
 			status = 0;
@@ -879,8 +1041,52 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_recvmsg: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		if (is_fake_netlink_fd(tracee, fd)) {
-			/* Same fallback as sendmsg: return EOF.  */
-			poke_reg(tracee, SYSARG_RESULT, 0);
+			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+			size_t w = sizeof_word(tracee);
+			word_t msg_name = 0;
+			word_t iov_ptr = 0, iov_count = 0;
+			size_t n = 0;
+
+			if (msghdr_addr != 0) {
+				msg_name  = peek_word(tracee, msghdr_addr);
+				if (errno != 0) { errno = 0; msg_name = 0; }
+				iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+				if (errno != 0) { errno = 0; iov_ptr   = 0; }
+				iov_count = peek_word(tracee, msghdr_addr + 3 * w);
+				if (errno != 0) { errno = 0; iov_count = 0; }
+			}
+
+			if (iov_ptr != 0 && iov_count > 0) {
+				word_t base = peek_word(tracee, iov_ptr);
+				word_t len  = (errno == 0)
+					      ? peek_word(tracee, iov_ptr + w)
+					      : 0;
+				errno = 0;
+				n = write_fake_netlink_response(tracee, base, len);
+			}
+
+			/* glibc's getifaddrs() and friends inspect the
+			 * source address: hand them a sockaddr_nl from the
+			 * kernel (nl_pid == 0) rather than the AF_UNIX
+			 * "address family 1" that a real recvmsg on our
+			 * substituted socket would produce.  */
+			if (msg_name != 0 && msghdr_addr != 0) {
+				struct sockaddr_nl snl;
+				uint32_t in_namelen = peek_uint32(tracee, msghdr_addr + w);
+				if (errno == 0 && in_namelen > 0) {
+					uint32_t copy = in_namelen < sizeof(snl)
+							? in_namelen
+							: sizeof(snl);
+					memset(&snl, 0, sizeof(snl));
+					snl.nl_family = AF_NETLINK;
+					(void) write_data(tracee, msg_name, &snl, copy);
+					poke_uint32(tracee, msghdr_addr + w,
+						    (uint32_t) sizeof(snl));
+				}
+				errno = 0;
+			}
+
+			poke_reg(tracee, SYSARG_RESULT, (word_t) n);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
