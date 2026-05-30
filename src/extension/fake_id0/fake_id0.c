@@ -29,6 +29,7 @@
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <unistd.h>      /* get*id(2),  */
 #include <sys/ptrace.h>  /* linux.git:c0a3a20b  */
+#include <sys/prctl.h>   /* PR_SET_KEEPCAPS, PR_GET_KEEPCAPS, */
 #include <linux/audit.h> /* AUDIT_ARCH_*,  */
 #include <string.h>      /* memcpy(3), */
 #include <stdlib.h>      /* strtol(3), */
@@ -81,26 +82,44 @@
 } while (0)
 
 /**
+ * Clear the fake CAP_SETUID/CAP_SETGID flag (caps_active) when a setuid-
+ * family syscall has just performed a "permanent" privilege drop: at
+ * least one of r/e/s uid was 0 before the call and none is 0 after.
+ * This mirrors the Linux rule that clears capabilities on such a
+ * transition, unless prctl(PR_SET_KEEPCAPS, 1) was used.  Operates on
+ * the current Config in scope.
+ */
+#define MAYBE_DROP_CAPS(prev_root) do {					\
+	if ((prev_root) && !config->keep_caps				\
+	    && config->ruid != 0 && config->euid != 0			\
+	    && config->suid != 0)					\
+		config->caps_active = false;				\
+} while (0)
+
+/**
  * Emulate setuid(2) and setgid(2).
  */
 #define SETXID(id, version) do {					\
 	id ## _t id = peek_reg(tracee, version, SYSARG_1);		\
+	bool prev_root = (config->ruid == 0 || config->euid == 0	\
+			  || config->suid == 0);			\
 	bool allowed;							\
 									\
 	/* "EPERM: The user is not privileged (does not have the	\
 	 * CAP_SETUID capability) and uid does not match the real UID	\
 	 * or saved set-user-ID of the calling process." -- man		\
 	 * setuid */							\
-	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
+	allowed = (config->euid == 0 || config->caps_active		\
 		|| id == config->r ## id				\
 		|| id == config->e ## id				\
 		|| id == config->s ## id);				\
 	if (!allowed)							\
 		return -EPERM;						\
 									\
-	/* "If the effective UID of the caller is root, the real UID	\
-	 * and saved set-user-ID are also set." -- man setuid */	\
-	if (config->euid == 0) {					\
+	/* "If the effective UID of the caller is root [or it holds	\
+	 * CAP_SETUID], the real UID and saved set-user-ID are also	\
+	 * set." -- man setuid */					\
+	if (config->euid == 0 || config->caps_active) {			\
 		config->r ## id = id;					\
 		config->s ## id = id;					\
 	}								\
@@ -110,6 +129,8 @@
 	 * man setfsuid */						\
 	config->e ## id  = id;						\
 	config->fs ## id = id;						\
+									\
+	MAYBE_DROP_CAPS(prev_root);					\
 									\
 	poke_reg(tracee, SYSARG_RESULT, 0);				\
 	return 0;							\
@@ -131,6 +152,8 @@
 #define SETREXID(id, version) do {					\
 	id ## _t r ## id = peek_reg(tracee, version, SYSARG_1); 	\
 	id ## _t e ## id = peek_reg(tracee, version, SYSARG_2); 	\
+	bool prev_root = (config->ruid == 0 || config->euid == 0	\
+			  || config->suid == 0);			\
 	bool allowed;							\
 									\
 	/* "Unprivileged processes may only set the effective user ID	\
@@ -151,7 +174,7 @@
 	 *								\
 	 * Is it possible to "ruid <- euid" and "euid <- suid" at the	\
 	 * same time?  */						\
-	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
+	allowed = (config->euid == 0 || config->caps_active		\
 		|| (UNCHANGED_ID(e ## id) && UNCHANGED_ID(r ## id))	\
 		|| (r ## id == config->e ## id && (e ## id == config->r ## id || UNCHANGED_ID(e ## id))) \
 		|| (e ## id == config->r ## id && (r ## id == config->e ## id || UNCHANGED_ID(r ## id))) \
@@ -181,6 +204,8 @@
 		config->r ## id = r ## id;				\
 	}								\
 									\
+	MAYBE_DROP_CAPS(prev_root);					\
+									\
 	poke_reg(tracee, SYSARG_RESULT, 0);				\
 	return 0;							\
 } while (0)
@@ -199,6 +224,8 @@
 	type ## id_t r ## type ## id = peek_reg(tracee, version, SYSARG_1);	\
 	type ## id_t e ## type ## id = peek_reg(tracee, version, SYSARG_2);	\
 	type ## id_t s ## type ## id = peek_reg(tracee, version, SYSARG_3);	\
+	bool prev_root = (config->ruid == 0 || config->euid == 0	\
+			  || config->suid == 0);			\
 	bool allowed;							\
 									\
 	/* "Unprivileged user processes may change the real UID,	\
@@ -209,7 +236,7 @@
 	 * Privileged processes (on Linux, those having the CAP_SETUID	\
 	 * capability) may set the real UID, effective UID, and saved	\
 	 * set-user-ID to arbitrary values." -- man setresuid */	\
-	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
+	allowed = (config->euid == 0 || config->caps_active		\
 		|| ((UNSET_ID(r ## type ## id) || EQUALS_ANY_ID(r ## type ## id, type)) \
 		 && (UNSET_ID(e ## type ## id) || EQUALS_ANY_ID(e ## type ## id, type)) \
 		 && (UNSET_ID(s ## type ## id) || EQUALS_ANY_ID(s ## type ## id, type)))); \
@@ -232,6 +259,8 @@
 	if (!UNSET_ID(s ## type ## id))					\
 		config->s ## type ## id = s ## type ## id;		\
 									\
+	MAYBE_DROP_CAPS(prev_root);					\
+									\
 	poke_reg(tracee, SYSARG_RESULT, 0);				\
 	return 0;							\
 } while (0)
@@ -248,7 +277,7 @@
 	 * superuser or if fsuid matches either the real user ID,	\
 	 * effective user ID, saved set-user-ID, or the current value	\
 	 * of fsuid." -- man setfsuid */				\
-	allowed = (config->euid == 0 || config->initial_euid == 0 /* || HAS_CAP(SETUID) */ \
+	allowed = (config->euid == 0 || config->caps_active		\
 		|| fs ## type ## id == config->fs ## type ## id		\
 		|| EQUALS_ANY_ID(fs ## type ## id, type));		\
 	if (allowed)							\
@@ -322,6 +351,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_newfstatat,	FILTER_SYSEXIT },
 	{ PR_oldlstat,		FILTER_SYSEXIT },
 	{ PR_oldstat,		FILTER_SYSEXIT },
+	{ PR_prctl,		FILTER_SYSEXIT },
 	{ PR_sendmsg,		0 },
 	{ PR_setfsgid,		FILTER_SYSEXIT },
 	{ PR_setfsgid32,	FILTER_SYSEXIT },
@@ -929,6 +959,21 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_setfsgid32:
 		SETFSXID(g);
 
+	case PR_prctl: {
+		/* Mirror the tracee's PR_SET_KEEPCAPS state.  The real prctl
+		 * runs on the kernel; we only observe successful calls so the
+		 * fake_id0 cap model stays in sync with what the kernel does
+		 * for the tracee (PR_GET_KEEPCAPS is satisfied by the kernel
+		 * directly and needs no intercept). */
+		int op = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+		int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (result == 0 && op == PR_SET_KEEPCAPS) {
+			word_t arg = peek_reg(tracee, ORIGINAL, SYSARG_2);
+			config->keep_caps = (arg != 0);
+		}
+		return 0;
+	}
+
 	case PR_getuid:
 	case PR_getuid32:
 		poke_reg(tracee, SYSARG_RESULT, config->ruid);
@@ -1129,6 +1174,9 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	if (!tracee->skip_proot_loader)
 		adjust_elf_auxv(tracee, config);
 
+	/* Linux clears PR_SET_KEEPCAPS on execve. */
+	config->keep_caps = false;
+
 	status = stat(tracee->host_exe, &mode);
 	if (status < 0)
 		return 0; /* Not fatal.  */
@@ -1136,6 +1184,8 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	if ((mode.st_mode & S_ISUID) != 0) {
 		config->euid = 0;
 		config->suid = 0;
+		/* Setuid-root binary gives the process fake CAP_SETUID. */
+		config->caps_active = true;
 	}
 
 	if ((mode.st_mode & S_ISGID) != 0) {
@@ -1185,11 +1235,12 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->euid  = uid;
 		config->suid  = uid;
 		config->fsuid = uid;
-		config->initial_euid = uid;
 		config->rgid  = gid;
 		config->egid  = gid;
 		config->sgid  = gid;
 		config->fsgid = gid;
+		config->caps_active = (uid == 0);
+		config->keep_caps = false;
 			/* Set the umask to the typical linux value. */
 			config->umask = 022;
 
