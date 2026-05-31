@@ -26,6 +26,7 @@
 #include <linux/ioctl.h> /* _IOW, */
 #include <linux/prctl.h> /* PR_GET_AUXV, */
 #include <string.h>      /* strlen(3), */
+#include <unistd.h>      /* readlink(2), */
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -398,6 +399,27 @@ void translate_syscall_exit(Tracee *tracee)
 			status = readlink_proc_pid_fd(tracee->pid, dirfd, referer);
 			if (status < 0)
 				break;
+		}
+
+		/* If the kernel filled the whole output buffer, the symlink
+		 * content was truncated to fit.  Detranslating a truncated
+		 * host path yields a wrong, wrongly-short guest path -- and
+		 * callers that only enlarge their buffer when readlink(2)
+		 * returns exactly the buffer size (bubblewrap's
+		 * readlink_malloc, glibc realpath, ...) never notice and
+		 * silently use the broken path.  Host paths are much longer
+		 * than the guest paths they map to (deep proot-distro rootfs
+		 * prefix), so short guest targets truncate easily.  Re-read
+		 * the link with a full-size buffer (referer is the translated
+		 * host path) so the detranslation below sees the real target;
+		 * readlink() simply fails for a non-symlink referer, leaving
+		 * the original content untouched.  */
+		if (old_size == max_size) {
+			ssize_t full = readlink(referer, referee, sizeof(referee) - 1);
+			if (full > 0) {
+				referee[full] = '\0';
+				old_size = (size_t) full;
+			}
 		}
 
 		status = detranslate_path(tracee, referee, referer);
