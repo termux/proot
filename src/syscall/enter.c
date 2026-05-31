@@ -36,8 +36,20 @@
 #include <sched.h>       /* CLONE_NEW*, */
 #include <termios.h>     /* TCSETS, TCSANOW */
 #include <linux/netlink.h> /* struct nlmsghdr, NLMSG_ERROR, struct nlmsgerr */
+#include <linux/rtnetlink.h> /* RTM_*, struct ifinfomsg, struct rtattr, RTA_* */
+#include <linux/if_addr.h> /* struct ifaddrmsg, IFA_*, IFA_F_PERMANENT */
 #include <linux/sockios.h> /* SIOCGIFINDEX */
-#include <net/if.h>      /* struct ifreq, IFNAMSIZ */
+#include <net/if.h>      /* struct ifreq, IFNAMSIZ, IFF_* */
+
+/* ABI-stable rtnetlink constants we synthesise for the loopback reply.
+ * Defined locally so we needn't pull in <linux/if.h> / <linux/if_arp.h>,
+ * which clash with the already-included <net/if.h>.  */
+#ifndef ARPHRD_LOOPBACK
+#define ARPHRD_LOOPBACK 772
+#endif
+#ifndef IFF_LOWER_UP
+#define IFF_LOWER_UP 0x10000
+#endif
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -469,88 +481,218 @@ static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
 }
 
 /**
- * Write a synthetic NLMSG_ERROR reply (with error=0) into the
- * tracee's buffer, mirroring the @seq the caller used in its request.
- * Returns the number of bytes written, or 0 on failure.
- *
- * bubblewrap's rtnl_read_reply checks both the sequence number AND
- * that nlmsg_pid matches the tracee's own pid, so set them both.
+ * Append one rtattr (@type, @data/@dlen) to the netlink message being
+ * built at @off in @buf and return the new offset.  Silently drops the
+ * attribute (returning @off unchanged) if it would overflow @max.
  */
-static size_t write_fake_netlink_ack(Tracee *tracee, word_t buf_addr,
-				     word_t buf_len, uint32_t seq)
+static size_t nl_add_attr(uint8_t *buf, size_t off, size_t max,
+			  uint16_t type, const void *data, uint16_t dlen)
 {
-	struct {
-		struct nlmsghdr hdr;
-		struct nlmsgerr err;
-	} reply;
-	size_t reply_len = sizeof(reply);
+	struct rtattr *rta;
+	size_t space = RTA_SPACE(dlen);
 
-	if (buf_len < reply_len)
-		return 0;
+	if (off + space > max)
+		return off;
 
-	memset(&reply, 0, sizeof(reply));
-	reply.hdr.nlmsg_len   = reply_len;
-	reply.hdr.nlmsg_type  = NLMSG_ERROR;
-	reply.hdr.nlmsg_flags = 0;
-	reply.hdr.nlmsg_seq   = seq;
-	reply.hdr.nlmsg_pid   = (uint32_t) tracee->pid;
-	reply.err.error       = 0;
-	/* reply.err.msg is the (zeroed) header of the original request;
-	 * loopback_setup() only checks the error field.  */
-
-	if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
-		return 0;
-	return reply_len;
+	rta = (struct rtattr *) (buf + off);
+	rta->rta_len  = RTA_LENGTH(dlen);
+	rta->rta_type = type;
+	if (dlen > 0)
+		memcpy((char *) rta + RTA_LENGTH(0), data, dlen);
+	if (space > RTA_LENGTH(dlen))
+		memset(buf + off + RTA_LENGTH(dlen), 0, space - RTA_LENGTH(dlen));
+	return off + space;
 }
 
 /**
- * Write an NLMSG_DONE terminator with a zero error payload, the
- * canonical "empty dump" response.  Used to answer requests carrying
- * NLM_F_DUMP (e.g. iproute2's RTM_GETLINK, libc's getifaddrs() doing
- * RTM_GETADDR): the caller sees a well-formed, empty result instead
- * of recvmsg(2) returning 0 bytes (which they treat as a fatal
- * "unexpected netlink response of size 0").
+ * Append an RTM_NEWLINK message describing the loopback interface.  The
+ * single interface PRoot's network namespace ever has is "lo"; we report
+ * it as up so iproute2 / glibc see a sane, well-formed link.
  */
-static size_t write_fake_netlink_done(Tracee *tracee, word_t buf_addr,
-				      word_t buf_len, uint32_t seq)
+static size_t nl_build_link(uint8_t *buf, size_t off, size_t max,
+			    uint32_t seq, uint32_t pid, uint16_t nlflags)
 {
-	struct {
-		struct nlmsghdr hdr;
-		int32_t         error;
-	} reply;
-	size_t reply_len = sizeof(reply);
+	size_t start = off;
+	struct nlmsghdr *nlh;
+	struct ifinfomsg ifi;
+	uint32_t mtu       = 65536;
+	uint32_t txqlen    = 1000;
+	uint8_t  operstate = 6;            /* IF_OPER_UP */
+	uint8_t  hwaddr[6] = { 0 };
+	size_t len;
 
-	if (buf_len < reply_len)
-		return 0;
+	if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifi)) > max)
+		return start;
 
-	memset(&reply, 0, sizeof(reply));
-	reply.hdr.nlmsg_len   = reply_len;
-	reply.hdr.nlmsg_type  = NLMSG_DONE;
-	reply.hdr.nlmsg_flags = 0;
-	reply.hdr.nlmsg_seq   = seq;
-	reply.hdr.nlmsg_pid   = (uint32_t) tracee->pid;
-	reply.error           = 0;
+	memset(&ifi, 0, sizeof(ifi));
+	ifi.ifi_family = AF_UNSPEC;
+	ifi.ifi_type   = ARPHRD_LOOPBACK;
+	ifi.ifi_index  = 1;
+	ifi.ifi_flags  = IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP;
+	ifi.ifi_change = 0;
 
-	if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
-		return 0;
-	return reply_len;
+	off = start + NLMSG_HDRLEN;
+	memcpy(buf + off, &ifi, sizeof(ifi));
+	off += NLMSG_ALIGN(sizeof(ifi));
+
+	off = nl_add_attr(buf, off, max, IFLA_IFNAME, "lo", 3);
+	off = nl_add_attr(buf, off, max, IFLA_MTU, &mtu, sizeof(mtu));
+	off = nl_add_attr(buf, off, max, IFLA_TXQLEN, &txqlen, sizeof(txqlen));
+	off = nl_add_attr(buf, off, max, IFLA_OPERSTATE, &operstate, sizeof(operstate));
+	off = nl_add_attr(buf, off, max, IFLA_ADDRESS, hwaddr, sizeof(hwaddr));
+	off = nl_add_attr(buf, off, max, IFLA_BROADCAST, hwaddr, sizeof(hwaddr));
+
+	len = off - start;
+	nlh = (struct nlmsghdr *) (buf + start);
+	nlh->nlmsg_len   = len;
+	nlh->nlmsg_type  = RTM_NEWLINK;
+	nlh->nlmsg_flags = nlflags;
+	nlh->nlmsg_seq   = seq;
+	nlh->nlmsg_pid   = pid;
+	return start + NLMSG_ALIGN(len);
 }
 
 /**
- * Synthesise a netlink response that matches what the tracee's most
- * recent request asked for: NLMSG_DONE if it carried NLM_F_DUMP (the
- * caller is iterating a dump and wants a terminator), otherwise the
- * NLMSG_ERROR "success" ack that non-dump requests with NLM_F_ACK
- * (including bubblewrap's RTM_NEWADDR / RTM_NEWLINK) expect.
+ * Append an RTM_NEWADDR message for the loopback address of @family
+ * (AF_INET -> 127.0.0.1/8, AF_INET6 -> ::1/128).
  */
-static size_t write_fake_netlink_response(Tracee *tracee, word_t buf_addr,
-					  word_t buf_len)
+static size_t nl_build_addr(uint8_t *buf, size_t off, size_t max,
+			    uint32_t seq, uint32_t pid, int family,
+			    uint16_t nlflags)
 {
-	if (tracee->fake_netlink_pending_flags & NLM_F_DUMP)
-		return write_fake_netlink_done(tracee, buf_addr, buf_len,
-					       tracee->fake_netlink_pending_seq);
-	return write_fake_netlink_ack(tracee, buf_addr, buf_len,
-				      tracee->fake_netlink_pending_seq);
+	size_t start = off;
+	struct nlmsghdr *nlh;
+	struct ifaddrmsg ifa;
+	static const uint8_t v4[4]  = { 127, 0, 0, 1 };
+	static const uint8_t v6[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+	const uint8_t *addr = (family == AF_INET6) ? v6 : v4;
+	uint8_t addrlen     = (family == AF_INET6) ? 16 : 4;
+	size_t len;
+
+	if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifa)) > max)
+		return start;
+
+	memset(&ifa, 0, sizeof(ifa));
+	ifa.ifa_family    = family;
+	ifa.ifa_prefixlen = (family == AF_INET6) ? 128 : 8;
+	ifa.ifa_flags     = IFA_F_PERMANENT;
+	ifa.ifa_scope     = RT_SCOPE_HOST;
+	ifa.ifa_index     = 1;
+
+	off = start + NLMSG_HDRLEN;
+	memcpy(buf + off, &ifa, sizeof(ifa));
+	off += NLMSG_ALIGN(sizeof(ifa));
+
+	off = nl_add_attr(buf, off, max, IFA_ADDRESS, addr, addrlen);
+	off = nl_add_attr(buf, off, max, IFA_LOCAL, addr, addrlen);
+	if (family == AF_INET)
+		off = nl_add_attr(buf, off, max, IFA_LABEL, "lo", 3);
+
+	len = off - start;
+	nlh = (struct nlmsghdr *) (buf + start);
+	nlh->nlmsg_len   = len;
+	nlh->nlmsg_type  = RTM_NEWADDR;
+	nlh->nlmsg_flags = nlflags;
+	nlh->nlmsg_seq   = seq;
+	nlh->nlmsg_pid   = pid;
+	return start + NLMSG_ALIGN(len);
+}
+
+/**
+ * Append an NLMSG_DONE terminator (the canonical end-of-dump marker).
+ */
+static size_t nl_build_done(uint8_t *buf, size_t off, size_t max,
+			    uint32_t seq, uint32_t pid)
+{
+	struct nlmsghdr *nlh;
+	int32_t error = 0;
+	size_t len = NLMSG_HDRLEN + sizeof(error);
+
+	if (off + NLMSG_ALIGN(len) > max)
+		return off;
+
+	nlh = (struct nlmsghdr *) (buf + off);
+	memcpy(buf + off + NLMSG_HDRLEN, &error, sizeof(error));
+	nlh->nlmsg_len   = len;
+	nlh->nlmsg_type  = NLMSG_DONE;
+	nlh->nlmsg_flags = NLM_F_MULTI;
+	nlh->nlmsg_seq   = seq;
+	nlh->nlmsg_pid   = pid;
+	return off + NLMSG_ALIGN(len);
+}
+
+/**
+ * Append an NLMSG_ERROR reply carrying @error (0 == success ack).  An
+ * error==0 ack is what bubblewrap's loopback_setup() expects for its
+ * RTM_NEWADDR / RTM_NEWLINK; a negative error answers an unsupported
+ * single-get (e.g. RTM_GETLINK for a non-loopback device).
+ */
+static size_t nl_build_error(uint8_t *buf, size_t off, size_t max,
+			     uint32_t seq, uint32_t pid, int error)
+{
+	struct nlmsghdr *nlh;
+	struct nlmsgerr err;
+	size_t len = NLMSG_HDRLEN + sizeof(err);
+
+	if (off + NLMSG_ALIGN(len) > max)
+		return off;
+
+	memset(&err, 0, sizeof(err));
+	err.error = error;
+	/* err.msg is the (zeroed) header of the original request; callers
+	 * only inspect err.error.  */
+
+	nlh = (struct nlmsghdr *) (buf + off);
+	memcpy(buf + off + NLMSG_HDRLEN, &err, sizeof(err));
+	nlh->nlmsg_len   = len;
+	nlh->nlmsg_type  = NLMSG_ERROR;
+	nlh->nlmsg_flags = 0;
+	nlh->nlmsg_seq   = seq;
+	nlh->nlmsg_pid   = pid;
+	return off + NLMSG_ALIGN(len);
+}
+
+/**
+ * Decide whether a single (non-dump) RTM_GETLINK request in @req refers
+ * to the loopback interface: either it names "lo" via IFLA_IFNAME, or it
+ * asks by ifi_index 0/1.  Used to answer real link lookups (iproute2's
+ * ll_link_get, "ip addr show lo") while reporting -ENODEV for anything
+ * else, which is the only interface PRoot can honestly present.
+ */
+static bool nl_request_is_loopback(const uint8_t *req, size_t req_len)
+{
+	const struct ifinfomsg *ifi;
+	size_t off = NLMSG_HDRLEN;
+	char name[IFNAMSIZ] = { 0 };
+	bool have_name = false;
+	int ifindex;
+
+	if (req_len < off + sizeof(*ifi))
+		return true;            /* no selector -> treat as loopback */
+
+	ifi = (const struct ifinfomsg *) (req + off);
+	ifindex = ifi->ifi_index;
+
+	off += NLMSG_ALIGN(sizeof(*ifi));
+	while (off + sizeof(struct rtattr) <= req_len) {
+		const struct rtattr *rta = (const struct rtattr *) (req + off);
+		size_t rlen = rta->rta_len;
+
+		if (rlen < sizeof(*rta) || off + rlen > req_len)
+			break;
+		if (rta->rta_type == IFLA_IFNAME) {
+			size_t dlen = rlen - RTA_LENGTH(0);
+			size_t cpy  = dlen < sizeof(name) ? dlen : sizeof(name) - 1;
+			memcpy(name, (const char *) rta + RTA_LENGTH(0), cpy);
+			name[cpy] = '\0';
+			have_name = true;
+		}
+		off += RTA_ALIGN(rlen);
+	}
+
+	if (have_name)
+		return strcmp(name, "lo") == 0;
+	return ifindex == 0 || ifindex == 1;
 }
 
 /**
@@ -597,22 +739,113 @@ static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
 
 /**
  * Parse the netlink request the tracee just sent (whether via sendto
- * with a flat buffer or via sendmsg with an iovec) and remember its
- * nlmsg_seq / nlmsg_flags so a later recvmsg / recvfrom on the same
- * fake netlink fd can return a matching reply.
+ * with a flat buffer or via sendmsg with an iovec) and build the reply
+ * the kernel would have produced into tracee->fake_netlink_reply, so a
+ * later recvmsg / recvfrom on the same fake netlink fd can hand it back.
+ *
+ * RTM_GETLINK / RTM_GETADDR get a real loopback description; other dumps
+ * get an empty NLMSG_DONE; everything else (bubblewrap's RTM_NEWADDR /
+ * RTM_NEWLINK and friends) gets an error==0 ack.  Replies carry the
+ * request's nlmsg_seq and the tracee's pid in nlmsg_pid, which is what
+ * iproute2 / bubblewrap match against before accepting a message.
  */
-static void record_fake_netlink_request(Tracee *tracee, word_t buf_addr,
-					word_t buf_len)
+static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
+				     word_t buf_len)
 {
+	uint8_t req[256] __attribute__((aligned(8)));
+	size_t  req_len;
 	struct nlmsghdr hdr;
+	uint8_t *out = tracee->fake_netlink_reply;
+	size_t   max = sizeof(tracee->fake_netlink_reply);
+	uint32_t pid = (uint32_t) tracee->pid;
+	uint32_t seq;
+	uint16_t type, flags;
+	bool dump;
+	size_t off = 0;
+
+	tracee->fake_netlink_reply_len = 0;
 
 	if (buf_addr == 0 || buf_len < sizeof(hdr))
 		return;
-	if (read_data(tracee, &hdr, buf_addr, sizeof(hdr)) < 0)
+	req_len = buf_len < sizeof(req) ? buf_len : sizeof(req);
+	if (read_data(tracee, req, buf_addr, req_len) < 0)
 		return;
 
-	tracee->fake_netlink_pending_seq   = hdr.nlmsg_seq;
-	tracee->fake_netlink_pending_flags = hdr.nlmsg_flags;
+	memcpy(&hdr, req, sizeof(hdr));
+	type  = hdr.nlmsg_type;
+	flags = hdr.nlmsg_flags;
+	seq   = hdr.nlmsg_seq;
+	dump  = (flags & NLM_F_DUMP) == NLM_F_DUMP;
+
+	switch (type) {
+	case RTM_GETLINK:
+		if (dump) {
+			off = nl_build_link(out, off, max, seq, pid, NLM_F_MULTI);
+			off = nl_build_done(out, off, max, seq, pid);
+		} else if (nl_request_is_loopback(req, req_len)) {
+			off = nl_build_link(out, off, max, seq, pid, 0);
+		} else {
+			off = nl_build_error(out, off, max, seq, pid, -ENODEV);
+		}
+		break;
+
+	case RTM_GETADDR: {
+		uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+
+		if (family == 0 || family == AF_INET)
+			off = nl_build_addr(out, off, max, seq, pid, AF_INET,
+					    dump ? NLM_F_MULTI : 0);
+		if (family == 0 || family == AF_INET6)
+			off = nl_build_addr(out, off, max, seq, pid, AF_INET6,
+					    dump ? NLM_F_MULTI : 0);
+		if (dump)
+			off = nl_build_done(out, off, max, seq, pid);
+		break;
+	}
+
+	default:
+		if (dump)
+			off = nl_build_done(out, off, max, seq, pid);
+		else
+			off = nl_build_error(out, off, max, seq, pid, 0);
+		break;
+	}
+
+	tracee->fake_netlink_reply_len = off;
+}
+
+/**
+ * Copy the pending fake netlink reply into the tracee's recvmsg iovec
+ * array (@iov_ptr, @iov_count), walking segments until the reply is
+ * exhausted.  Returns the number of bytes actually scattered (which may
+ * be less than the reply when the caller's buffers are too small).
+ */
+static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
+					 word_t iov_count)
+{
+	size_t reply_len = tracee->fake_netlink_reply_len;
+	size_t w = sizeof_word(tracee);
+	size_t done = 0;
+	word_t i;
+
+	for (i = 0; i < iov_count && done < reply_len; i++) {
+		word_t base = peek_word(tracee, iov_ptr + i * 2 * w);
+		word_t len  = (errno == 0) ? peek_word(tracee, iov_ptr + i * 2 * w + w) : 0;
+		size_t chunk;
+
+		errno = 0;
+		chunk = reply_len - done;
+		if (chunk > len)
+			chunk = len;
+		if (base != 0 && chunk > 0) {
+			if (write_data(tracee, base,
+				       tracee->fake_netlink_reply + done, chunk) < 0)
+				break;
+		}
+		done += chunk;
+	}
+
+	return done;
 }
 
 /**
@@ -964,7 +1197,7 @@ int translate_syscall_enter(Tracee *tracee)
 			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
 
-			record_fake_netlink_request(tracee, buf, len);
+			build_fake_netlink_reply(tracee, buf, len);
 
 			poke_reg(tracee, SYSARG_RESULT, len);
 			set_sysnum(tracee, PR_void);
@@ -1004,7 +1237,7 @@ int translate_syscall_enter(Tracee *tracee)
 						      : 0;
 					errno = 0;
 
-					record_fake_netlink_request(tracee, base, len);
+					build_fake_netlink_reply(tracee, base, len);
 					/* Use the first iovec's length as the
 					 * pretended bytes-sent.  Multi-iovec
 					 * netlink requests are unheard of for
@@ -1026,10 +1259,38 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_recvfrom: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		if (is_fake_netlink_fd(tracee, fd)) {
-			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
-			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
-			size_t n = write_fake_netlink_response(tracee, buf, len);
-			poke_reg(tracee, SYSARG_RESULT, (word_t) n);
+			word_t buf       = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t len       = peek_reg(tracee, CURRENT, SYSARG_3);
+			int    flags     = (int) peek_reg(tracee, CURRENT, SYSARG_4);
+			word_t addr_ptr  = peek_reg(tracee, CURRENT, SYSARG_5);
+			word_t size_ptr  = peek_reg(tracee, CURRENT, SYSARG_6);
+			size_t reply_len = tracee->fake_netlink_reply_len;
+			size_t copied    = 0;
+			size_t result;
+
+			if (reply_len > 0 && buf != 0) {
+				copied = len < reply_len ? len : reply_len;
+				if (copied > 0 &&
+				    write_data(tracee, buf,
+					       tracee->fake_netlink_reply, copied) < 0)
+					copied = 0;
+			}
+
+			/* MSG_PEEK leaves the reply pending for the real read
+			 * that follows; MSG_TRUNC asks for the untruncated
+			 * length (the libnetlink size-probe pattern).  */
+			if (!(flags & MSG_PEEK))
+				tracee->fake_netlink_reply_len = 0;
+			result = (flags & MSG_TRUNC) ? reply_len : copied;
+
+			/* Hand back a kernel sockaddr_nl (nl_pid == 0) source
+			 * rather than the AF_UNIX address of our substitute.  */
+			if (addr_ptr != 0 && size_ptr != 0)
+				(void) write_fake_netlink_sockname(tracee, addr_ptr,
+								   size_ptr);
+			errno = 0;
+
+			poke_reg(tracee, SYSARG_RESULT, (word_t) result);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
@@ -1042,10 +1303,13 @@ int translate_syscall_enter(Tracee *tracee)
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		if (is_fake_netlink_fd(tracee, fd)) {
 			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+			int    flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
 			size_t w = sizeof_word(tracee);
 			word_t msg_name = 0;
 			word_t iov_ptr = 0, iov_count = 0;
-			size_t n = 0;
+			size_t reply_len = tracee->fake_netlink_reply_len;
+			size_t scattered = 0;
+			size_t result;
 
 			if (msghdr_addr != 0) {
 				msg_name  = peek_word(tracee, msghdr_addr);
@@ -1056,14 +1320,16 @@ int translate_syscall_enter(Tracee *tracee)
 				if (errno != 0) { errno = 0; iov_count = 0; }
 			}
 
-			if (iov_ptr != 0 && iov_count > 0) {
-				word_t base = peek_word(tracee, iov_ptr);
-				word_t len  = (errno == 0)
-					      ? peek_word(tracee, iov_ptr + w)
-					      : 0;
-				errno = 0;
-				n = write_fake_netlink_response(tracee, base, len);
-			}
+			if (iov_ptr != 0 && iov_count > 0)
+				scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
+								       iov_count);
+
+			/* MSG_PEEK leaves the reply pending for the real read
+			 * that follows; MSG_TRUNC asks for the untruncated
+			 * length (iproute2's libnetlink size-probe pattern).  */
+			if (!(flags & MSG_PEEK))
+				tracee->fake_netlink_reply_len = 0;
+			result = (flags & MSG_TRUNC) ? reply_len : scattered;
 
 			/* glibc's getifaddrs() and friends inspect the
 			 * source address: hand them a sockaddr_nl from the
@@ -1086,7 +1352,16 @@ int translate_syscall_enter(Tracee *tracee)
 				errno = 0;
 			}
 
-			poke_reg(tracee, SYSARG_RESULT, (word_t) n);
+			/* msg_flags (offset 6 words in struct msghdr, both
+			 * ABIs): report MSG_TRUNC iff the caller's buffers
+			 * couldn't hold the whole reply, like the kernel.  */
+			if (msghdr_addr != 0) {
+				poke_uint32(tracee, msghdr_addr + 6 * w,
+					    scattered < reply_len ? MSG_TRUNC : 0);
+				errno = 0;
+			}
+
+			poke_reg(tracee, SYSARG_RESULT, (word_t) result);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
