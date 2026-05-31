@@ -214,8 +214,14 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	char put_old_guest[PATH_MAX];
 	char old_root_host[PATH_MAX];
 	Binding *root_binding;
-	size_t prefix_len;
-	const char *put_old_after;
+	Binding **snapshot;
+	size_t new_root_len;
+	size_t put_old_len = 0;
+	char put_old_after[PATH_MAX];
+	bool have_put_old = false;
+	size_t count = 0;
+	size_t i;
+	Binding *iter;
 
 	if (translate_path(tracee, new_root_host, AT_FDCWD, new_root_user, true) < 0)
 		return;
@@ -239,59 +245,100 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	strncpy(old_root_host, root_binding->host.path, PATH_MAX - 1);
 	old_root_host[PATH_MAX - 1] = '\0';
 
-	remove_binding_from_all_lists(tracee, root_binding);
-	(void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
+	new_root_len = strlen(new_root_guest);
 
-	/* If put_old is a path strictly under new_root, expose the
-	 * previous root there.  The pivot_root(".", ".") trick used to
-	 * detach the old root leaves new_root and put_old equal; in
-	 * that case there is nowhere to expose the old root. */
-	prefix_len = strlen(new_root_guest);
-	if (   prefix_len > 0
-	    && strncmp(put_old_guest, new_root_guest, prefix_len) == 0
-	    && (   put_old_guest[prefix_len] == '/'
-		|| (prefix_len == 1 && new_root_guest[0] == '/'))) {
-		put_old_after = put_old_guest + (prefix_len == 1 ? 0 : prefix_len);
-		if (put_old_after[0] == '/' && put_old_after[1] != '\0') {
-			Binding *iter;
-			Binding *next;
-			size_t put_old_len = strlen(put_old_after);
-			char aliased[PATH_MAX];
-
-			(void) insort_binding3(tracee, tracee->fs,
-					       old_root_host, put_old_after);
-
-			/* Snapshot existing non-root bindings and
-			 * re-expose each one at put_old_after/<guest>,
-			 * so sandbox helpers can still reach the host
-			 * /proc, /dev, ... through the agreed
-			 * "oldroot" prefix.  Iterate carefully: we
-			 * mutate the same list we walk.  */
-			for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
-			     iter != (void *) tracee->fs->bindings.guest;
-			     iter = next) {
-				next = CIRCLEQ_NEXT(iter, link.guest);
-
-				if (strcmp(iter->guest.path, "/") == 0)
-					continue;
-				/* Skip the binding we just added for
-				 * put_old itself, and anything already
-				 * sitting under put_old.  */
-				if (strncmp(iter->guest.path, put_old_after, put_old_len) == 0
-				    && (iter->guest.path[put_old_len] == '\0'
-					|| iter->guest.path[put_old_len] == '/'))
-					continue;
-
-				if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
-						      put_old_after, iter->guest.path)
-				    >= sizeof(aliased))
-					continue;
-
-				(void) insort_binding3(tracee, tracee->fs,
-						       iter->host.path, aliased);
-			}
+	/* Work out where the previous root becomes reachable: put_old as a
+	 * path under the *new* root, e.g. "/oldroot".  The pivot_root(".",
+	 * ".") trick used to detach the old root leaves new_root == put_old,
+	 * in which case there is nowhere to expose it. */
+	if (   new_root_len > 0
+	    && strncmp(put_old_guest, new_root_guest, new_root_len) == 0
+	    && (   put_old_guest[new_root_len] == '/'
+		|| (new_root_len == 1 && new_root_guest[0] == '/'))) {
+		const char *after = put_old_guest + (new_root_len == 1 ? 0 : new_root_len);
+		if (after[0] == '/' && after[1] != '\0') {
+			strncpy(put_old_after, after, PATH_MAX - 1);
+			put_old_after[PATH_MAX - 1] = '\0';
+			put_old_len = strlen(put_old_after);
+			have_put_old = true;
 		}
 	}
+
+	/* Snapshot the current bindings before mutating the lists: the loop
+	 * below both inserts (rebased / re-exposed) and removes bindings, so
+	 * walking the live list would be unsafe. */
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		count++;
+
+	snapshot = talloc_array(tracee->ctx, Binding *, count);
+	if (snapshot == NULL)
+		return;
+	i = 0;
+	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+	     iter != (void *) tracee->fs->bindings.guest && i < count;
+	     iter = CIRCLEQ_NEXT(iter, link.guest))
+		snapshot[i++] = iter;
+
+	/* Switch the root over to new_root and expose the previous root at
+	 * put_old, so the tracee can still reach it (bubblewrap accesses
+	 * everything via "/oldroot" right after the pivot). */
+	remove_binding_from_all_lists(tracee, root_binding);
+	(void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
+	if (have_put_old)
+		(void) insort_binding3(tracee, tracee->fs, old_root_host, put_old_after);
+
+	for (i = 0; i < count; i++) {
+		Binding *b = snapshot[i];
+		size_t blen;
+
+		if (b == root_binding || strcmp(b->guest.path, "/") == 0)
+			continue;
+
+		blen = strlen(b->guest.path);
+
+		/* Bindings that live under the new root move *with* the pivot:
+		 * "/newroot/usr" becomes "/usr".  Without this, the tracee's
+		 * own bind mounts (e.g. bubblewrap's "--ro-bind /usr /usr"
+		 * followed by pivot_root into that new root) stay at their
+		 * pre-pivot guest path, so "/usr" resolves to the empty
+		 * new-root mountpoint and exec'ing a binary under it fails
+		 * with ENOENT. */
+		if (   new_root_len > 0
+		    && blen > new_root_len
+		    && strncmp(b->guest.path, new_root_guest, new_root_len) == 0
+		    && b->guest.path[new_root_len] == '/') {
+			(void) insort_binding3(tracee, tracee->fs, b->host.path,
+					       b->guest.path + new_root_len);
+			/* Drop the stale pre-pivot binding so it can't shadow
+			 * the rebased one (e.g. host->guest detranslation). */
+			remove_binding_from_all_lists(tracee, b);
+			continue;
+		}
+
+		/* Everything else belonged to the previous root tree;
+		 * re-expose it under put_old (skipping what already sits
+		 * there) and keep the original in place. */
+		if (have_put_old) {
+			char aliased[PATH_MAX];
+
+			if (   strncmp(b->guest.path, put_old_after, put_old_len) == 0
+			    && (   b->guest.path[put_old_len] == '\0'
+				|| b->guest.path[put_old_len] == '/'))
+				continue;
+
+			if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
+					      put_old_after, b->guest.path)
+			    >= sizeof(aliased))
+				continue;
+
+			(void) insort_binding3(tracee, tracee->fs,
+					       b->host.path, aliased);
+		}
+	}
+
+	talloc_free(snapshot);
 }
 
 /**
