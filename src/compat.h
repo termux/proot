@@ -262,4 +262,14 @@
 #        define SYS_SECCOMP 1
 #    endif
 
+/* openat2(2) "how" argument.  Mirrors struct open_how from
+ * <linux/openat2.h>, but uses a private name so we don't depend on (or
+ * clash with) that kernel header, which is present on some build
+ * platforms (e.g. Termux) and absent on others.  */
+struct proot_open_how {
+	unsigned long long flags;
+	unsigned long long mode;
+	unsigned long long resolve;
+};
+
 #endif /* COMPAT_H */

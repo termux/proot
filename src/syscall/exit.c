@@ -462,13 +462,14 @@ void translate_syscall_exit(Tracee *tracee)
 		translate_execve_exit(tracee);
 		goto end;
 
+	case PR_openat2:
 	case PR_openat:
 	case PR_open: {
 		/* Track /proc/self/auxv opens so read() results can be patched.
 		 * Needed on kernels < 6.4 where prctl(PR_GET_AUXV) is absent and
 		 * rustix falls back to reading /proc/self/auxv directly. */
 		char path_buf[sizeof("/proc/self/auxv")];
-		Reg path_reg = (get_sysnum(tracee, ORIGINAL) == PR_openat) ? SYSARG_2 : SYSARG_1;
+		Reg path_reg = (syscall_number == PR_open) ? SYSARG_1 : SYSARG_2;
 
 		if ((int) syscall_result < 0)
 			goto end;

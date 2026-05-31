@@ -522,6 +522,29 @@ int translate_syscall_enter(Tracee *tracee)
 		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
 		break;
 
+	case PR_openat2: {
+		/* int openat2(int dirfd, const char *pathname,
+		 *             struct open_how *how, size_t size);
+		 *
+		 * Rewrite into openat() and translate it as such: the path is
+		 * in SYSARG_2 like openat(), but the open flags live inside the
+		 * open_how struct rather than in a register, so move them into
+		 * SYSARG_3.  The how.resolve flags (RESOLVE_BENEATH, ...) are
+		 * dropped: they reject the absolute host paths PRoot produces,
+		 * and PRoot already keeps path resolution inside the rootfs.  */
+		struct proot_open_how how = {};
+		word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
+		if (how_size > sizeof(how))
+			how_size = sizeof(how);
+		status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
+		if (status < 0)
+			break;
+		set_sysnum(tracee, PR_openat);
+		poke_reg(tracee, SYSARG_3, how.flags);
+		poke_reg(tracee, SYSARG_4, how.mode);
+	}
+		/* Fall through.  */
+
 	case PR_openat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		flags = peek_reg(tracee, CURRENT, SYSARG_3);
