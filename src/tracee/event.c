@@ -54,6 +54,24 @@ static bool seccomp_after_ptrace_enter = false;
 static bool seccomp_ptrace_event_supported = false;
 
 /**
+ * Return true if the running kernel is new enough to generate
+ * PTRACE_EVENT_SECCOMP stops (requires Linux >= 3.5).  Old Android
+ * kernels (e.g. 3.1.x nougat) backport SECCOMP_MODE_FILTER but
+ * silently accept PTRACE_O_TRACESECCOMP option bits without actually
+ * implementing the event, so we can't rely on PTRACE_SETOPTIONS alone.
+ */
+static bool kernel_supports_ptrace_event_seccomp(void)
+{
+	struct utsname uts;
+	int major = 0, minor = 0;
+
+	if (uname(&uts) < 0)
+		return true; /* assume supported if uname fails */
+	sscanf(uts.release, "%d.%d", &major, &minor);
+	return (major > 3) || (major == 3 && minor >= 5);
+}
+
+/**
  * Start @tracee->exe with the given @argv[].  This function
  * returns -errno if an error occurred, otherwise 0.
  */
@@ -470,7 +488,13 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 				 * interception working.  */
 				seccomp_ptrace_event_supported = false;
 			} else {
-				seccomp_ptrace_event_supported = true;
+				/* PTRACE_SETOPTIONS succeeded, but some old
+				 * Android kernels (e.g. 3.1.x nougat) silently
+				 * accept unknown option bits without implementing
+				 * them.  Cross-check with the kernel version:
+				 * PTRACE_EVENT_SECCOMP requires Linux >= 3.5.  */
+				seccomp_ptrace_event_supported =
+					kernel_supports_ptrace_event_seccomp();
 			}
 		}
 			/* Fall through. */
