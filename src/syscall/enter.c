@@ -673,7 +673,7 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 
 		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSF2) {
-			poke_reg(tracee, SYSARG_2, TCSETSF);
+			poke_reg(tracee, SYSARG_2, TCSETS);
 		}
 
 		break;
