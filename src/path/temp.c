@@ -106,11 +106,18 @@ static int clean_temp_cwd()
 		    || strcmp(entry->d_name, "..") == 0)
 			continue;
 
-		status = chmod(entry->d_name, 0700);
-		if (status < 0) {
-			note(NULL, WARNING, SYSTEM, "cant chmod '%s'", entry->d_name);
-			nb_errors++;
-			continue;
+		/* Skip chmod on symlinks: chmod follows them and would
+		 * report spurious errors when the target no longer
+		 * exists (common with the /dev/{stdin,fd,...} symlinks
+		 * bubblewrap leaves behind in emulated tmpfs dirs).
+		 * We only need to unlink the symlink itself.  */
+		if (entry->d_type != DT_LNK) {
+			status = chmod(entry->d_name, 0700);
+			if (status < 0) {
+				note(NULL, WARNING, SYSTEM, "cant chmod '%s'", entry->d_name);
+				nb_errors++;
+				continue;
+			}
 		}
 
 		if (entry->d_type == DT_DIR) {

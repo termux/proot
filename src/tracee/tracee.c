@@ -540,13 +540,46 @@ int new_child(Tracee *parent, word_t clone_flags)
 			return -ENOMEM;
 		talloc_set_name_const(child->fs->cwd, "$cwd");
 
-		/* Bindings are shared across file-system name-spaces since a
-		 * "mount --bind" made by a process affects all other processes
-		 * under Linux.  Actually they are copied when a sub
-		 * reconfiguration occured (nested proot or chroot(2)).  */
-		child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
-		child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+		if (parent->clone_stripped_newns
+		    && parent->fs->bindings.guest != NULL) {
+			/* Caller asked for CLONE_NEWNS (which we
+			 * silently stripped).  Give the child its own
+			 * copy of the binding tree so emulated mount(2)
+			 * calls don't propagate back to the parent.  */
+			Binding *iter;
+
+			child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
+			child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
+			if (   child->fs->bindings.guest == NULL
+			    || child->fs->bindings.host  == NULL)
+				return -ENOMEM;
+			CIRCLEQ_INIT(child->fs->bindings.guest);
+			CIRCLEQ_INIT(child->fs->bindings.host);
+
+			for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
+			     iter != (void *) parent->fs->bindings.guest;
+			     iter = CIRCLEQ_NEXT(iter, link.guest))
+				(void) insort_binding3(child, child->fs,
+						       iter->host.path,
+						       iter->guest.path);
+		}
+		else {
+			/* Bindings are shared across file-system name-spaces since a
+			 * "mount --bind" made by a process affects all other processes
+			 * under Linux.  Actually they are copied when a sub
+			 * reconfiguration occured (nested proot or chroot(2)).  */
+			child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
+			child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+		}
 	}
+
+	/* Always consume the stripped-NEWNS flag once a child has been
+	 * processed, regardless of which branch above we took (the flag
+	 * could persist otherwise — e.g. when CLONE_FS sent us straight
+	 * to the shared-fs path, or when bindings.guest wasn't ready
+	 * yet — and incorrectly isolate the bindings of an unrelated
+	 * later clone in the same parent).  */
+	parent->clone_stripped_newns = false;
 
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */

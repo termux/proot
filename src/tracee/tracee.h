@@ -103,6 +103,30 @@ typedef struct tracee {
 	/* Is it a "clone", i.e has the same parent as its creator.  */
 	bool clone;
 
+	/* Set when the current clone(2)/clone3(2) had CLONE_NEW* flags
+	 * stripped (see translate_syscall_enter); the new child should
+	 * get its own copy of the bindings so emulated mount(2) calls
+	 * stay scoped to the would-be namespace.  Reset once consumed.  */
+	bool clone_stripped_newns;
+
+	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
+	 * sandbox helpers like bubblewrap that try to bring up the
+	 * loopback interface inside their would-be net namespace.
+	 * fake_netlink_fds holds the fds of sockets we silently
+	 * redirected from AF_NETLINK to AF_UNIX/SOCK_DGRAM; see
+	 * enter.c / exit.c for the intercepts.  */
+#define MAX_FAKE_NETLINK_FDS 8
+	int fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+	int fake_netlink_fds_count;
+	bool pending_fake_netlink_socket;
+	/* Reply synthesised at send time for the most recent request on a
+	 * fake netlink fd, awaiting the matching recvmsg / recvfrom.  The
+	 * buffer is word-aligned because we lay out struct nlmsghdr and the
+	 * rtnetlink payloads directly into it.  */
+#define MAX_FAKE_NETLINK_REPLY 8192
+	uint8_t fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
+	size_t fake_netlink_reply_len;
+
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
 		size_t nb_ptracees;
