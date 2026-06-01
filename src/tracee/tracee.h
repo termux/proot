@@ -123,7 +123,7 @@ typedef struct tracee {
 	 * fake netlink fd, awaiting the matching recvmsg / recvfrom.  The
 	 * buffer is word-aligned because we lay out struct nlmsghdr and the
 	 * rtnetlink payloads directly into it.  */
-#define MAX_FAKE_NETLINK_REPLY 1024
+#define MAX_FAKE_NETLINK_REPLY 8192
 	uint8_t fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
 	size_t fake_netlink_reply_len;
 

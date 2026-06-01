@@ -40,12 +40,19 @@
 #include <linux/if_addr.h> /* struct ifaddrmsg, IFA_*, IFA_F_PERMANENT */
 #include <linux/sockios.h> /* SIOCGIFINDEX */
 #include <net/if.h>      /* struct ifreq, IFNAMSIZ, IFF_* */
+#include <ifaddrs.h>     /* getifaddrs(3), to enumerate host interfaces */
+#include <netinet/in.h>  /* struct sockaddr_in / sockaddr_in6 */
+#include <netpacket/packet.h> /* struct sockaddr_ll (AF_PACKET) */
+#include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
 
 /* ABI-stable rtnetlink constants we synthesise for the loopback reply.
  * Defined locally so we needn't pull in <linux/if.h> / <linux/if_arp.h>,
  * which clash with the already-included <net/if.h>.  */
 #ifndef ARPHRD_LOOPBACK
 #define ARPHRD_LOOPBACK 772
+#endif
+#ifndef ARPHRD_ETHER
+#define ARPHRD_ETHER 1
 #endif
 #ifndef IFF_LOWER_UP
 #define IFF_LOWER_UP 0x10000
@@ -552,20 +559,22 @@ static size_t nl_add_attr(uint8_t *buf, size_t off, size_t max,
 }
 
 /**
- * Append an RTM_NEWLINK message describing the loopback interface.  The
- * single interface PRoot's network namespace ever has is "lo"; we report
- * it as up so iproute2 / glibc see a sane, well-formed link.
+ * Append an RTM_NEWLINK message describing one interface (@ifindex,
+ * @iftype = ARPHRD_*, @ifflags, @mtu, @name, @hwaddr/@hwlen), so that
+ * iproute2 / glibc see a sane, well-formed link.
  */
 static size_t nl_build_link(uint8_t *buf, size_t off, size_t max,
-			    uint32_t seq, uint32_t pid, uint16_t nlflags)
+			    uint32_t seq, uint32_t pid, uint16_t nlflags,
+			    int ifindex, uint16_t iftype, uint32_t ifflags,
+			    uint32_t mtu, const char *name,
+			    const uint8_t *hwaddr, uint8_t hwlen)
 {
 	size_t start = off;
 	struct nlmsghdr *nlh;
 	struct ifinfomsg ifi;
-	uint32_t mtu       = 65536;
 	uint32_t txqlen    = 1000;
-	uint8_t  operstate = 6;            /* IF_OPER_UP */
-	uint8_t  hwaddr[6] = { 0 };
+	uint8_t  operstate = (ifflags & IFF_UP) ? 6 : 2;  /* IF_OPER_UP : _DOWN */
+	uint8_t  brd[8];
 	size_t len;
 
 	if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifi)) > max)
@@ -573,21 +582,24 @@ static size_t nl_build_link(uint8_t *buf, size_t off, size_t max,
 
 	memset(&ifi, 0, sizeof(ifi));
 	ifi.ifi_family = AF_UNSPEC;
-	ifi.ifi_type   = ARPHRD_LOOPBACK;
-	ifi.ifi_index  = 1;
-	ifi.ifi_flags  = IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP;
+	ifi.ifi_type   = iftype;
+	ifi.ifi_index  = ifindex;
+	ifi.ifi_flags  = ifflags | ((ifflags & IFF_RUNNING) ? IFF_LOWER_UP : 0);
 	ifi.ifi_change = 0;
 
 	off = start + NLMSG_HDRLEN;
 	memcpy(buf + off, &ifi, sizeof(ifi));
 	off += NLMSG_ALIGN(sizeof(ifi));
 
-	off = nl_add_attr(buf, off, max, IFLA_IFNAME, "lo", 3);
+	off = nl_add_attr(buf, off, max, IFLA_IFNAME, name, strlen(name) + 1);
 	off = nl_add_attr(buf, off, max, IFLA_MTU, &mtu, sizeof(mtu));
 	off = nl_add_attr(buf, off, max, IFLA_TXQLEN, &txqlen, sizeof(txqlen));
 	off = nl_add_attr(buf, off, max, IFLA_OPERSTATE, &operstate, sizeof(operstate));
-	off = nl_add_attr(buf, off, max, IFLA_ADDRESS, hwaddr, sizeof(hwaddr));
-	off = nl_add_attr(buf, off, max, IFLA_BROADCAST, hwaddr, sizeof(hwaddr));
+	if (hwlen > 0) {
+		memset(brd, (iftype == ARPHRD_LOOPBACK) ? 0x00 : 0xff, sizeof(brd));
+		off = nl_add_attr(buf, off, max, IFLA_ADDRESS, hwaddr, hwlen);
+		off = nl_add_attr(buf, off, max, IFLA_BROADCAST, brd, hwlen);
+	}
 
 	len = off - start;
 	nlh = (struct nlmsghdr *) (buf + start);
@@ -600,20 +612,19 @@ static size_t nl_build_link(uint8_t *buf, size_t off, size_t max,
 }
 
 /**
- * Append an RTM_NEWADDR message for the loopback address of @family
- * (AF_INET -> 127.0.0.1/8, AF_INET6 -> ::1/128).
+ * Append an RTM_NEWADDR message for one address (@family, @addr/@addrlen,
+ * @prefixlen, @scope) on interface @ifindex, labelled @label (IPv4 only;
+ * may be NULL).
  */
 static size_t nl_build_addr(uint8_t *buf, size_t off, size_t max,
-			    uint32_t seq, uint32_t pid, int family,
-			    uint16_t nlflags)
+			    uint32_t seq, uint32_t pid, uint16_t nlflags,
+			    int family, int ifindex,
+			    const uint8_t *addr, uint8_t addrlen,
+			    uint8_t prefixlen, uint8_t scope, const char *label)
 {
 	size_t start = off;
 	struct nlmsghdr *nlh;
 	struct ifaddrmsg ifa;
-	static const uint8_t v4[4]  = { 127, 0, 0, 1 };
-	static const uint8_t v6[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
-	const uint8_t *addr = (family == AF_INET6) ? v6 : v4;
-	uint8_t addrlen     = (family == AF_INET6) ? 16 : 4;
 	size_t len;
 
 	if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifa)) > max)
@@ -621,10 +632,10 @@ static size_t nl_build_addr(uint8_t *buf, size_t off, size_t max,
 
 	memset(&ifa, 0, sizeof(ifa));
 	ifa.ifa_family    = family;
-	ifa.ifa_prefixlen = (family == AF_INET6) ? 128 : 8;
+	ifa.ifa_prefixlen = prefixlen;
 	ifa.ifa_flags     = IFA_F_PERMANENT;
-	ifa.ifa_scope     = RT_SCOPE_HOST;
-	ifa.ifa_index     = 1;
+	ifa.ifa_scope     = scope;
+	ifa.ifa_index     = ifindex;
 
 	off = start + NLMSG_HDRLEN;
 	memcpy(buf + off, &ifa, sizeof(ifa));
@@ -632,8 +643,8 @@ static size_t nl_build_addr(uint8_t *buf, size_t off, size_t max,
 
 	off = nl_add_attr(buf, off, max, IFA_ADDRESS, addr, addrlen);
 	off = nl_add_attr(buf, off, max, IFA_LOCAL, addr, addrlen);
-	if (family == AF_INET)
-		off = nl_add_attr(buf, off, max, IFA_LABEL, "lo", 3);
+	if (family == AF_INET && label != NULL)
+		off = nl_add_attr(buf, off, max, IFA_LABEL, label, strlen(label) + 1);
 
 	len = off - start;
 	nlh = (struct nlmsghdr *) (buf + start);
@@ -784,17 +795,283 @@ static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
 	return 0;
 }
 
+/* Prefix length (CIDR) from a contiguous network mask of @len bytes. */
+static uint8_t nl_prefixlen(const uint8_t *mask, size_t len)
+{
+	uint8_t bits = 0;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		uint8_t b = mask[i];
+		if (b == 0xff) {
+			bits += 8;
+			continue;
+		}
+		while (b & 0x80) {
+			bits++;
+			b <<= 1;
+		}
+		break;
+	}
+	return bits;
+}
+
+/* rtnetlink address scope for @addr (host / link / universe). */
+static uint8_t nl_addr_scope(int family, const uint8_t *addr)
+{
+	if (family == AF_INET) {
+		if (addr[0] == 127)
+			return RT_SCOPE_HOST;                  /* 127/8 */
+		if (addr[0] == 169 && addr[1] == 254)
+			return RT_SCOPE_LINK;                  /* 169.254/16 */
+		return RT_SCOPE_UNIVERSE;
+	} else {
+		static const uint8_t loop[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+		if (memcmp(addr, loop, 16) == 0)
+			return RT_SCOPE_HOST;                  /* ::1 */
+		if (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80)
+			return RT_SCOPE_LINK;                  /* fe80::/10 */
+		return RT_SCOPE_UNIVERSE;
+	}
+}
+
+/* The hardcoded loopback link / addresses, used as a fallback when the
+ * host interfaces can't be enumerated. */
+static size_t nl_build_loopback_link(uint8_t *buf, size_t off, size_t max,
+				     uint32_t seq, uint32_t pid, uint16_t nlflags)
+{
+	static const uint8_t zero[6] = { 0 };
+	return nl_build_link(buf, off, max, seq, pid, nlflags, 1, ARPHRD_LOOPBACK,
+			     IFF_UP | IFF_LOOPBACK | IFF_RUNNING, 65536, "lo", zero, 6);
+}
+
+static size_t nl_build_loopback_addr(uint8_t *buf, size_t off, size_t max,
+				     uint32_t seq, uint32_t pid, int family,
+				     uint16_t nlflags)
+{
+	static const uint8_t v4[4]  = { 127, 0, 0, 1 };
+	static const uint8_t v6[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+	if (family == AF_INET6)
+		return nl_build_addr(buf, off, max, seq, pid, nlflags, AF_INET6, 1,
+				     v6, 16, 128, RT_SCOPE_HOST, NULL);
+	return nl_build_addr(buf, off, max, seq, pid, nlflags, AF_INET, 1,
+			     v4, 4, 8, RT_SCOPE_HOST, "lo");
+}
+
+/* Extract the interface a single (non-dump) RTM_GETLINK asks for: returns
+ * its ifi_index and fills @name (empty if no IFLA_IFNAME was given). */
+static int nl_request_link_target(const uint8_t *req, size_t req_len,
+				  char name[IFNAMSIZ])
+{
+	const struct ifinfomsg *ifi;
+	size_t off = NLMSG_HDRLEN;
+	int ifindex;
+
+	name[0] = '\0';
+	if (req_len < off + sizeof(*ifi))
+		return 0;
+	ifi = (const struct ifinfomsg *) (req + off);
+	ifindex = ifi->ifi_index;
+
+	off += NLMSG_ALIGN(sizeof(*ifi));
+	while (off + sizeof(struct rtattr) <= req_len) {
+		const struct rtattr *rta = (const struct rtattr *) (req + off);
+		size_t rlen = rta->rta_len;
+
+		if (rlen < sizeof(*rta) || off + rlen > req_len)
+			break;
+		if (rta->rta_type == IFLA_IFNAME) {
+			size_t dlen = rlen - RTA_LENGTH(0);
+			size_t cpy  = dlen < IFNAMSIZ ? dlen : IFNAMSIZ - 1;
+			memcpy(name, (const char *) rta + RTA_LENGTH(0), cpy);
+			name[cpy] = '\0';
+		}
+		off += RTA_ALIGN(rlen);
+	}
+	return ifindex;
+}
+
+/* Build RTM_NEWLINK messages for the host's interfaces (the set
+ * getifaddrs(3) exposes -- which keeps working on Android even when raw
+ * AF_NETLINK is denied, see termux-ip.c).  A dump emits every interface;
+ * a single get only the one matching @want_name / @want_index.  Returns
+ * the new offset and stores the number of links built in @built. */
+static size_t build_host_links(uint8_t *out, size_t max, uint32_t seq,
+			       uint32_t pid, const char *want_name,
+			       int want_index, bool dump, int *built)
+{
+	struct ifaddrs *ifaddr, *ifa;
+	char seen[64][IFNAMSIZ];
+	int seen_count = 0;
+	size_t off = 0;
+	int sock;
+
+	*built = 0;
+	if (getifaddrs(&ifaddr) != 0)
+		return 0;
+	sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+		uint32_t ifflags;
+		uint16_t iftype;
+		uint32_t mtu;
+		uint8_t  hwaddr[8] = { 0 };
+		uint8_t  hwlen = 0;
+		int ifindex;
+		int i;
+		bool dup = false;
+
+		if (ifa->ifa_name == NULL)
+			continue;
+		for (i = 0; i < seen_count; i++)
+			if (strncmp(seen[i], ifa->ifa_name, IFNAMSIZ) == 0) {
+				dup = true;
+				break;
+			}
+		if (dup)
+			continue;
+		if (seen_count < 64) {
+			strncpy(seen[seen_count], ifa->ifa_name, IFNAMSIZ - 1);
+			seen[seen_count][IFNAMSIZ - 1] = '\0';
+			seen_count++;
+		}
+
+		ifflags = ifa->ifa_flags;
+		iftype  = (ifflags & IFF_LOOPBACK) ? ARPHRD_LOOPBACK : ARPHRD_ETHER;
+		mtu     = (ifflags & IFF_LOOPBACK) ? 65536 : 1500;
+		ifindex = (int) if_nametoindex(ifa->ifa_name);
+
+		/* AF_PACKET entries carry the authoritative index/type/hwaddr. */
+		if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_PACKET) {
+			struct sockaddr_ll *sll = (struct sockaddr_ll *) ifa->ifa_addr;
+			if (sll->sll_ifindex != 0)
+				ifindex = sll->sll_ifindex;
+			iftype = sll->sll_hatype;
+			if (sll->sll_halen > 0 && sll->sll_halen <= sizeof(hwaddr)) {
+				memcpy(hwaddr, sll->sll_addr, sll->sll_halen);
+				hwlen = sll->sll_halen;
+			}
+		}
+
+		/* Best-effort MTU, and hwaddr/type when no AF_PACKET entry. */
+		if (sock >= 0) {
+			struct ifreq ifr;
+
+			memset(&ifr, 0, sizeof(ifr));
+			strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ - 1);
+			if (ioctl(sock, SIOCGIFMTU, &ifr) == 0)
+				mtu = ifr.ifr_mtu;
+			if (hwlen == 0) {
+				memset(&ifr, 0, sizeof(ifr));
+				strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ - 1);
+				if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
+					iftype = ifr.ifr_hwaddr.sa_family;
+					memcpy(hwaddr, ifr.ifr_hwaddr.sa_data, 6);
+					hwlen = 6;
+				}
+			}
+		}
+
+		if (!dump) {
+			if (want_name != NULL && want_name[0] != '\0') {
+				if (strcmp(want_name, ifa->ifa_name) != 0)
+					continue;
+			} else if (want_index > 0 && ifindex != want_index) {
+				continue;
+			}
+		}
+
+		if (off + 256 > max)
+			break;
+		off = nl_build_link(out, off, max, seq, pid,
+				    dump ? NLM_F_MULTI : 0, ifindex, iftype,
+				    ifflags, mtu, ifa->ifa_name, hwaddr, hwlen);
+		(*built)++;
+		if (!dump)
+			break;
+	}
+
+	if (sock >= 0)
+		close(sock);
+	freeifaddrs(ifaddr);
+	return off;
+}
+
+/* Build RTM_NEWADDR messages for the host's addresses (optionally
+ * filtered to @want_family).  Returns the new offset; @built gets the
+ * number of addresses emitted. */
+static size_t build_host_addrs(uint8_t *out, size_t max, uint32_t seq,
+			       uint32_t pid, int want_family, bool dump,
+			       int *built)
+{
+	struct ifaddrs *ifaddr, *ifa;
+	size_t off = 0;
+
+	*built = 0;
+	if (getifaddrs(&ifaddr) != 0)
+		return 0;
+
+	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+		const uint8_t *addr;
+		const uint8_t *mask = NULL;
+		uint8_t addrlen, masklen = 0;
+		uint8_t prefixlen, scope;
+		int family, ifindex;
+
+		if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL)
+			continue;
+		family = ifa->ifa_addr->sa_family;
+		if (family != AF_INET && family != AF_INET6)
+			continue;
+		if (want_family != AF_UNSPEC && family != want_family)
+			continue;
+
+		if (family == AF_INET) {
+			addr = (const uint8_t *) &((struct sockaddr_in *) ifa->ifa_addr)->sin_addr;
+			addrlen = 4;
+			if (ifa->ifa_netmask != NULL) {
+				mask = (const uint8_t *) &((struct sockaddr_in *) ifa->ifa_netmask)->sin_addr;
+				masklen = 4;
+			}
+		} else {
+			addr = (const uint8_t *) &((struct sockaddr_in6 *) ifa->ifa_addr)->sin6_addr;
+			addrlen = 16;
+			if (ifa->ifa_netmask != NULL) {
+				mask = (const uint8_t *) &((struct sockaddr_in6 *) ifa->ifa_netmask)->sin6_addr;
+				masklen = 16;
+			}
+		}
+
+		prefixlen = (mask != NULL) ? nl_prefixlen(mask, masklen)
+					   : (family == AF_INET ? 32 : 128);
+		scope = nl_addr_scope(family, addr);
+		ifindex = (int) if_nametoindex(ifa->ifa_name);
+
+		if (off + 256 > max)
+			break;
+		off = nl_build_addr(out, off, max, seq, pid,
+				    dump ? NLM_F_MULTI : 0, family, ifindex,
+				    addr, addrlen, prefixlen, scope, ifa->ifa_name);
+		(*built)++;
+	}
+
+	freeifaddrs(ifaddr);
+	return off;
+}
+
 /**
  * Parse the netlink request the tracee just sent (whether via sendto
  * with a flat buffer or via sendmsg with an iovec) and build the reply
  * the kernel would have produced into tracee->fake_netlink_reply, so a
  * later recvmsg / recvfrom on the same fake netlink fd can hand it back.
  *
- * RTM_GETLINK / RTM_GETADDR get a real loopback description; other dumps
- * get an empty NLMSG_DONE; everything else (bubblewrap's RTM_NEWADDR /
- * RTM_NEWLINK and friends) gets an error==0 ack.  Replies carry the
- * request's nlmsg_seq and the tracee's pid in nlmsg_pid, which is what
- * iproute2 / bubblewrap match against before accepting a message.
+ * RTM_GETLINK / RTM_GETADDR are answered with the *real* host interfaces
+ * (enumerated via getifaddrs, which keeps working under Android's netlink
+ * ban -- see termux-ip.c), falling back to a synthetic loopback when none
+ * can be gathered.  Other dumps get an empty NLMSG_DONE; everything else
+ * (bubblewrap's RTM_NEWADDR / RTM_NEWLINK and friends) gets an error==0
+ * ack.  Replies carry the request's nlmsg_seq and the tracee's pid in
+ * nlmsg_pid, which iproute2 / bubblewrap match against before accepting.
  */
 static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 				     word_t buf_len)
@@ -825,26 +1102,46 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 	dump  = (flags & NLM_F_DUMP) == NLM_F_DUMP;
 
 	switch (type) {
-	case RTM_GETLINK:
-		if (dump) {
-			off = nl_build_link(out, off, max, seq, pid, NLM_F_MULTI);
-			off = nl_build_done(out, off, max, seq, pid);
-		} else if (nl_request_is_loopback(req, req_len)) {
-			off = nl_build_link(out, off, max, seq, pid, 0);
-		} else {
-			off = nl_build_error(out, off, max, seq, pid, -ENODEV);
+	case RTM_GETLINK: {
+		char want_name[IFNAMSIZ];
+		int want_index = nl_request_link_target(req, req_len, want_name);
+		int n = 0;
+
+		off = build_host_links(out, max, seq, pid,
+				       dump ? NULL : want_name,
+				       dump ? 0 : want_index, dump, &n);
+		if (n == 0) {
+			/* Host enumeration unavailable: present loopback only. */
+			off = 0;
+			if (dump)
+				off = nl_build_loopback_link(out, off, max, seq, pid, NLM_F_MULTI);
+			else if (nl_request_is_loopback(req, req_len))
+				off = nl_build_loopback_link(out, off, max, seq, pid, 0);
+			else
+				off = nl_build_error(out, off, max, seq, pid, -ENODEV);
 		}
+		if (dump)
+			off = nl_build_done(out, off, max, seq, pid);
 		break;
+	}
 
 	case RTM_GETADDR: {
 		uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+		int want_family = (family == AF_INET || family == AF_INET6)
+				  ? family : AF_UNSPEC;
+		int n = 0;
 
-		if (family == 0 || family == AF_INET)
-			off = nl_build_addr(out, off, max, seq, pid, AF_INET,
-					    dump ? NLM_F_MULTI : 0);
-		if (family == 0 || family == AF_INET6)
-			off = nl_build_addr(out, off, max, seq, pid, AF_INET6,
-					    dump ? NLM_F_MULTI : 0);
+		off = build_host_addrs(out, max, seq, pid, want_family, dump, &n);
+		if (n == 0) {
+			/* Host enumeration unavailable: present loopback only. */
+			off = 0;
+			if (family == 0 || family == AF_INET)
+				off = nl_build_loopback_addr(out, off, max, seq, pid,
+							     AF_INET, dump ? NLM_F_MULTI : 0);
+			if (family == 0 || family == AF_INET6)
+				off = nl_build_loopback_addr(out, off, max, seq, pid,
+							     AF_INET6, dump ? NLM_F_MULTI : 0);
+		}
 		if (dump)
 			off = nl_build_done(out, off, max, seq, pid);
 		break;
