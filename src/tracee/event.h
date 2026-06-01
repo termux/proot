@@ -32,5 +32,6 @@ extern int event_loop();
 extern int handle_tracee_event(Tracee *tracee, int tracee_status);
 extern bool restart_tracee(Tracee *tracee, int signal);
 extern bool seccomp_event_happens_after_enter_sigtrap();
+extern bool seccomp_ptrace_event_is_supported();
 
 #endif /* TRACEE_EVENT_H */

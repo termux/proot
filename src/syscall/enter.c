@@ -43,6 +43,7 @@
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "tracee/abi.h"
+#include "tracee/event.h"
 #include "path/path.h"
 #include "path/canon.h"
 #include "arch.h"
@@ -640,6 +641,28 @@ int translate_syscall_enter(Tracee *tracee)
 		/* Prevent tracees from setting dumpable flag.
 		 * (Otherwise it could break tracee memory access)  */
 		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_DUMPABLE) {
+			set_sysnum(tracee, PR_void);
+			status = 0;
+		}
+		/* On kernels that don't support PTRACE_O_TRACESECCOMP,
+		 * SECCOMP_RET_TRACE causes filtered syscalls to return
+		 * -ENOSYS to the tracee without generating a ptrace event.
+		 * If a tracee installs its own SECCOMP_MODE_FILTER, the
+		 * syscalls proot must intercept (open, execve, ...) would
+		 * silently fail from proot's perspective.  Block the filter
+		 * installation so proot's PTRACE_SYSCALL path keeps working.
+		 * This situation is typical on old ARM 32-bit Android kernels
+		 * that backported seccomp but not PTRACE_O_TRACESECCOMP.  */
+#ifndef SECCOMP_MODE_FILTER
+#define SECCOMP_MODE_FILTER 2
+#endif
+		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_SECCOMP
+		    && peek_reg(tracee, CURRENT, SYSARG_2) == SECCOMP_MODE_FILTER
+		    && !seccomp_ptrace_event_is_supported()) {
+			VERBOSE(tracee, 1, "blocking tracee prctl(PR_SET_SECCOMP, "
+				"SECCOMP_MODE_FILTER): kernel lacks "
+				"PTRACE_EVENT_SECCOMP support");
+			poke_reg(tracee, SYSARG_RESULT, (word_t) -EPERM);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 		}

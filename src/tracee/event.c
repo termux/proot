@@ -51,6 +51,7 @@
 #include "compat.h"
 
 static bool seccomp_after_ptrace_enter = false;
+static bool seccomp_ptrace_event_supported = false;
 
 /**
  * Start @tracee->exe with the given @argv[].  This function
@@ -459,6 +460,17 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					note(tracee, ERROR, SYSTEM, "ptrace(PTRACE_SETOPTIONS)");
 					exit(EXIT_FAILURE);
 				}
+				/* Without PTRACE_O_TRACESECCOMP, a seccomp filter
+				 * installed by the tracee that returns
+				 * SECCOMP_RET_TRACE would silently return -ENOSYS
+				 * for filtered syscalls instead of generating a
+				 * ptrace event.  Record this so the prctl handler
+				 * can refuse PR_SET_SECCOMP, SECCOMP_MODE_FILTER
+				 * from the tracee to keep proot's syscall
+				 * interception working.  */
+				seccomp_ptrace_event_supported = false;
+			} else {
+				seccomp_ptrace_event_supported = true;
 			}
 		}
 			/* Fall through. */
@@ -701,6 +713,19 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 bool seccomp_event_happens_after_enter_sigtrap()
 {
 	return !seccomp_after_ptrace_enter;
+}
+
+/**
+ * Return true if PTRACE_O_TRACESECCOMP is supported by the kernel,
+ * i.e. the kernel will generate PTRACE_EVENT_SECCOMP stops instead of
+ * silently returning -ENOSYS when a seccomp filter returns
+ * SECCOMP_RET_TRACE.  When this returns false, the prctl handler
+ * blocks tracee attempts to install SECCOMP_MODE_FILTER so that
+ * proot's PTRACE_SYSCALL interception path remains functional.
+ */
+bool seccomp_ptrace_event_is_supported()
+{
+	return seccomp_ptrace_event_supported;
 }
 
 /**
