@@ -44,6 +44,7 @@
 #include <netinet/in.h>  /* struct sockaddr_in / sockaddr_in6 */
 #include <netpacket/packet.h> /* struct sockaddr_ll (AF_PACKET) */
 #include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
+#include <sys/time.h>    /* struct timeval, for SO_RCVTIMEO */
 
 /* ABI-stable rtnetlink constants we synthesise for the loopback reply.
  * Defined locally so we needn't pull in <linux/if.h> / <linux/if_arp.h>,
@@ -1060,6 +1061,99 @@ static size_t build_host_addrs(uint8_t *out, size_t max, uint32_t seq,
 }
 
 /**
+ * Relay a routing-table dump (RTM_GETROUTE) from the host kernel.  The
+ * Android builds that deny *binding* an AF_NETLINK socket -- which is why
+ * we emulate it in the first place -- still let an unbound socket issue a
+ * dump, the same trick termux-ip.c uses for "ip route".  We run that dump
+ * from PRoot and copy the kernel's RTM_NEWROUTE messages back, rewriting
+ * nlmsg_seq / nlmsg_pid so the tracee's iproute2 accepts them.  Returns 0
+ * (caller then falls back to an empty NLMSG_DONE, i.e. the previous
+ * behaviour) whenever the host won't cooperate, so nothing regresses. */
+static size_t relay_route_dump(const uint8_t *req, size_t req_len,
+			       uint8_t *out, size_t max,
+			       uint32_t seq, uint32_t pid)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct rtmsg    rtm;
+	} dreq;
+	struct sockaddr_nl sa;
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+	size_t off = 0;
+	bool done = false;
+	bool saw_done = false;
+	int fd;
+	int rounds;
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (fd < 0)
+		return 0;
+	(void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	memset(&dreq, 0, sizeof(dreq));
+	dreq.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+	dreq.nlh.nlmsg_type  = RTM_GETROUTE;
+	dreq.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	dreq.nlh.nlmsg_seq   = seq;
+	dreq.rtm.rtm_family  = family;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.nl_family = AF_NETLINK;
+	if (sendto(fd, &dreq, dreq.nlh.nlmsg_len, 0,
+		   (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+		close(fd);
+		return 0;
+	}
+
+	for (rounds = 0; !done && rounds < 64; rounds++) {
+		uint8_t buf[8192] __attribute__((aligned(8)));
+		struct nlmsghdr *h;
+		ssize_t n;
+		size_t len;
+
+		n = recv(fd, buf, sizeof(buf), 0);
+		if (n <= 0)
+			break;
+		len = (size_t) n;
+		for (h = (struct nlmsghdr *) buf; NLMSG_OK(h, len);
+		     h = NLMSG_NEXT(h, len)) {
+			size_t mlen = h->nlmsg_len;
+			size_t aligned = NLMSG_ALIGN(mlen);
+
+			/* Keep 64 bytes spare so the NLMSG_DONE terminator
+			 * below always fits, even on a truncated dump. */
+			if (off + aligned + 64 > max) {
+				done = true;
+				break;
+			}
+			h->nlmsg_seq = seq;
+			h->nlmsg_pid = pid;
+			memcpy(out + off, h, mlen);
+			if (aligned > mlen)
+				memset(out + off + mlen, 0, aligned - mlen);
+			off += aligned;
+			if (h->nlmsg_type == NLMSG_DONE) {
+				saw_done = true;
+				done = true;
+				break;
+			}
+		}
+	}
+
+	close(fd);
+
+	if (off == 0)
+		return 0;
+	/* Always hand the tracee a terminator: if the kernel's own
+	 * NLMSG_DONE didn't make it (timeout, truncation), append one so
+	 * iproute2 doesn't read past the reply and report "EOF on netlink". */
+	if (!saw_done)
+		off = nl_build_done(out, off, max, seq, pid);
+	return off;
+}
+
+/**
  * Parse the netlink request the tracee just sent (whether via sendto
  * with a flat buffer or via sendmsg with an iovec) and build the reply
  * the kernel would have produced into tracee->fake_netlink_reply, so a
@@ -1146,6 +1240,16 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 			off = nl_build_done(out, off, max, seq, pid);
 		break;
 	}
+
+	case RTM_GETROUTE:
+		if (dump) {
+			off = relay_route_dump(req, req_len, out, max, seq, pid);
+			if (off == 0)
+				off = nl_build_done(out, off, max, seq, pid);
+		} else {
+			off = nl_build_error(out, off, max, seq, pid, 0);
+		}
+		break;
 
 	default:
 		if (dump)
