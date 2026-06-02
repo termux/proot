@@ -356,7 +356,9 @@ int push_array_of_xpointers(ArrayOfXPointers *array, Reg reg)
 	struct iovec *local;
 	size_t local_count;
 	size_t total_size;
+	size_t padding_size;
 	word_t *pod_array;
+	word_t stack_pointer;
 	word_t tracee_ptr;
 	int status;
 	size_t i;
@@ -410,6 +412,22 @@ int push_array_of_xpointers(ArrayOfXPointers *array, Reg reg)
 	if (local_count == 1)
 		return 0;
 	assert(local_count < array->length + 1);
+
+	/* Keep the base address of the pushed pointer table aligned.
+	 * Without this padding, AArch64 shebang execve can place argv[] at an
+	 * odd stack address (for example 0x...989), and the kernel then rejects
+	 * execve with EFAULT even though argv[], envp[], and the strings are all
+	 * readable.  The padding stays above the copied data, so the offsets that
+	 * were computed for each pointee remain valid and only the allocation base
+	 * moves downward.  */
+	stack_pointer = peek_reg(tracee, CURRENT, STACK_POINTER);
+	padding_size = (stack_pointer - total_size)
+#ifdef ARCH_ARM64
+			% 16;
+#else
+			% sizeof_word(tracee);
+#endif
+	total_size += padding_size;
 
 	/* Modified pointees and the pod array are stored in a tracee's
 	 * memory block.  */
