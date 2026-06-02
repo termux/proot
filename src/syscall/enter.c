@@ -1297,11 +1297,24 @@ static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
 }
 
 /**
- * If @cmd is SIOCGIFINDEX for "lo", fake an answer of 1 in the
- * tracee's ifreq buffer.  Android often denies this ioctl when the
- * caller lacks CAP_NET_ADMIN; bubblewrap's loopback_setup() calls
- * if_nametoindex("lo") which goes through this ioctl and bails out
- * with "Permission denied" on failure.
+ * If @cmd is SIOCGIFINDEX, answer it from the host's own interface
+ * table instead of letting the tracee's ioctl reach the kernel.
+ *
+ * Android denies this ioctl (EACCES) on the AF_UNIX/AF_INET socket
+ * glibc opens for if_nametoindex() for every device except loopback,
+ * when the caller lacks CAP_NET_ADMIN.  That breaks more than
+ * bubblewrap's loopback_setup(): ifaddr.get_adapters() leaves
+ * Adapter.index == None for each real interface, and python-zeroconf's
+ * ip6_to_address_and_index() then refuses to match an address to its
+ * adapter ("No adapter found for IP address fe80::...").
+ *
+ * We resolve the name with if_nametoindex() in the tracer, which keeps
+ * working under Android's netlink restrictions — the same way
+ * build_host_addrs() already fills each address's ifa_index — and write
+ * the real index back.  Loopback is index 1 on every Linux kernel, so
+ * answer it even if the host enumeration somehow fails.  Returns false
+ * for an unknown name, leaving the real ioctl to run (the previous
+ * behaviour, so nothing regresses).
  *
  * Only touch the ifr_name (read) and ifr_ifindex (write) fields,
  * both at fixed offsets — sizeof(struct ifreq) differs between
@@ -1312,7 +1325,7 @@ static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
 static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)
 {
 	char name[IFNAMSIZ];
-	int ifindex = 1;
+	int ifindex;
 
 	if (cmd != SIOCGIFINDEX)
 		return false;
@@ -1320,8 +1333,14 @@ static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)
 		return false;
 	if (read_data(tracee, name, arg, sizeof(name)) < 0)
 		return false;
-	if (strncmp(name, "lo", IFNAMSIZ) != 0)
-		return false;
+	name[IFNAMSIZ - 1] = '\0';
+
+	ifindex = (int) if_nametoindex(name);
+	if (ifindex <= 0) {
+		if (strcmp(name, "lo") != 0)
+			return false;
+		ifindex = 1;
+	}
 
 	if (write_data(tracee, arg + IFNAMSIZ, &ifindex, sizeof(ifindex)) < 0)
 		return false;
@@ -2254,9 +2273,10 @@ int translate_syscall_enter(Tracee *tracee)
 		word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
 		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
 
-		/* SIOCGIFINDEX for "lo": Android often denies this with
-		 * EACCES; fake an answer of 1 so bubblewrap's
-		 * loopback_setup() can proceed.  */
+		/* SIOCGIFINDEX: Android often denies this with EACCES for
+		 * real interfaces (and loopback), so resolve the index in
+		 * the tracer instead — bubblewrap's loopback_setup() and
+		 * ifaddr/zeroconf's interface lookup both depend on it.  */
 		if (cmd == SIOCGIFINDEX && maybe_fake_siocgifindex(tracee, cmd, arg)) {
 			poke_reg(tracee, SYSARG_RESULT, 0);
 			set_sysnum(tracee, PR_void);
