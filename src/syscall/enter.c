@@ -2267,6 +2267,22 @@ int translate_syscall_enter(Tracee *tracee)
 			tracee->sysexit_pending = true;
 			tracee->restart_how = PTRACE_SYSCALL;
 		}
+		/* PRoot always sets PR_SET_NO_NEW_PRIVS in the child before
+		 * execve (a precondition for its seccomp filter), so the real
+		 * flag is on even though the guest never asked for it.  Report
+		 * the guest's own intent instead: answer PR_GET_NO_NEW_PRIVS
+		 * from tracee->no_new_privs without running the real syscall,
+		 * and observe the tracee's own PR_SET_NO_NEW_PRIVS at sysexit.
+		 * Tools like sudo-rs refuse to run when the flag appears set. */
+		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_NO_NEW_PRIVS) {
+			poke_reg(tracee, SYSARG_RESULT, tracee->no_new_privs ? 1 : 0);
+			set_sysnum(tracee, PR_void);
+			status = 0;
+		}
+		if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_NO_NEW_PRIVS) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
 		break;
 
 	case PR_ioctl: {

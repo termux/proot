@@ -417,6 +417,7 @@ void translate_execve_exit(Tracee *tracee)
 
 	if (tracee->skip_proot_loader) {
 		tracee->restore_original_regs = false;
+		tracee->seen_execve = true;
 		return;
 	}
 
@@ -480,6 +481,10 @@ void translate_execve_exit(Tracee *tracee)
 	syscall_result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 	if ((int) syscall_result < 0)
 		return;
+
+	/* The guest program is now running; PR_SET_NO_NEW_PRIVS calls from
+	 * here on belong to the guest, not to PRoot's own pre-execve setup. */
+	tracee->seen_execve = true;
 
 	/* Execve happened; commit the new "/proc/self/exe".  */
 	if (tracee->new_exe != NULL) {
