@@ -61,6 +61,54 @@ int unregister_binfmt(const char *name) {
 	return -ENOENT;
 }
 
+// Helper function to process escape sequences in strings
+static size_t process_escape_sequences(const char *src, char *dst, size_t max_len) {
+	if (!src || !dst) return 0;
+	
+	size_t len = 0;
+	const char *ptr = src;
+	
+	while (*ptr && len < max_len) {
+		if (*ptr == '\\') {
+			ptr++;
+			if (*ptr == '\0') break;
+			
+			if (*ptr == 'n') {
+				*dst++ = '\n';
+				len++;
+			} else if (*ptr == 't') {
+				*dst++ = '\t';
+				len++;
+			} else if (*ptr == 'r') {
+				*dst++ = '\r';
+				len++;
+			} else if (*ptr == '\\') {
+				*dst++ = '\\';
+				len++;
+			} else if (*ptr == 'x') {
+				ptr++;
+				char hex[3] = {0};
+				if (isxdigit(ptr[0])) hex[0] = *ptr++;
+				if (isxdigit(ptr[0])) hex[1] = *ptr++;
+				if (hex[0]) {
+					*dst++ = (char)strtol(hex, NULL, 16);
+					len++;
+				}
+				continue;  // ptr already advanced
+			} else {
+				*dst++ = *ptr;
+				len++;
+			}
+		} else {
+			*dst++ = *ptr;
+			len++;
+		}
+		ptr++;
+	}
+	
+	return len;
+}
+
 int read_binfmt_rules_from_file(const char *filepath) {
 	FILE *file = fopen(filepath, "r");
 	if (!file) {
@@ -69,138 +117,79 @@ int read_binfmt_rules_from_file(const char *filepath) {
 	}
 	// Read file line by line
 	char line[4096];
+	int line_num = 0;
+	int errors = 0;
+	const char* slash = strrchr(filepath, '/');
+	const char* filename = slash ? slash + 1 : filepath;
 	while (fgets(line, sizeof(line), file)) {
+		line_num++;
 		line[strcspn(line, "\n")] = 0; // Remove newline
-		BinfmtRule rule;
+		BinfmtRule rule = {0};
 		memset(&rule, 0, sizeof(BinfmtRule));
 		// Parse line (:name:type:offset:magic:mask:interpreter:)
-		int l = 0;
-		if (sscanf(line, ":%255[^:]:%c:%zu:%255[^:]:%255[^:]:%255[^:]:%n", rule.name, &rule.type, &rule.offset, rule.magic, rule.mask, rule.interpreter, &l) != 6 || line[l] != '\0') {
-			note(NULL, ERROR, INTERNAL, "Failed to parse binfmt configuration line: %s", line);
-			return -1;
+		char* p = line;
+		strsep(&p, ":");
+		char* pname = strsep(&p, ":");
+		char* ptype = strsep(&p, ":");
+		char* poffset = strsep(&p, ":");
+		char* pmagic = strsep(&p, ":");
+		char* pmask = strsep(&p, ":");
+		char* pinterp = strsep(&p, ":");
+		
+		// Validate all required fields are present
+		if (!pname || !ptype || !poffset || !pmagic || !pmask || !pinterp) {
+			note(NULL, ERROR, USER, "%s:%d: missing fields", filename, line_num);
+			errors++;
+			continue;
 		}
-		// Run escape sequences in magic, mask, and interpreter
-		int magic_len = 0;
-		int mask_len = 0;
-		int interp_len = 0;
-		char *ptr = rule.magic;
-		char *dst = rule.magic;
-		while (*ptr) {
-			if (*ptr == '\\') {
-				ptr++;
-				if (*ptr == 'n') {
-					*dst++ = '\n';
-					magic_len++;
-				} else if (*ptr == 't') {
-					*dst++ = '\t';
-					magic_len++;
-				} else if (*ptr == 'r') {
-					*dst++ = '\r';
-					magic_len++;
-				} else if (*ptr == '\\') {
-					*dst++ = '\\';
-					magic_len++;
-				} else if (*ptr == 'x') {
-					ptr++;
-					char hex[3] = {0};
-					if (isxdigit(ptr[0])) hex[0] = *ptr++;
-					if (isxdigit(ptr[0])) hex[1] = *ptr++;
-					*dst++ = (char)strtol(hex, NULL, 16);
-					magic_len++;
-					continue; // skip ptr++ at end of loop because we've already advanced
-				} else {
-					*dst++ = *ptr;
-					magic_len++;
-				}
-			} else {
-				*dst++ = *ptr;
-				magic_len++;
-			}
-			ptr++;
+		
+		if (strlen(ptype) != 1) {
+			note(NULL, ERROR, USER, "%s:%d: invalid type", filename, line_num);
+			errors++;
+			continue;
 		}
-		// Clean up the rest of the buffer
-		memset(dst, 0, PATH_MAX - magic_len);
-		ptr = rule.mask;
-		dst = rule.mask;
-		while (*ptr) {
-			if (*ptr == '\\') {
-				ptr++;
-				if (*ptr == 'n') {
-					*dst++ = '\n';
-					mask_len++;
-				} else if (*ptr == 't') {
-					*dst++ = '\t';
-					mask_len++;
-				} else if (*ptr == 'r') {
-					*dst++ = '\r';
-					mask_len++;
-				} else if (*ptr == '\\') {
-					*dst++ = '\\';
-					mask_len++;
-				} else if (*ptr == 'x') {
-					ptr++;
-					char hex[3] = {0};
-					if (isxdigit(ptr[0])) hex[0] = *ptr++;
-					if (isxdigit(ptr[0])) hex[1] = *ptr++;
-					*dst++ = (char)strtol(hex, NULL, 16);
-					mask_len++;
-					continue; // skip ptr++ at end of loop because we've already advanced
-				} else {
-					*dst++ = *ptr;
-					mask_len++;
-				}
-			} else {
-				*dst++ = *ptr;
-				mask_len++;
-			}
-			ptr++;
+		
+		if (ptype[0] != 'M' && ptype[0] != 'E') {
+			note(NULL, ERROR, USER, "%s:%d: type must be 'M' or 'E'", filename, line_num);
+			errors++;
+			continue;
 		}
-		// Clean up the rest of the buffer
-		memset(dst, 0, PATH_MAX - mask_len);
-		ptr = rule.interpreter;
-		dst = rule.interpreter;
-		while (*ptr) {
-			if (*ptr == '\\') {
-				ptr++;
-				if (*ptr == 'n') {
-					*dst++ = '\n';
-					interp_len++;
-				} else if (*ptr == 't') {
-					*dst++ = '\t';
-					interp_len++;
-				} else if (*ptr == 'r') {
-					*dst++ = '\r';
-					interp_len++;
-				} else if (*ptr == '\\') {
-					*dst++ = '\\';
-					interp_len++;
-				} else if (*ptr == 'x') {
-					ptr++;
-					char hex[3] = {0};
-					if (isxdigit(ptr[0])) hex[0] = *ptr++;
-					if (isxdigit(ptr[0])) hex[1] = *ptr++;
-					*dst++ = (char)strtol(hex, NULL, 16);
-					interp_len++;
-					continue; // skip ptr++ at end of loop because we've already advanced
-				} else {
-					*dst++ = *ptr;
-					interp_len++;
-				}
-			} else {
-				*dst++ = *ptr;
-				interp_len++;
-			}
-			ptr++;
+		
+		strncpy(rule.name, pname, sizeof(rule.name) - 1);
+		rule.name[sizeof(rule.name) - 1] = '\0';
+		rule.type = ptype[0];
+		rule.offset = atoi(poffset);
+		// Process escape sequences in magic, mask, and interpreter
+		size_t magic_len = process_escape_sequences(pmagic, rule.magic, PATH_MAX);
+		
+		if (*pmask == '\0') {
+			// Empty mask means all bits should be checked (0xFF)
+			memset(rule.mask, 0xFF, magic_len);
+		} else {
+			process_escape_sequences(pmask, rule.mask, PATH_MAX);
 		}
-		// Clean up the rest of the buffer
-		memset(dst, 0, PATH_MAX - interp_len);
+		
+		size_t interp_len = process_escape_sequences(pinterp, rule.interpreter, PATH_MAX);
+		
+		if (magic_len == 0 || interp_len == 0) {
+			note(NULL, ERROR, USER, "%s:%d: invalid %s or interpreter", filename, line_num, rule.type == 'M' ? "magic" : "extension");
+			errors++;
+			continue;
+		}
 
 		// Register rule
-		int status = register_binfmt(&rule);
-		if (status < 0) {
-			note(NULL, ERROR, INTERNAL, "Failed to register binfmt rule: %s", strerror(-status));
-			return -1;
+		if (errors == 0) {
+			int status = register_binfmt(&rule);
+			if (status < 0) {
+				note(NULL, ERROR, INTERNAL, "Failed to register binfmt rule: %s", strerror(-status));
+				return -1;
+			}
 		}
+		line_num++;
+	}
+	if (errors) {
+		note(NULL, ERROR, USER, "%s: %d errors found", filename, errors);
+		return -1;
 	}
 	fclose(file);
 	return 0;
