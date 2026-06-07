@@ -289,12 +289,12 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 		{
 			.class = "Extension options",
 			.arguments = {
-				{ .name = "--binfmt-rules", .separator = ' ', .value = "path" },
-				{ .name = NULL, .separator = '\0', .value = NULL }
+				{ .name = "-B", .separator = ' ', .value = "path" },
+				{ .name = "--binfmt-rules", .separator = '=', .value = "path" }
 			},
 			.handler = handle_option_binfmt_rules,
-			.description = "Load binfmt_misc rules from the specified file.",
-			.detail = "\tThis option allows loading binfmt_misc rules from a file.\n\
+			.description = "Load binfmt rules from the specified file.",
+			.detail = "\tThis option allows loading binfmt rules from a file.\n\
 \tEach rule in the file should follow this format:\n\
 \n\
 \t:name:type:offset:magic:mask:interpreter:\n\
