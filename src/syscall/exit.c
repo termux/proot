@@ -568,8 +568,24 @@ void translate_syscall_exit(Tracee *tracee)
 		word_t entry_size;
 		word_t type;
 
-		/* Only intercept PR_GET_AUXV. */
 		option = peek_reg(tracee, ORIGINAL, SYSARG_1);
+
+		/* Record the tracee's own request for the "no new privileges"
+		 * flag so a later PR_GET_NO_NEW_PRIVS (answered at sysenter)
+		 * reports the guest's intent rather than the flag PRoot set
+		 * itself.  A successful call implies arg2 == 1, the only value
+		 * the kernel accepts.  PRoot sets the real flag in the launch
+		 * child before the initial execve (see enable_syscall_filtering),
+		 * so only count calls made once the guest program is running
+		 * (tracee->seen_execve); the flag is a one-way latch and is
+		 * never cleared, matching the kernel's fork/execve semantics. */
+		if (option == PR_SET_NO_NEW_PRIVS) {
+			if (tracee->seen_execve && (int) syscall_result == 0)
+				tracee->no_new_privs = true;
+			goto end;
+		}
+
+		/* Only intercept PR_GET_AUXV. */
 		if (option != PR_GET_AUXV)
 			goto end;
 

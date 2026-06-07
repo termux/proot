@@ -278,6 +278,21 @@ typedef struct tracee {
 	 * has to be ignored as it's same syscall entry */
 	bool seccomp_already_handled_enter;
 
+	/* Whether the tracee itself requested the "no new privileges" flag
+	 * via prctl(PR_SET_NO_NEW_PRIVS).  PRoot always sets the real kernel
+	 * flag in the child before execve (it is a precondition for installing
+	 * its seccomp filter), so prctl(PR_GET_NO_NEW_PRIVS) would otherwise
+	 * report 1 even though the guest never asked for it.  This field lets
+	 * PRoot report the guest's own intent instead, which is required by
+	 * tools like sudo-rs that refuse to run when the flag appears set. */
+	bool no_new_privs;
+
+	/* Set once the tracee has gone through its initial execve, i.e. once
+	 * the guest program is actually running.  Used to ignore the
+	 * PR_SET_NO_NEW_PRIVS that PRoot performs itself in the launch child
+	 * (before that execve) when tracking @no_new_privs. */
+	bool seen_execve;
+
 	/**********************************************************************
 	 * Shared or private resources, depending on the CLONE_FS/VM flags.   *
 	 **********************************************************************/
