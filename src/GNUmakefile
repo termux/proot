@@ -17,6 +17,10 @@ OBJDUMP  ?= $(CROSS_COMPILE)objdump
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -Wall -Wextra -O2
 LDFLAGS  += -ltalloc -Wl,-z,noexecstack
+ifdef PROOT_WITH_LIBANDROID_SHMEM
+  CFLAGS += -DWITH_LIBANDROID_SHMEM
+  LDFLAGS += -landroid-shmem
+endif
 
 OBJECTS += \
 	cli/cli.o		\

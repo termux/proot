@@ -109,6 +109,7 @@ struct SysVIpcNamespace {
 	struct SysVIpcMsgQueue *queues;
 	struct SysVIpcSemaphore *semaphores;
 	struct SysVIpcSharedMem *shms;
+	bool shm_use_libandroid;
 };
 
 enum SysVIpcWaitReason {

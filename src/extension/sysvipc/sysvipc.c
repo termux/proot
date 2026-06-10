@@ -163,6 +163,11 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		Tracee *tracee = TRACEE(extension);
 		struct SysVIpcConfig *config = talloc_zero(extension, struct SysVIpcConfig);
 		config->ipc_namespace = talloc_zero(config, struct SysVIpcNamespace);
+#if defined(WITH_LIBANDROID_SHMEM)
+		if (!getenv("PROOT_DONT_SHARE_LIBANDROID_SHMEM")) {
+			config->ipc_namespace->shm_use_libandroid = true;
+		}
+#endif
 		talloc_set_destructor(config->ipc_namespace, sysvipc_shm_namespace_destructor);
 		config->process = talloc_zero(config, struct SysVIpcProcess);
 		config->process->pgid = tracee->pid;
