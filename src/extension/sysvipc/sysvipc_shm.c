@@ -658,7 +658,7 @@ int sysvipc_shmctl(Tracee *tracee, struct SysVIpcConfig *config)
 		}
 
 		/* Copy stats to user  */
-		int status = write_data(tracee, buf, &stats, sizeof(struct SysVIpcShmidDs));
+		int status = write_data(tracee, buf, stats, sizeof(struct SysVIpcShmidDs));
 		if (status < 0) return status;
 		return 0;
 	}
@@ -932,6 +932,8 @@ void sysvipc_shm_helper_main() {
 				response.status = -errno;
 			}
 			response.size = stats.shm_segsz;
+			write(1, &response, sizeof(response));
+			break;
 		}
 #endif
 		default:
