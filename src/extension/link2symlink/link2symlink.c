@@ -1,5 +1,6 @@
 #include <stdio.h>     /* rename(2), */
 #include <stdlib.h>    /* atoi */
+#include <stdbool.h>   /* bool, true, false */
 #include <unistd.h>    /* symlink(2), symlinkat(2), readlink(2), lstat(2), unlink(2), unlinkat(2)*/
 #include <string.h>    /* str*, strrchr, strcat, strcpy, strncpy, strncmp */
 #include <sys/types.h> /* lstat(2), */
@@ -7,6 +8,7 @@
 #include <errno.h>     /* E*, */
 #include <limits.h>    /* PATH_MAX, */
 #include <ctype.h>     /* isdigit, */
+#include <fcntl.h>     /* O_RDONLY, O_WRONLY, O_CREAT, O_EXCL (copy path) */
 
 #include "cli/note.h"
 #include "extension/extension.h"
@@ -563,13 +565,43 @@ static int handle_linkat_from_proc_fd(Tracee *tracee) {
 		return 0;
 	}
 
-	/* Ensure provided path is symlink to " (deleted)" file  */
+	/* Ensure provided path is a symlink to either a " (deleted)" file
+	 * (classic open+unlink orphan inode) or to an O_TMPFILE anonymous
+	 * inode whose magic-link readlink returns "/<dir>/#<inum>".
+	 *
+	 * The original l2s path only recognised the " (deleted)" suffix;
+	 * this extends the gate to also accept O_TMPFILE anonymous inodes
+	 * (used by Alpine apk's atomic-publish pattern: open(O_TMPFILE)
+	 * then linkat(/proc/self/fd/N, AT_SYMLINK_FOLLOW, dest)).  The
+	 * user-space copy below works byte-identically for both source
+	 * types (read from fd, write to new file).
+	 *
+	 * Known semantic limitation: if the tracee writes to the source fd
+	 * after the linkat call, the target file will not see the new bytes
+	 * (the copy snapshots the file at linkat time).  All known tools
+	 * that use O_TMPFILE+linkat (apk, dpkg, ld-linux) follow a
+	 * write-fully → publish → stop-writing pattern and will not trigger
+	 * this; if a future program relies on post-linkat writes syncing to
+	 * the target, an fd-hijack mechanism would be needed instead. */
 	char target_path[PATH_MAX] = {};
 	int status = readlink(proc_path, target_path, sizeof(target_path));
 	if (status < 10 || status >= (ssize_t) sizeof(target_path)) {
 		return 0;
 	}
-	if (0 != memcmp(&target_path[status - 10], DELETED_SUFFIX, 10)) {
+	bool is_deleted = (0 == memcmp(&target_path[status - 10], DELETED_SUFFIX, 10));
+	bool is_o_tmpfile = false;
+	{
+		/* O_TMPFILE magic-link form: "/<dir>/#<decimal-inode-number>". */
+		const char *slash = strrchr(target_path, '/');
+		if (slash != NULL && slash[1] == '#') {
+			const char *p = slash + 2;
+			while (*p != '\0' && isdigit((unsigned char) *p))
+				p++;
+			if (*p == '\0' && p > slash + 2)
+				is_o_tmpfile = true;
+		}
+	}
+	if (!is_deleted && !is_o_tmpfile) {
 		return 0;
 	}
 
