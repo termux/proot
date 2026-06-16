@@ -558,6 +558,16 @@ static void initialize_binding(Tracee *tracee, Binding *binding)
 		tracee->glue_type = (status < 0 || S_ISBLK(statl.st_mode) || S_ISCHR(statl.st_mode)
 				? S_IFREG : statl.st_mode & S_IFMT);
 
+		/* When the source is a directory but the guest target is
+		 * a symlink, the tracee must perceive the target as a
+		 * directory.  Dereferencing the target's final component
+		 * would register the binding at the symlink's referee
+		 * instead, leaving stat(2) on the literal target path to
+		 * report the underlying symlink -- which breaks the bind.
+		 * Keep the literal target path in that case.  */
+		if (status >= 0 && S_ISDIR(statl.st_mode))
+			dereference = false;
+
 		/* Sanitize the guest path of the binding within the
 		   alternate rootfs since it is assumed by
 		   substitute_binding().  */
