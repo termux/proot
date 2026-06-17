@@ -196,6 +196,13 @@ typedef struct tracee {
 	 * without affecting state of any registers.  */
 	bool skip_next_seccomp_signal;
 
+	/* True when an outer-seccomp SIGSYS was preceded by a synthesized
+	 * sysexit (translate_syscall) that may have poked SYSARG_RESULT.  On
+	 * ARM/ARM64 SYSARG_RESULT aliases SYSARG_1, so the blocked syscall's
+	 * first argument must be restored from the entry snapshot before it is
+	 * emulated or restarted.  See handle_seccomp_event().  */
+	bool restore_sysarg1_after_sigsys;
+
 	/* Context used to collect all the temporary dynamic memory
 	 * allocations.  */
 	TALLOC_CTX *ctx;

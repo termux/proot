@@ -82,8 +82,23 @@ int handle_seccomp_event(Tracee* tracee)
 	ret = fetch_regs(tracee);
 	if (ret != 0) {
 		VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
+		tracee->restore_sysarg1_after_sigsys = false;
 		return SIGSYS;
 	}
+
+#if defined(ARCH_ARM_EABI) || defined(ARCH_ARM64)
+	/* A synthesized sysexit ran before this SIGSYS and poked
+	 * SYSARG_RESULT, which on ARM/ARM64 aliases SYSARG_1.  The blocked
+	 * syscall's first argument (e.g. a path pointer, or the rgid of
+	 * setresgid) was thus overwritten with the faked result.  Restore it
+	 * from the entry snapshot so both the SIGSYS emulation and any *at
+	 * style restart below read the real argument.  The sysnum guard keeps
+	 * a stale ORIGINAL (from an unrelated prior syscall) from leaking in.  */
+	if (tracee->restore_sysarg1_after_sigsys
+	    && get_sysnum(tracee, ORIGINAL) == get_sysnum(tracee, CURRENT))
+		poke_reg(tracee, SYSARG_1, peek_reg(tracee, ORIGINAL, SYSARG_1));
+#endif
+	tracee->restore_sysarg1_after_sigsys = false;
 
 	/* Save regs so they can be restored at end of replaced call.  */
 	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
