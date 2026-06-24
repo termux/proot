@@ -45,6 +45,7 @@
 #include <netpacket/packet.h> /* struct sockaddr_ll (AF_PACKET) */
 #include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
 #include <sys/time.h>    /* struct timeval, for SO_RCVTIMEO */
+#include "syscall/pipe_shadow.h"
 
 /* ABI-stable rtnetlink constants we synthesise for the loopback reply.
  * Defined locally so we needn't pull in <linux/if.h> / <linux/if_arp.h>,
@@ -2361,6 +2362,12 @@ int translate_syscall_enter(Tracee *tracee)
 		 * file and we'd keep intercepting sendto/recvfrom on
 		 * it.  */
 		unmark_fake_netlink_fd(tracee, closed_fd);
+
+		/* Keep a shadow read end so child writers don't get
+		 * EPIPE when the parent closes its copy first (ptrace
+		 * serialisation makes this happen routinely, breaking
+		 * process substitution like `echo <(echo a)`).  */
+		shadow_pipe_read_end(tracee->pid, closed_fd);
 		break;
 	}
 

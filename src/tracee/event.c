@@ -43,6 +43,7 @@
 #include "path/binding.h"
 #include "syscall/syscall.h"
 #include "syscall/seccomp.h"
+#include "syscall/pipe_shadow.h"
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "execve/elf.h"
@@ -347,6 +348,9 @@ int event_loop()
 
 		/* This is the only safe place to free tracees.  */
 		free_terminated_tracees();
+
+		/* Close shadow pipe read ends whose last writer exited.  */
+		shadow_pipes_close_eof();
 
 		/* Wait for the next tracee's stop. */
 		pid = waitpid(-1, &tracee_status, __WALL);
