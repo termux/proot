@@ -476,13 +476,30 @@ Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool m
 		return NULL;
 
 	/* Canonicalize the host part of the binding, as expected by
-	 * get_binding().  */
-	status = realpath2(tracee->reconf.tracee, binding->host.path, host, true);
-	if (status < 0) {
-		if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
-			note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
-				host, strerror(-status));
-		goto error;
+	 * get_binding().  /proc/self/... paths are special: "self" must
+	 * be resolved by the kernel at syscall time relative to the
+	 * calling tracee process, not by realpath(3) at init time
+	 * relative to proot.  Resolving them here would permanently bind
+	 * the host side to proot's own PID, making /dev/fd/N accesses
+	 * land in proot's fd table instead of the tracee's.  */
+	if (strncmp(host, "/proc/self", strlen("/proc/self")) == 0
+	    && (host[strlen("/proc/self")] == '/' || host[strlen("/proc/self")] == '\0')) {
+		if (strnlen(host, PATH_MAX) >= PATH_MAX) {
+			if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
+				note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
+					host, strerror(ENAMETOOLONG));
+			goto error;
+		}
+		strcpy(binding->host.path, host);
+		status = 0;
+	} else {
+		status = realpath2(tracee->reconf.tracee, binding->host.path, host, true);
+		if (status < 0) {
+			if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
+				note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
+					host, strerror(-status));
+			goto error;
+		}
 	}
 	binding->host.length = strlen(binding->host.path);
 

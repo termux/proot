@@ -76,6 +76,26 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		return DEFAULT;
 	}
 
+	/* When a binding maps /proc/self/fd to a guest path (e.g.
+	 * -b /proc/self/fd:/dev/fd), canonicalize() resolves the
+	 * bound path's components and ends up calling readlink_proc
+	 * with base="/proc/self/fd".  atoi("self/fd") == 0 would
+	 * cause an early DEFAULT return and fall through to a real
+	 * readlink(2) on /proc/self/fd/N in proot's own namespace,
+	 * failing with ENOENT.  Normalize /proc/self/... to
+	 * /proc/<tracee_pid>/... so the fd-path handling below is
+	 * reached and DONT_CANONICALIZE is returned instead.  */
+	char normalized_base[PATH_MAX];
+	if (strncmp(base + strlen("/proc/"), "self", 4) == 0
+	    && (base[strlen("/proc/self")] == '/' || base[strlen("/proc/self")] == '\0')) {
+		status = snprintf(normalized_base, sizeof(normalized_base),
+				  "/proc/%d%s", tracee->pid,
+				  base + strlen("/proc/self"));
+		if (status < 0 || (size_t) status >= sizeof(normalized_base))
+			return -EPERM;
+		base = normalized_base;
+	}
+
 	pid = atoi(base + strlen("/proc/"));
 	if (pid == 0)
 		return DEFAULT;
