@@ -117,6 +117,63 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
 }
 
 /**
+ * Translate @path without touching its final component.  This is needed for
+ * creation-style destination arguments such as link(2)'s newpath: the final
+ * name must be looked up by the kernel as part of the operation, and probing
+ * it from PRoot first can perturb old Android kernels/filesystems.
+ */
+static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg)
+{
+	char parent[PATH_MAX];
+	char translated_parent[PATH_MAX];
+	char translated_path[PATH_MAX];
+	char *last_slash;
+	char *leaf;
+	size_t length;
+	int status;
+
+	/* Special case where the argument was NULL. */
+	if (path[0] == '\0')
+		return 0;
+
+	length = strlen(path);
+	if (path[length - 1] == '/')
+		return translate_path2(tracee, dir_fd, path, reg, SYMLINK);
+
+	last_slash = strrchr(path, '/');
+	if (last_slash == NULL) {
+		strcpy(parent, ".");
+		leaf = path;
+	}
+	else if (last_slash == path) {
+		strcpy(parent, "/");
+		leaf = last_slash + 1;
+	}
+	else {
+		size_t parent_length = last_slash - path;
+
+		if (parent_length >= sizeof(parent))
+			return -ENAMETOOLONG;
+		memcpy(parent, path, parent_length);
+		parent[parent_length] = '\0';
+		leaf = last_slash + 1;
+	}
+
+	if (leaf[0] == '\0' || strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0)
+		return translate_path2(tracee, dir_fd, path, reg, SYMLINK);
+
+	status = translate_path(tracee, translated_parent, dir_fd, parent, true);
+	if (status < 0)
+		return status;
+
+	status = join_paths(2, translated_path, translated_parent, leaf);
+	if (status < 0)
+		return status;
+
+	return set_sysarg_path(tracee, translated_path, reg);
+}
+
+/**
  * A helper, see the comment of the function above.
  */
 static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
@@ -2111,7 +2168,7 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
+		status = translate_path2_parent(tracee, newdirfd, newpath, SYSARG_4);
 		break;
 
 	case PR_openat2: {
@@ -2177,7 +2234,15 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
+		if (syscall_number == PR_link) {
+			status = get_sysarg_path(tracee, path, SYSARG_2);
+			if (status < 0)
+				break;
+
+			status = translate_path2_parent(tracee, AT_FDCWD, path, SYSARG_2);
+		}
+		else
+			status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
 		break;
 
 	case PR_renameat:
@@ -2381,4 +2446,3 @@ end:
 
 	return status;
 }
-
