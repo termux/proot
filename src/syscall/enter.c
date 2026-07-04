@@ -2144,8 +2144,18 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_oldlstat:
 	case PR_unlink:
 	case PR_rmdir:
-	case PR_mkdir:
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+		break;
+
+	case PR_mkdir:
+		/* The final component is created by the kernel: translate the
+		 * parent only so PRoot doesn't probe the not-yet-existing name
+		 * (see translate_path2_parent).  */
+		status = get_sysarg_path(tracee, path, SYSARG_1);
+		if (status < 0)
+			break;
+
+		status = translate_path2_parent(tracee, AT_FDCWD, path, SYSARG_1);
 		break;
 
 	case PR_linkat:
@@ -2218,7 +2228,6 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_readlinkat:
 	case PR_unlinkat:
-	case PR_mkdirat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 
 		status = get_sysarg_path(tracee, path, SYSARG_2);
@@ -2226,6 +2235,18 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+		break;
+
+	case PR_mkdirat:
+		/* Created destination: translate the parent only, don't probe
+		 * the new directory name (see translate_path2_parent).  */
+		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+
+		status = get_sysarg_path(tracee, path, SYSARG_2);
+		if (status < 0)
+			break;
+
+		status = translate_path2_parent(tracee, dirfd, path, SYSARG_2);
 		break;
 
 	case PR_link:
@@ -2266,7 +2287,14 @@ int translate_syscall_enter(Tracee *tracee)
 		break;
 
 	case PR_symlink:
-		status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
+		/* SYSARG_1 is the symlink's contents (not a path); only the
+		 * linkpath in SYSARG_2 is created.  Translate its parent only
+		 * so PRoot doesn't probe the new name (see translate_path2_parent).  */
+		status = get_sysarg_path(tracee, newpath, SYSARG_2);
+		if (status < 0)
+			break;
+
+		status = translate_path2_parent(tracee, AT_FDCWD, newpath, SYSARG_2);
 		break;
 
 	case PR_symlinkat:
@@ -2276,7 +2304,7 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		status = translate_path2(tracee, newdirfd, newpath, SYSARG_3, SYMLINK);
+		status = translate_path2_parent(tracee, newdirfd, newpath, SYSARG_3);
 		break;
 
 	case PR_statx:
