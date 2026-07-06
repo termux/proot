@@ -536,13 +536,34 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					translate_syscall(tracee);
 
 					/* In case we've changed on enter sysnum to PR_void,
-					 * seccomp check is happening after our change
-					 * and seccomp policy raises SIGSYS on -1 syscall,
-					 * set tracee flag to ignore next SIGSYS.  */
+					 * the outer seccomp policy may check the syscall
+					 * after our change and raise SIGSYS on the avoider
+					 * syscall.  Set the tracee flag so that SIGSYS is
+					 * recognized as ours and swallowed, instead of being
+					 * dispatched by handle_seccomp_event() as if the
+					 * guest's original syscall had been blocked - that
+					 * would replay sysenter side effects (e.g. the
+					 * link2symlink emulation of link(2), whose second
+					 * run fails with EEXIST).
+					 *
+					 * This must not depend on seccomp_after_ptrace_enter:
+					 * that flag is only auto-detected on a
+					 * PTRACE_EVENT_SECCOMP stop, which never happens on
+					 * kernels lacking PTRACE_O_TRACESECCOMP even when
+					 * they do evaluate seccomp after the ptrace enter
+					 * stop (e.g. Samsung 3.4.x Android backports).
+					 *
+					 * If the avoider syscall is instead allowed to
+					 * execute, a genuine sysexit stop arrives and the
+					 * flag is cleared below, so a subsequent unrelated
+					 * SIGSYS (delivered before any sysenter stop on old
+					 * syscall-order kernels) is not wrongly swallowed.  */
 					if (was_sysenter) {
-						tracee->skip_next_seccomp_signal = (
-								seccomp_after_ptrace_enter &&
-								get_sysnum(tracee, CURRENT) == PR_void);
+						tracee->skip_next_seccomp_signal =
+								(get_sysnum(tracee, CURRENT) == PR_void);
+					}
+					else {
+						tracee->skip_next_seccomp_signal = false;
 					}
 
 					/* Redeliver signal suppressed during
@@ -708,7 +729,22 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 					tracee->restore_sysarg1_after_sigsys = true;
 				}
 
-				if (tracee->skip_next_seccomp_signal || (seccomp_after_ptrace_enter && siginfo.si_syscall == SYSCALL_AVOIDER)) {
+				/* A SIGSYS on the avoider syscall can only be the
+				 * outer seccomp policy trapping a syscall PRoot
+				 * itself voided at sysenter (e.g. the link2symlink
+				 * emulation of link(2), or a failed path
+				 * translation).  Its result was already faked, so
+				 * the signal must be swallowed no matter which
+				 * syscall order was detected: dispatching it via
+				 * handle_seccomp_event() would replay the original
+				 * syscall's sysenter side effects (dpkg's
+				 * "status-old: File exists") or clobber the faked
+				 * result with -ENOSYS.  Do not gate this on
+				 * seccomp_after_ptrace_enter: that flag stays false
+				 * on kernels lacking PTRACE_O_TRACESECCOMP (e.g.
+				 * Samsung 3.4.x Android backports) even when they
+				 * do evaluate seccomp after the ptrace enter stop.  */
+				if (tracee->skip_next_seccomp_signal || siginfo.si_syscall == (int) SYSCALL_AVOIDER) {
 					VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
 					tracee->skip_next_seccomp_signal = false;
 					tracee->restore_sysarg1_after_sigsys = false;
