@@ -339,7 +339,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 
 		status = readlink(host_path, scratch_path, sizeof(scratch_path));
 		if (status < 0)
-			return status;
+			return -errno;
 		else if (status == sizeof(scratch_path))
 			return -ENAMETOOLONG;
 		scratch_path[status] = '\0';
