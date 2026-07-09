@@ -260,7 +260,7 @@ int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX])
 {
 	int offset;
 
-	strcpy(dir_path, path);
+	snprintf(dir_path, PATH_MAX, "%s", path);
 	offset = strlen(dir_path) - 1;
 	if (offset > 0) {
 		/* Skip trailing path separators. */
@@ -288,16 +288,14 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 	get_dir_path(orig_path, meta_path);
 	filename = get_name(orig_path);
 
-	/* Add a / between the final component and the rest of the path. */
-	if(strcmp(meta_path, "/") != 0)
-		strcat(meta_path, "/");
-
-	if(strlen(meta_path) + strlen(filename) + strlen(META_TAG) >= PATH_MAX)
+	if(strlen(meta_path) + strlen(filename) + strlen(META_TAG) + 2 >= PATH_MAX)
 		return -ENAMETOOLONG;
 
 	/* Insert the meta_tag between the path and its final component. */
-	strcat(meta_path, META_TAG);
-	strcat(meta_path, filename);
+	if(strcmp(meta_path, "/") != 0)
+		snprintf(meta_path + strlen(meta_path), PATH_MAX - strlen(meta_path), "/%s%s", META_TAG, filename);
+	else
+		snprintf(meta_path + strlen(meta_path), PATH_MAX - strlen(meta_path), "%s%s", META_TAG, filename);
 	return 0;
 }
 
