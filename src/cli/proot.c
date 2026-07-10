@@ -293,6 +293,7 @@ static int handle_option_link2symlink(Tracee *tracee, const Cli *cli UNUSED, con
 	return 0;
 }
 
+#ifdef __ANDROID__
 static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	int status;
@@ -304,6 +305,7 @@ static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli UNUSED, con
 
 	return 0;
 }
+#endif
 
 static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {

@@ -61,7 +61,9 @@ static int handle_option_i(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value);
+#ifdef __ANDROID__
 static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli, const char *value);
+#endif
 static int handle_option_sysvipc(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
@@ -252,6 +254,7 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 \tsyscalls inside proot. IPC is handled inside proot and launching 2 proot instances\n\
 \twill lead to 2 different IPC Namespaces",
 	},
+#ifdef __ANDROID__
 	{ .class = "Extension options",
 	  .arguments = {
 		{ .name = "--ashmem-memfd", .separator = '\0', .value = NULL },
@@ -260,6 +263,7 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .description = "Emulate memfd_create support through ashmem and simulate fstat.st_size for ashmem",
           .detail = "",
 	},
+#endif
         { .class = "Extension options",
           .arguments = {
                 { .name = "-H", .separator = '\0', .value = NULL },
