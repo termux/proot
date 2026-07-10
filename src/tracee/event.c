@@ -427,6 +427,10 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 	signal = 0;
 
 	if (WIFEXITED(tracee_status)) {
+		/* No vpid==1 guard here (unlike WIFSIGNALED below): this is
+		 * upstream behavior, and normal WIFEXITED ordering has root
+		 * exiting last — there is no bulk-SIGKILL cleanup phase that
+		 * could overwrite the status as with WIFSIGNALED. */
 		last_exit_status = WEXITSTATUS(tracee_status);
 		VERBOSE(tracee, 1,
 			"vpid %" PRIu64 ": exited with status %d",
@@ -434,10 +438,18 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		terminate_tracee(tracee);
 	}
 	else if (WIFSIGNALED(tracee_status)) {
+		int termsig = WTERMSIG(tracee_status);
 		check_architecture(tracee);
+		/* Only the root tracee (vpid 1) should determine proot's exit
+		 * code. Child tracees killed during cleanup (e.g. SIGKILL after
+		 * root exits) must not overwrite it — upstream never set
+		 * last_exit_status in WIFSIGNALED at all, and blindly doing so
+		 * causes proot to return 137 when children are reaped. */
+		if (tracee->vpid == 1)
+			last_exit_status = 128 + termsig;
 		VERBOSE(tracee, (int) (tracee->vpid != 1),
 			"vpid %" PRIu64 ": terminated with signal %d",
-			tracee->vpid, WTERMSIG(tracee_status));
+			tracee->vpid, termsig);
 		terminate_tracee(tracee);
 	}
 	else if (WIFSTOPPED(tracee_status)) {
