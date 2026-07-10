@@ -60,7 +60,6 @@ OBJECTS += \
 	ptrace/user.o		\
 	ptrace/wait.o		\
 	extension/extension.o	\
-	extension/ashmem_memfd/ashmem_memfd.o \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
 	extension/fake_id0/chroot.o \
@@ -89,6 +88,10 @@ OBJECTS += \
 	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
 	extension/fix_symlink_size/fix_symlink_size.o
+
+ifneq ($(shell $(CC) -dM -E - < /dev/null 2>/dev/null | grep -w "#define __ANDROID__"),)
+  OBJECTS += extension/ashmem_memfd/ashmem_memfd.o
+endif
 
 define define_from_arch.h
 $2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(SRC)/arch.h | grep -w $2 | cut -f 3 -d ' ')
