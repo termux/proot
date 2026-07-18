@@ -206,7 +206,8 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	unsigned int symlinks_followed = 0;
 
 	/* Avoid infinite loop on circular links.  */
-	if (recursion_level > MAXSYMLINKS)
+	//if (recursion_level > MAXSYMLINKS)
+	if (recursion_level > 3)
 		return -ELOOP;
 
 	/* Sanity checks.  */
@@ -355,18 +356,9 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		{
-			char guest_path_before[PATH_MAX];
-			strcpy(guest_path_before, guest_path);
-			status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
-			if (status < 0)
-				return status;
-			/* Detect self-referential symlinks (e.g. "foo -> .")
-			 * where resolution leaves guest_path unchanged,
-			 * causing infinite directory traversal.  */
-			if (strcmp(guest_path_before, guest_path) == 0)
-				return -ELOOP;
-		}
+		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
+		if (status < 0)
+			return status;
 
 		/* Check that a non-final canonicalized/dereferenced
 		 * symlink exists and is a directory.  */
