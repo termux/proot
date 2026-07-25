@@ -583,6 +583,24 @@ int new_child(Tracee *parent, word_t clone_flags)
 	 * later clone in the same parent).  */
 	parent->clone_stripped_newns = false;
 
+	/* A child either enters the network namespace its parent asked
+	 * for with this very clone(2), or stays in the one the parent
+	 * already believes it lives in.  Either way it gets rtnetlink
+	 * answers for a namespace of its own (see enter.c).  */
+	child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
+	parent->clone_stripped_newnet = false;
+
+	/* Open fds survive fork(2)/clone(2), so the child has to keep
+	 * recognising the netlink sockets its parent opened.  The reply
+	 * pending on either of them doesn't carry over: it belongs to
+	 * whoever sent the request.  */
+	memcpy(child->fake_netlink_fds, parent->fake_netlink_fds,
+	       sizeof(child->fake_netlink_fds));
+	child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
+	memcpy(child->netlink_route_fds, parent->netlink_route_fds,
+	       sizeof(child->netlink_route_fds));
+	child->netlink_route_fds_count = parent->netlink_route_fds_count;
+
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */
 	child->exe = talloc_reference(child, parent->exe);

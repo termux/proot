@@ -109,6 +109,16 @@ typedef struct tracee {
 	 * stay scoped to the would-be namespace.  Reset once consumed.  */
 	bool clone_stripped_newns;
 
+	/* Same for CLONE_NEWNET, propagated to the new child as
+	 * "fake_netns" below.  Reset once consumed.  */
+	bool clone_stripped_newnet;
+
+	/* Set once this tracee asked for a network namespace of its own
+	 * -- clone(2) or unshare(2) with CLONE_NEWNET -- and PRoot
+	 * pretended it got one.  Inherited by children, which would
+	 * share that namespace.  */
+	bool fake_netns;
+
 	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
 	 * sandbox helpers like bubblewrap that try to bring up the
 	 * loopback interface inside their would-be net namespace.
@@ -126,6 +136,21 @@ typedef struct tracee {
 #define MAX_FAKE_NETLINK_REPLY 8192
 	uint8_t fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
 	size_t fake_netlink_reply_len;
+
+	/* Fds of the *real* NETLINK_ROUTE sockets a tracee got when the
+	 * host didn't need the substitution above.  Such a socket lives
+	 * in the host's network namespace, where a tracee has no
+	 * CAP_NET_ADMIN, so the requests a fake_netns tracee sends to
+	 * configure "its" namespace come back as NLMSG_ERROR(-EPERM);
+	 * netlink_ack_* remembers which reply to turn into a plain ack
+	 * (see handle_netlink_reply_exit).  */
+#define MAX_NETLINK_ROUTE_FDS 8
+	int netlink_route_fds[MAX_NETLINK_ROUTE_FDS];
+	int netlink_route_fds_count;
+	bool pending_real_netlink_socket;
+	bool netlink_ack_pending;
+	int netlink_ack_fd;
+	uint32_t netlink_ack_seq;
 
 	/* Support for ptrace emulation (tracer side).  */
 	struct {

@@ -733,6 +733,35 @@ void translate_syscall_exit(Tracee *tracee)
 			}
 			tracee->pending_fake_netlink_socket = false;
 		}
+
+		/* Same for a NETLINK_ROUTE socket the host granted as is:
+		 * requests sent on it still need the ack emulation when
+		 * the tracee thinks it owns a network namespace.  */
+		if (tracee->pending_real_netlink_socket) {
+			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+			if (fd >= 0) {
+				int i;
+				if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
+					bool present = false;
+					for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+						if (tracee->netlink_route_fds[i] == fd) {
+							present = true;
+							break;
+						}
+					}
+					if (!present)
+						tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
+				}
+			}
+			tracee->pending_real_netlink_socket = false;
+		}
+		goto end;
+
+	case PR_recvfrom:
+	case PR_recvmsg:
+		/* Turn the kernel's refusal to reconfigure a network
+		 * namespace the tracee doesn't really have into an ack.  */
+		handle_netlink_reply_exit(tracee, syscall_number);
 		goto end;
 
 	default:
