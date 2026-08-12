@@ -4,9 +4,12 @@
 #include <string.h>    /* str*, strrchr, strcat, strcpy, strncpy, strncmp */
 #include <sys/types.h> /* lstat(2), */
 #include <sys/stat.h>  /* lstat(2), */
+#include <sys/ptrace.h>/* PTRACE_SYSCALL, */
 #include <errno.h>     /* E*, */
 #include <limits.h>    /* PATH_MAX, */
 #include <ctype.h>     /* isdigit, */
+#include <stdbool.h>   /* bool, true, false, */
+#include <talloc.h>    /* talloc_*, */
 
 #include "cli/note.h"
 #include "extension/extension.h"
@@ -31,6 +34,56 @@
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
 
 /**
+ * Configuration of this extension, attached to each tracee.  It only
+ * describes the syscall being processed, hence it is never shared with
+ * children.
+ */
+typedef struct {
+	/* Host path of the last component of the path being translated,
+	 * as it was named before being dereferenced.  Empty when the
+	 * canonicalization did not reach it yet.  */
+	char final_component[PATH_MAX];
+
+	/* Host path of the faked hard link the syscall being processed
+	 * was redirected away from, when this syscall is about to return
+	 * a descriptor on it.  Empty otherwise.  */
+	char pending_link[PATH_MAX];
+} Link2SymlinkConfig;
+
+/**
+ * Return the configuration of this @extension, allocating it first if
+ * @allocate is true.  This function returns NULL if there's none.
+ */
+static Link2SymlinkConfig *get_config(Extension *extension, bool allocate)
+{
+	if (extension->config == NULL) {
+		if (!allocate)
+			return NULL;
+		extension->config = talloc_zero(extension, Link2SymlinkConfig);
+	}
+
+	return talloc_get_type(extension->config, Link2SymlinkConfig);
+}
+
+/**
+ * Descriptors that were opened through a faked hard link.  The kernel
+ * only knows such a file under the name it was given in the l2s
+ * directory -- that's what it reports in "/proc/<PID>/fd/<FD>" -- so
+ * these entries remember the name its tracee used instead.  There's no
+ * bookkeeping for close(2), dup(2) or fork(2): an entry that doesn't
+ * describe anymore the file its descriptor refers to is detected when
+ * it is used, then discarded.
+ */
+#define FD_CACHE_SIZE 64
+
+static struct {
+	pid_t pid;
+	int fd;
+	char *link;
+} fd_cache[FD_CACHE_SIZE];
+static size_t fd_cache_index;
+
+/**
  * Copy the contents of the @symlink into @value (nul terminated).
  * This function returns -errno if an error occured, otherwise 0.
  */
@@ -46,6 +99,179 @@ static int my_readlink(const char symlink[PATH_MAX], char value[PATH_MAX])
 	value[size] = '\0';
 
 	return 0;
+}
+
+/**
+ * Check whether @sysnum is a syscall that returns a descriptor on the
+ * file it is given the path of.
+ */
+static bool is_open_syscall(Sysnum sysnum)
+{
+	switch (sysnum) {
+	case PR_creat:
+	case PR_open:
+	case PR_openat:
+	case PR_openat2:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+/**
+ * Check whether @host_path names a file this extension has moved into
+ * the l2s directory, that is, "<PREFIX><name><NNNN>.<NNNN>".
+ */
+static bool is_l2s_file(const char *host_path)
+{
+	const char *name;
+	size_t length;
+	size_t i;
+
+	name = strrchr(host_path, '/');
+	if (name == NULL)
+		return false;
+	name++;
+
+	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
+		return false;
+
+	/* 5 = strlen(".0002")  */
+	length = strlen(name);
+	if (length < strlen(PREFIX) + 5)
+		return false;
+
+	if (name[length - 5] != '.')
+		return false;
+
+	for (i = 1; i <= 4; i++) {
+		if (!isdigit(name[length - i]))
+			return false;
+	}
+
+	return true;
+}
+
+/**
+ * Copy in @final the path of the file the faked hard link @link -- a
+ * host path -- refers to.  This function returns -errno if @link is
+ * not a faked hard link or if it is a broken one, otherwise 0.
+ */
+static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX])
+{
+	char intermediate[PATH_MAX];
+	const char *name;
+	int status;
+
+	status = my_readlink(link, intermediate);
+	if (status < 0)
+		return status;
+
+	name = strrchr(intermediate, '/');
+	if (name == NULL)
+		return -EINVAL;
+	name++;
+
+	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
+		return -EINVAL;
+
+	return my_readlink(intermediate, final);
+}
+
+/**
+ * Remember that the descriptor @fd of the process @pid was opened
+ * through the faked hard link @link (a host path).
+ */
+static void remember_fd(pid_t pid, int fd, const char link[PATH_MAX])
+{
+	size_t index;
+	size_t slot;
+	char *copy;
+
+	/* Reuse the entry of this very descriptor, if any, in order to
+	 * not fill the cache with stale duplicates.  */
+	slot = FD_CACHE_SIZE;
+	for (index = 0; index < FD_CACHE_SIZE; index++) {
+		if (fd_cache[index].link != NULL
+		    && fd_cache[index].pid == pid
+		    && fd_cache[index].fd == fd) {
+			slot = index;
+			break;
+		}
+	}
+
+	if (slot == FD_CACHE_SIZE) {
+		slot = fd_cache_index;
+		fd_cache_index = (fd_cache_index + 1) % FD_CACHE_SIZE;
+	}
+
+	/* Note: entries live as long as PRoot does, they are not talloc'ed
+	 * from any tracee -- descriptors outlive the process that opened
+	 * them, and threads don't share their pid.  */
+	copy = strdup(link);
+	if (copy == NULL)
+		return;
+
+	free(fd_cache[slot].link);
+	fd_cache[slot].link = copy;
+	fd_cache[slot].pid  = pid;
+	fd_cache[slot].fd   = fd;
+}
+
+/**
+ * Return the faked hard link the descriptor @fd of the process @pid
+ * was opened through, or NULL if it is unknown.  Threads share their
+ * descriptors but not their pid, so an entry remembered by a sibling
+ * is returned as a fallback; the caller is expected to check it still
+ * leads to the expected file.
+ */
+static const char *recall_fd(pid_t pid, int fd)
+{
+	const char *fallback = NULL;
+	size_t index;
+
+	for (index = 0; index < FD_CACHE_SIZE; index++) {
+		if (fd_cache[index].link == NULL || fd_cache[index].fd != fd)
+			continue;
+
+		if (fd_cache[index].pid == pid)
+			return fd_cache[index].link;
+
+		fallback = fd_cache[index].link;
+	}
+
+	return fallback;
+}
+
+/**
+ * Report in @state the name its tracee used to open the file its
+ * descriptor refers to, instead of the name this file was given in the
+ * l2s directory.
+ */
+static void readlink_proc_fd(struct readlink_proc_fd_state *state)
+{
+	char final[PATH_MAX];
+	const char *link;
+
+	/* Only files that live in the l2s directory are reported by the
+	 * kernel under a name no tracee ever used.  */
+	if (!is_l2s_file(state->host_path))
+		return;
+
+	link = recall_fd(state->pid, state->fd);
+	if (link == NULL)
+		return;
+
+	/* Descriptor numbers get reused and links get removed, so ensure
+	 * the remembered name still leads to this very file.  */
+	if (resolve_faked_hard_link(link, final) < 0)
+		return;
+	if (strcmp(final, state->host_path) != 0)
+		return;
+
+	strcpy(state->host_path, link);
+	state->substituted = true;
 }
 
 /**
@@ -316,8 +542,9 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
  * Make it so fake hard links look like real hard link with respect to number of links and inode
  * This function returns -errno if an error occured, otherwise 0.
  */
-static int handle_sysexit_end(Tracee *tracee)
+static int handle_sysexit_end(Extension *extension)
 {
+	Tracee *tracee = TRACEE(extension);
 	word_t sysnum;
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
@@ -453,6 +680,28 @@ static int handle_sysexit_end(Tracee *tracee)
 		return 0;
 	}
 
+	case PR_creat:                     //int creat(const char *pathname, mode_t mode);
+	case PR_open:                      //int open(const char *pathname, int flags, ...);
+	case PR_openat:                    //int openat(int dirfd, const char *pathname, int flags, ...);
+	case PR_openat2: {                 //int openat2(int dirfd, const char *pathname, struct open_how *how, size_t size);
+		Link2SymlinkConfig *config;
+		word_t result;
+
+		/* Nothing to do unless this open was redirected to an l2s
+		 * file at the enter stage.  */
+		config = get_config(extension, false);
+		if (config == NULL || config->pending_link[0] == '\0')
+			return 0;
+
+		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if ((int) result >= 0)
+			remember_fd(tracee->pid, (int) result, config->pending_link);
+
+		config->pending_link[0] = '\0';
+
+		return 0;
+	}
+
 	default:
 		return 0;
 	}
@@ -486,15 +735,49 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 }
 
 /**
+ * Remember the name the tracee of @extension used for the file it is
+ * about to open, when @host_path -- the path this open was redirected
+ * to during the canonicalization -- is a file of the l2s directory.
+ * The kernel knows nothing about faked hard links, so it would report
+ * @host_path in "/proc/<PID>/fd/<FD>", c.f. readlink_proc_fd().
+ */
+static void remember_opened_link(Extension *extension, const char host_path[PATH_MAX])
+{
+	Tracee *tracee = TRACEE(extension);
+	Link2SymlinkConfig *config;
+	char final[PATH_MAX];
+
+	if (!is_l2s_file(host_path))
+		return;
+
+	config = get_config(extension, false);
+	if (config == NULL || config->final_component[0] == '\0')
+		return;
+
+	/* Ensure the name that was dereferenced while this path was
+	 * canonicalized is indeed a faked hard link to this very file:
+	 * the tracee may have named the l2s file directly.  */
+	if (resolve_faked_hard_link(config->final_component, final) < 0)
+		return;
+	if (strcmp(final, host_path) != 0)
+		return;
+
+	strcpy(config->pending_link, config->final_component);
+
+	/* The descriptor number is only known at the exit stage, which
+	 * seccomp lets PRoot skip by default.  */
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
  * When @translated_path is a faked hard-link, replace it with the
  * point it (internally) points to.
  */
-static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
+static void translated_path(Extension *extension, char translated_path[PATH_MAX])
 {
-	char path2[PATH_MAX];
-	char path[PATH_MAX];
-	char *component;
-	int status;
+	Tracee *tracee = TRACEE(extension);
+	char final[PATH_MAX];
 
 	/* Don't translate l2s symlinks if call is (un)link */
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
@@ -511,33 +794,16 @@ static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))
 		return;
 
-	status = my_readlink(translated_path, path);
-	if (status < 0)
+	/* The canonicalization dereferenced the faked hard links this
+	 * path was made of, including its last component when this
+	 * syscall is about to return a descriptor on it.  */
+	if (is_open_syscall(sysnum))
+		remember_opened_link(extension, translated_path);
+
+	if (resolve_faked_hard_link(translated_path, final) < 0)
 		return;
 
-	component = strrchr(path, '/');
-	if (component == NULL)
-		return;
-	component++;
-
-	if (strncmp(component, PREFIX, strlen(PREFIX)) != 0)
-		return;
-
-	status = my_readlink(path, path2);
-	if (status < 0)
-		return;
-
-#if 0 /* Sanity check. */
-	component = strrchr(path, '/');
-	if (component == NULL)
-		return;
-	component++;
-
-	if (strncmp(component, PREFIX, strlen(PREFIX)) != 0)
-		return;
-#endif
-
-	strcpy(translated_path, path2);
+	strcpy(translated_path, final);
 	return;
 }
 
@@ -679,6 +945,16 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return 0;
 	}
 
+	case SYSCALL_ENTER_START: {
+		/* Forget any dereference that was not consumed by the exit
+		 * stage of the syscall it was made for.  */
+		Link2SymlinkConfig *config = get_config(extension, false);
+		if (config != NULL)
+			config->pending_link[0] = '\0';
+
+		return 0;
+	}
+
 	case SYSCALL_ENTER_END: {
 		Tracee *tracee = TRACEE(extension);
 
@@ -799,15 +1075,62 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_EXIT_END: {
-		return handle_sysexit_end(TRACEE(extension));
+		return handle_sysexit_end(extension);
+	}
+
+	case GUEST_PATH: {
+		/* A new path is about to be canonicalized.  */
+		Link2SymlinkConfig *config = get_config(extension, false);
+		if (config != NULL)
+			config->final_component[0] = '\0';
+
+		return 0;
+	}
+
+	case HOST_PATH: {
+		/* Remember how the tracee named the last component of the
+		 * path being canonicalized, that is, before PRoot follows
+		 * it -- a faked hard link is a symbolic link.  Only the
+		 * first notification describes it, the last one describes
+		 * what it points to.  This is only worth doing when a
+		 * descriptor is about to be opened on that file.  */
+		Link2SymlinkConfig *config;
+
+		if (!(bool) data2)
+			return 0;
+
+		if (!is_open_syscall(get_sysnum(TRACEE(extension), ORIGINAL)))
+			return 0;
+
+		config = get_config(extension, true);
+		if (config == NULL || config->final_component[0] != '\0')
+			return 0;
+
+		strcpy(config->final_component, (const char *) data1);
+
+		return 0;
 	}
 
 	case TRANSLATED_PATH:
-		translated_path(TRACEE(extension), (char *) data1);
+		translated_path(extension, (char *) data1);
 		return 0;
 
 	case STATX_SYSCALL:
 		link2symlink_handle_statx((struct statx_syscall_state *) data1);
+		return 0;
+
+	case READLINK_PROC_FD:
+		readlink_proc_fd((struct readlink_proc_fd_state *) data1);
+		return 0;
+
+	case INHERIT_PARENT:
+		/* The configuration only describes the syscall being
+		 * processed, hence it can't be shared with the child.  */
+		return 1;
+
+	case INHERIT_CHILD:
+		/* Nothing to inherit: the child's configuration is
+		 * allocated when it is needed.  */
 		return 0;
 
 	default:
