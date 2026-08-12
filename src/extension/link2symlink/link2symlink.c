@@ -712,26 +712,16 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 	if (!(state->statx_buf.stx_mask & STATX_NLINK))
 		return;
 
-	const char *path_ending = strrchr(state->host_path, '/');
-	if (NULL == path_ending)
+	if (!is_l2s_file(state->host_path))
 		return;
 
-	size_t ending_len = strlen(path_ending);
-	if (ending_len < strlen(PREFIX) + 6) /* 6 = strlen("/") + strlen(".0002") */
-		return;
+	size_t ending_len = strlen(state->host_path);
+	state->statx_buf.stx_nlink = atoi(&state->host_path[ending_len - 4]);
 
-	if (0 != strncmp(path_ending + 1, PREFIX, strlen(PREFIX)))
-		return;
-
-	if (path_ending[ending_len - 5] != '.')
-		return;
-
-	for (size_t i = 1; i <= 4; i++) {
-		if (!isdigit(path_ending[ending_len - i]))
-			return;
-	}
-
-	state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
+	/* The statx() that PRoot let the kernel perform did succeed, so
+	 * its result was read back from the tracee and is not written
+	 * again unless it is explicitly reported as updated.  */
+	state->updated_stats = true;
 }
 
 /**
