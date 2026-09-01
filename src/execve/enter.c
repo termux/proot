@@ -26,6 +26,7 @@
 #include <errno.h>      /* E*, */
 #include <assert.h>     /* assert(3), */
 #include <talloc.h>     /* talloc*, */
+#include <sys/param.h>     /* MAXSYMLINKS, */
 #include <sys/mman.h>   /* PROT_*, */
 #include <string.h>     /* strlen(3), strcpy(3), */
 #include <stdlib.h>     /* getenv(3), */
@@ -34,6 +35,7 @@
 
 #include "execve/execve.h"
 #include "execve/shebang.h"
+#include "execve/binfmt.h"
 #include "execve/aoxp.h"
 #include "execve/ldso.h"
 #include "execve/elf.h"
@@ -332,7 +334,7 @@ static void add_load_base(LoadInfo *load_info, word_t load_base)
 static void compute_load_addresses(Tracee *tracee)
 {
 	if (IS_POSITION_INDENPENDANT(tracee->load_info->elf_header)
-	    && tracee->load_info->mappings[0].addr == 0) {
+		&& tracee->load_info->mappings[0].addr == 0) {
 #if defined(HAS_LOADER_32BIT)
 		if (IS_CLASS32(tracee->load_info->elf_header))
 			add_load_base(tracee->load_info, EXEC_PIC_ADDRESS_32);
@@ -346,7 +348,7 @@ static void compute_load_addresses(Tracee *tracee)
 		return;
 
 	if (IS_POSITION_INDENPENDANT(tracee->load_info->interp->elf_header)
-	    && tracee->load_info->interp->mappings[0].addr == 0) {
+		&& tracee->load_info->interp->mappings[0].addr == 0) {
 #if defined(HAS_LOADER_32BIT)
 		if (IS_CLASS32(tracee->load_info->elf_header))
 			add_load_base(tracee->load_info->interp, INTERP_PIC_ADDRESS_32);
@@ -622,15 +624,37 @@ int translate_execve_enter(Tracee *tracee)
 	if (raw_path == NULL)
 		return -ENOMEM;
 
-	status = expand_shebang(tracee, host_path, user_path);
+	status = translate_and_check_exec(tracee, host_path, user_path);
 	if (status < 0)
 		/* The Linux kernel actually returns -EACCES when
 		 * trying to execute a directory.  */
 		return status == -EISDIR ? -EACCES : status;
 
-	/* user_path is modified only if there's an interpreter
-	 * (ie. for a script or with qemu).  */
-	if (status == 0 && tracee->qemu == NULL)
+	bool path_modified = false;
+	{
+		int i;
+		for (i = 0; i < MAXSYMLINKS; i++) {
+			bool not_modified_here = true;
+			status = check_binfmt(tracee, host_path, user_path);
+			if (status < 0) return status == -EISDIR ? -EACCES : status;
+			if (status > 0) path_modified = true;
+			if (status > 0) not_modified_here = false;
+
+			status = expand_shebang(tracee, host_path, user_path);
+			if (status < 0) return status == -EISDIR ? -EACCES : status;
+			if (status > 0) path_modified = true;
+			if (status > 0) not_modified_here = false;
+
+			if (not_modified_here) break;
+		}
+		if (i == MAXSYMLINKS) {
+			TALLOC_FREE(raw_path);
+			return -ELOOP;
+		}
+	}
+
+	// user_path is modified only if there's an interpreter
+	if (!path_modified && tracee->qemu == NULL)
 		TALLOC_FREE(raw_path);
 
 	/* Remember the new value for "/proc/self/exe".  It points to
