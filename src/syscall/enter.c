@@ -21,6 +21,7 @@
  */
 
 #include <errno.h>       /* errno(3), E* */
+#include <stdio.h>       /* snprintf(3), fopen(3), */
 #include <talloc.h>      /* talloc_*, */
 #include <sys/un.h>      /* struct sockaddr_un, */
 #include <linux/net.h>   /* SYS_*, */
@@ -1808,6 +1809,100 @@ static void maybe_redirect_userns_file(Tracee *tracee, Reg reg)
 	(void) set_sysarg_path(tracee, "/dev/null", reg);
 }
 
+/* Load and store a word of the tracee's width from the tracer's own memory. */
+static word_t load_word(const Tracee *tracee, const uint8_t *cursor)
+{
+	uint32_t word32;
+	uint64_t word64;
+
+	if (sizeof_word(tracee) == sizeof(word32)) {
+		memcpy(&word32, cursor, sizeof(word32));
+		return word32;
+	}
+
+	memcpy(&word64, cursor, sizeof(word64));
+	return word64;
+}
+
+static void store_word(const Tracee *tracee, uint8_t *cursor, word_t value)
+{
+	uint32_t word32 = (uint32_t) value;
+	uint64_t word64 = value;
+
+	if (sizeof_word(tracee) == sizeof(word32))
+		memcpy(cursor, &word32, sizeof(word32));
+	else
+		memcpy(cursor, &word64, sizeof(word64));
+}
+
+/**
+ * Answer @tracee's own /proc/self/auxv -- @guest_path is what it asked for,
+ * @reg holds the translated path -- with a copy whose AT_EXECFN names the
+ * program rather than the loader's temp file, as PR_GET_AUXV is answered.
+ * That prctl is what a kernel 6.4 or newer is asked; older ones are read
+ * through this file instead.
+ */
+static void maybe_redirect_own_auxv(Tracee *tracee, const char *guest_path, Reg reg)
+{
+	uint8_t vector[4096];
+	char host_path[64];
+	size_t stride;
+	size_t offset;
+	ssize_t size;
+	FILE *file;
+	int fd;
+
+	if (tracee->execfn_addr == 0)
+		return;
+
+	snprintf(host_path, sizeof(host_path), "/proc/%d/auxv", tracee->pid);
+	if (strcmp(guest_path, "/proc/self/auxv") != 0
+	    && strcmp(guest_path, host_path) != 0)
+		return;
+
+	if (tracee->auxv_path == NULL) {
+		fd = open(host_path, O_RDONLY);
+		if (fd < 0)
+			return;
+		size = read(fd, vector, sizeof(vector));
+		(void) close(fd);
+		/* A vector that fills the buffer may have been cut short, and a
+		 * cut one is worse than the kernel's own. */
+		if (size <= 0 || (size_t) size == sizeof(vector))
+			return;
+
+		stride = sizeof_word(tracee);
+		for (offset = 0; offset + 2 * stride <= (size_t) size; offset += 2 * stride) {
+			word_t type = load_word(tracee, vector + offset);
+
+			if (type == AT_NULL)
+				break;
+			if (type != AT_EXECFN)
+				continue;
+			store_word(tracee, vector + offset + stride, tracee->execfn_addr);
+			break;
+		}
+
+		tracee->auxv_path = (char *) create_temp_file(tracee, "auxv");
+		if (tracee->auxv_path == NULL)
+			return;
+
+		file = fopen(tracee->auxv_path, "w");
+		if (file == NULL) {
+			TALLOC_FREE(tracee->auxv_path);
+			return;
+		}
+		if (fwrite(vector, 1, size, file) != (size_t) size) {
+			(void) fclose(file);
+			TALLOC_FREE(tracee->auxv_path);
+			return;
+		}
+		(void) fclose(file);
+	}
+
+	(void) set_sysarg_path(tracee, tracee->auxv_path, reg);
+}
+
 /**
  * Translate the input arguments of the current @tracee's syscall in the
  * @tracee->pid process area. This function sets @tracee->status to
@@ -2467,20 +2562,19 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
-		if (tracee->execfn_addr != 0
-		    && read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX) > 0
-		    && strcmp(path, "/proc/self/auxv") == 0) {
-			tracee->sysexit_pending = true;
-			tracee->restart_how = PTRACE_SYSCALL;
-		}
+		if (tracee->execfn_addr == 0
+		    || read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX) <= 0)
+			path[0] = '\0';
 
 		if (   ((flags & O_NOFOLLOW) != 0)
 		    || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		else
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
-		if (status >= 0)
+		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_1);
+			maybe_redirect_own_auxv(tracee, path, SYSARG_1);
+		}
 		break;
 
 	case PR_fchownat:
@@ -2608,18 +2702,15 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		if (tracee->execfn_addr != 0 && strcmp(path, "/proc/self/auxv") == 0) {
-			tracee->sysexit_pending = true;
-			tracee->restart_how = PTRACE_SYSCALL;
-		}
-
 		if (   ((flags & O_NOFOLLOW) != 0)
 			|| ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
-		if (status >= 0)
+		if (status >= 0) {
 			maybe_redirect_userns_file(tracee, SYSARG_2);
+			maybe_redirect_own_auxv(tracee, path, SYSARG_2);
+		}
 		break;
 
 	case PR_readlinkat:
@@ -2841,10 +2932,6 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 	case PR_close: {
 		int closed_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
-
-		/* Stop tracking auxv_fd once the tracee closes it. */
-		if (tracee->auxv_fd >= 0 && closed_fd == tracee->auxv_fd)
-			tracee->auxv_fd = -1;
 
 		/* Drop the fd from the netlink tracking sets, otherwise
 		 * its number could be reused for an unrelated file and

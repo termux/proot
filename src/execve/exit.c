@@ -413,7 +413,9 @@ void translate_execve_exit(Tracee *tracee)
 	word_t syscall_result;
 	int status;
 
-	tracee->auxv_fd = -1;
+	/* The copy handed out for the previous program named its loader temp
+	 * file, which this execve replaces. */
+	TALLOC_FREE(tracee->auxv_path);
 
 	if (tracee->skip_proot_loader) {
 		tracee->restore_original_regs = false;

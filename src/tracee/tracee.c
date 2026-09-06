@@ -194,7 +194,6 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	 * name-space and heap.  */
 	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 	tracee->heap = talloc_zero(tracee, Heap);
-	tracee->auxv_fd = -1;
 	if (tracee->fs == NULL || tracee->heap == NULL)
 		goto no_mem;
 
@@ -434,7 +433,6 @@ int new_child(Tracee *parent, word_t clone_flags)
 	child->seccomp = parent->seccomp;
 	child->sysexit_pending = parent->sysexit_pending;
 	child->execfn_addr = parent->execfn_addr;
-	child->auxv_fd = parent->auxv_fd;
 	child->no_new_privs = parent->no_new_privs;
 	child->seen_execve = parent->seen_execve;
 #ifdef HAS_POKEDATA_WORKAROUND
