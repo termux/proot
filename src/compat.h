@@ -23,6 +23,11 @@
 #ifndef COMPAT_H
 #define COMPAT_H
 
+/* The loader is built freestanding and must not pull in libc headers. */
+#if __STDC_HOSTED__
+#    include <signal.h>  /* SYS_SECCOMP, which the fallback below would shadow */
+#endif
+
 /* Local definitions for compatibility with old and/or broken distros... */
 #    ifndef AT_NULL
 #        define AT_NULL			0
