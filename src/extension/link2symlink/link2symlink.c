@@ -4,7 +4,7 @@
 #include <unistd.h>    /* symlink(2), symlinkat(2), readlink(2), lstat(2), unlink(2), unlinkat(2)*/
 #include <string.h>    /* str*, strrchr, strcat, strcpy, strncpy, strncmp */
 #include <sys/types.h> /* lstat(2), */
-#include <sys/stat.h>  /* lstat(2), */
+#include <sys/stat.h>  /* lstat(2), fstatat(2), */
 #include <sys/ptrace.h>/* PTRACE_SYSCALL, */
 #include <errno.h>     /* E*, */
 #include <limits.h>    /* PATH_MAX, */
@@ -31,6 +31,10 @@
 #define PREFIX ".l2s."
 #endif 
 #define DELETED_SUFFIX " (deleted)"
+
+/* Highest suffix an intermediate is given, "<PREFIX><name>0001" being
+ * the first one: what the four digits hold.  */
+#define MAX_INTERMEDIATE_SUFFIX 9999
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
 
@@ -221,19 +225,6 @@ static int l2s_entry(const char *path, int *dir_fd, const char **name)
  * when that is where it lies.  They keep the return convention of the
  * calls they stand for: 0 or -1 with errno set.
  */
-static int l2s_access(const char *path)
-{
-	const char *name;
-	int dir_fd;
-
-	if (l2s_entry(path, &dir_fd, &name) < 0)
-		return -1;
-
-	/* No AT_SYMLINK_NOFOLLOW: access(2) follows, and a dangling
-	 * intermediate has always counted as a free slot here.  */
-	return (dir_fd < 0) ? access(path, F_OK) : faccessat(dir_fd, name, F_OK, 0);
-}
-
 static int l2s_symlink(const char *target, const char *path)
 {
 	const char *name;
@@ -275,6 +266,50 @@ static int l2s_rename(const char *old_path, const char *new_path)
 	 * l2s directory -- the file being moved into it, typically.  */
 	return renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
 			new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
+}
+
+/**
+ * Tell whether nothing at all lies at @path, not even a dangling
+ * symbolic link.  This function returns 1 if the name is free, 0 if it
+ * is taken, or -errno if that can't be told.
+ */
+static int l2s_is_free(const char *path)
+{
+	const char *name;
+	struct stat statl;
+	int dir_fd;
+	int status;
+
+	if (l2s_entry(path, &dir_fd, &name) < 0)
+		return -errno;
+
+	status = (dir_fd < 0)
+		? lstat(path, &statl)
+		: fstatat(dir_fd, name, &statl, AT_SYMLINK_NOFOLLOW);
+	if (status == 0)
+		return 0;
+
+	return errno == ENOENT ? 1 : -errno;
+}
+
+/**
+ * Move back to @original the file move_and_symlink_path() moved to
+ * @final, a later step having failed: the tracee has to find its file
+ * where it left it.  @notified tells whether the extensions were told
+ * about that move, hence have to be told about its undoing.  This is
+ * best effort, errno is preserved so the error reported is the one of
+ * the step that failed.
+ */
+static void undo_move(Tracee *tracee, const char *original, const char *final, bool notified)
+{
+	int saved_errno = errno;
+
+	if (l2s_rename(final, original) < 0)
+		VERBOSE(tracee, 1, "can't move \"%s\" back to \"%s\"", final, original);
+	else if (notified)
+		(void) notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) original);
+
+	errno = saved_errno;
 }
 
 /**
@@ -556,7 +591,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 			strcpy(intermediate, l2s_directory);
 			strcat(intermediate, "/");
 		} else {
-			if (strlen(PREFIX) + strlen(original) + 5 >= PATH_MAX)
+			/* "<dir>/<PREFIX><name>" plus the four digits of the
+			 * suffix and the ".0002" of the final file.  */
+			if (strlen(PREFIX) + strlen(original) + 10 >= PATH_MAX)
 				return -ENAMETOOLONG;
 
 			strncpy(intermediate, original, strlen(original) - strlen(name));
@@ -567,31 +604,59 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	}
 
 	if (first_link) {
-		/*Move the original content to the new path. */
-		do {
+		/* Move the original content to the first free path.  A
+		 * suffix is free only when neither its intermediate nor its
+		 * final file exists in any form: the symbolic link can't be
+		 * created over the former -- a dangling one included -- and
+		 * the rename would silently replace the latter.  When none
+		 * is free, refuse before the original is touched: going on
+		 * with a suffix in use moved the file aside, then failed to
+		 * create the intermediate, and the file was lost.  */
+		for (;;) {
 			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
-			intermediate_suffix++;
-		} while ((l2s_access(new_intermediate) != -1) && (intermediate_suffix < 1000));
-		strcpy(intermediate, new_intermediate);
+			strcpy(new_final, new_intermediate);
+			strcat(new_final, ".0002");
 
-		strcpy(final, intermediate);
-		strcat(final, ".0002");
+			status = l2s_is_free(new_intermediate);
+			if (status > 0)
+				status = l2s_is_free(new_final);
+			if (status < 0)
+				return status;
+			if (status > 0)
+				break;
+
+			if (intermediate_suffix >= MAX_INTERMEDIATE_SUFFIX)
+				return -EMLINK;
+			intermediate_suffix++;
+		}
+		strcpy(intermediate, new_intermediate);
+		strcpy(final, new_final);
+
 		status = l2s_rename(original, final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
-		if (status < 0)
+		if (status < 0) {
+			undo_move(tracee, original, final, false);
 			return status;
+		}
 
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_symlink(final, intermediate);
-		if (status < 0)
+		if (status < 0) {
+			status = -errno;
+			undo_move(tracee, original, final, true);
 			return status;
+		}
 
 		/* Symlink the original path to the intermediate one.  */
 		status = symlink(intermediate, original);
-		if (status < 0)
+		if (status < 0) {
+			status = -errno;
+			(void) l2s_unlink(intermediate);
+			undo_move(tracee, original, final, true);
 			return status;
+		}
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
 		size = my_readlink(intermediate, final);
@@ -606,7 +671,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
@@ -614,10 +679,10 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = l2s_symlink(final, intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 	}
 
 	/* Perform symlink() operation within PRoot.  */
@@ -703,7 +768,7 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
@@ -713,19 +778,19 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 
 		status = l2s_symlink(final, intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 	} else {
 		/* If it is the last, delete the intermediate and final */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = l2s_unlink(final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t) final, 0);
 		if (status < 0)
 			return status;
