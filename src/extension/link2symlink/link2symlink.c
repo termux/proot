@@ -33,8 +33,8 @@
 #define DELETED_SUFFIX " (deleted)"
 
 /* Highest suffix an intermediate is given, "<PREFIX><name>0001" being
- * the first one.  */
-#define MAX_INTERMEDIATE_SUFFIX 999
+ * the first one: what the four digits hold.  */
+#define MAX_INTERMEDIATE_SUFFIX 9999
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
 

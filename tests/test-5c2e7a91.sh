@@ -43,6 +43,12 @@ echo stale > "${DIR}/stale/.l2s.original0001.0002"
 STALE=$(${PROOT} -l sh -c "ln ${DIR}/stale/original ${DIR}/stale/link && cat ${DIR}/stale/original ${DIR}/stale/link" 2>&1)
 STALE_KEPT=$(cat "${DIR}/stale/.l2s.original0001.0002" 2>&1)
 
+# The suffixes stopped at 999 before: the thousandth is given out too.
+mkdir "${DIR}/thousandth"
+echo content > "${DIR}/thousandth/original"
+seq -f "${DIR}/thousandth/.l2s.original%04g" 1 999 | xargs touch
+THOUSANDTH=$(${PROOT} -l sh -c "ln ${DIR}/thousandth/original ${DIR}/thousandth/link && cat ${DIR}/thousandth/original ${DIR}/thousandth/link" 2>&1)
+
 rm -rf "${DIR}"
 
 if [ "${FULL}" != "refused" ] || [ "${FULL_CONTENT}" != "content" ]; then
@@ -59,6 +65,10 @@ if [ "${DANGLING}" != "$(printf 'content\ncontent')" ]; then
 fi
 
 if [ "${STALE}" != "$(printf 'content\ncontent')" ] || [ "${STALE_KEPT}" != "stale" ]; then
+    exit 1
+fi
+
+if [ "${THOUSANDTH}" != "$(printf 'content\ncontent')" ]; then
     exit 1
 fi
 
