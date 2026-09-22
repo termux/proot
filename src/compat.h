@@ -261,6 +261,12 @@
 #    ifndef NT_ARM_SYSTEM_CALL
 #        define NT_ARM_SYSTEM_CALL		0x404
 #    endif
+     /* glibc declares SYS_SECCOMP as an enumerator (bits/siginfo-consts.h),
+      * which #ifndef cannot see — defining the macro first then breaks the
+      * enum declaration when <signal.h> is included later.  Pull it in
+      * before the fallback so the fallback only fires where it is truly
+      * missing (bionic).  */
+#    include <signal.h>
 #    ifndef SYS_SECCOMP
 #        define SYS_SECCOMP 1
 #    endif

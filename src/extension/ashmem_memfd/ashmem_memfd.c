@@ -2,9 +2,19 @@
 
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>       /* strcmp, memset,  */
 #include <unistd.h>
 #include <sys/syscall.h>  /* __NR_memfd_create,  */
-#include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
+#if defined(__has_include) && !__has_include(<linux/ashmem.h>)
+/* Desktop kernels ship no ashmem UAPI header; define the two ioctls we
+ * translate so the extension still compiles for host test builds.  */
+#  include <linux/ioctl.h>
+#  define __ASHMEM_IOC 0x77
+#  define ASHMEM_SET_SIZE _IOW(__ASHMEM_IOC, 3, size_t)
+#  define ASHMEM_GET_SIZE _IO(__ASHMEM_IOC, 4)
+#else
+#  include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
+#endif
 #include <linux/memfd.h>  /* MFD_CLOEXEC  */
 
 #include <talloc.h>
