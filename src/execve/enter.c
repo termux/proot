@@ -40,6 +40,7 @@
 #include "path/path.h"
 #include "path/temp.h"
 #include "path/binding.h"
+#include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
@@ -599,6 +600,7 @@ int translate_execve_enter(Tracee *tracee)
 	char new_exe[PATH_MAX];
 	char *raw_path;
 	const char *loader_path;
+	struct execve_proc_exe_state proc_exe;
 	int status;
 
 	if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tracee)) {
@@ -639,8 +641,16 @@ int translate_execve_enter(Tracee *tracee)
 	talloc_unlink(tracee, tracee->host_exe);
 	tracee->host_exe = talloc_strdup(tracee, host_path);
 
-	strcpy(new_exe, host_path);
-	status = detranslate_path(tracee, new_exe, NULL);
+	proc_exe.host_path = host_path;
+	proc_exe.guest_path = new_exe;
+	proc_exe.substituted = false;
+	status = notify_extensions(tracee, EXECVE_PROC_EXE, (intptr_t) &proc_exe, 0);
+	if (status >= 0 && proc_exe.substituted)
+		status = 0;
+	else {
+		strcpy(new_exe, host_path);
+		status = detranslate_path(tracee, new_exe, NULL);
+	}
 	if (status >= 0) {
 		talloc_unlink(tracee, tracee->new_exe);
 		tracee->new_exe = talloc_strdup(tracee, new_exe);

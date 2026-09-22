@@ -16,9 +16,14 @@ echo content > "${DIR}/original"
 
 RESULT=$(${PROOT} -l -b /proc sh -c "ln ${DIR}/original ${DIR}/link && exec 3< ${DIR}/link && readlink /proc/self/fd/3")
 
+# Same through a symbolic link to the faked hard link: the descriptor is
+# named after the latter, as the kernel does for a real hard link.
+ln -s link "${DIR}/symlink"
+RESULT2=$(${PROOT} -l -b /proc sh -c "exec 3< ${DIR}/symlink && readlink /proc/self/fd/3")
+
 rm -rf "${DIR}"
 
-if [ "${RESULT}" != "${DIR}/link" ]; then
+if [ "${RESULT}" != "${DIR}/link" ] || [ "${RESULT2}" != "${DIR}/link" ]; then
     exit 1
 fi
 
