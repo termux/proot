@@ -344,6 +344,14 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			return -ENAMETOOLONG;
 		scratch_path[status] = '\0';
 
+		/* Don't notify extensions during the initialization of a binding.  */
+		if (tracee->glue_type == 0) {
+			status = notify_extensions(tracee, SYMLINK_DEREFERENCED,
+						(intptr_t) host_path, (intptr_t) scratch_path);
+			if (status < 0)
+				return status;
+		}
+
 		/* Remove the leading "root" part if needed, it's
 		 * useful for "/proc/self/cwd/" for instance.  */
 		status = detranslate_path(tracee, scratch_path, host_path);

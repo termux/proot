@@ -13,6 +13,7 @@
 #include <talloc.h>    /* talloc_*, */
 
 #include "cli/note.h"
+#include "execve/execve.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
@@ -40,10 +41,11 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg);
  * children.
  */
 typedef struct {
-	/* Host path of the last component of the path being translated,
-	 * as it was named before being dereferenced.  Empty when the
-	 * canonicalization did not reach it yet.  */
-	char final_component[PATH_MAX];
+	/* Host path of the last faked hard link the canonicalization of
+	 * the path being translated went through, that is, the name the
+	 * tracee reached a file of the l2s directory by.  Empty when it
+	 * went through none.  */
+	char dereferenced_link[PATH_MAX];
 
 	/* Host path of the faked hard link the syscall being processed
 	 * was redirected away from, when this syscall is about to return
@@ -472,6 +474,109 @@ static void readlink_proc_fd(struct readlink_proc_fd_state *state)
 		return;
 
 	strcpy(state->host_path, link);
+	state->substituted = true;
+}
+
+/**
+ * Remember @link -- a host path whose content is @referee -- if it is
+ * a faked hard link, that is, if it points to the intermediate of a
+ * file of the l2s directory.  The canonicalization of a single path
+ * can dereference several links before it reaches such a file:
+ * ordinary symbolic links first -- "/usr/bin/uname" ->
+ * "../lib/cargo/bin/coreutils/uname" on Ubuntu -- then the faked hard
+ * link itself, then its intermediate.  The name to report is the one
+ * of the faked hard link, just like the kernel reports the name of the
+ * real hard link a path leads to, whatever symbolic links were
+ * followed before.
+ */
+static void remember_dereferenced_link(Extension *extension, const char *link, const char *referee)
+{
+	Link2SymlinkConfig *config;
+	const char *link_name;
+	const char *name;
+	size_t length;
+	size_t i;
+
+	name = strrchr(referee, '/');
+	name = (name == NULL ? referee : name + 1);
+
+	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
+		return;
+
+	/* Both a faked hard link and its intermediate point to a name
+	 * that starts with PREFIX, but only the intermediate points to
+	 * its own name followed by the link count: "<name>.<NNNN>".  */
+	link_name = strrchr(link, '/');
+	link_name = (link_name == NULL ? link : link_name + 1);
+	length = strlen(link_name);
+
+	if (   strlen(name) == length + 5
+	    && strncmp(name, link_name, length) == 0
+	    && name[length] == '.') {
+		for (i = length + 1; isdigit((unsigned char) name[i]); i++)
+			;
+		if (name[i] == '\0')
+			return;
+	}
+
+	config = get_config(extension, true);
+	if (config == NULL)
+		return;
+
+	strcpy(config->dereferenced_link, link);
+}
+
+/**
+ * Return the host path of the faked hard link the canonicalization of
+ * the path being translated went through to reach @host_path -- a file
+ * of the l2s directory --, or NULL if there's none.
+ */
+static const char *l2s_link_to_host_path(Extension *extension, const char host_path[PATH_MAX])
+{
+	Link2SymlinkConfig *config;
+	char final[PATH_MAX];
+
+	if (!is_l2s_file(host_path))
+		return NULL;
+
+	config = get_config(extension, false);
+	if (config == NULL || config->dereferenced_link[0] == '\0')
+		return NULL;
+
+	/* Ensure this link is indeed a faked hard link to this very file:
+	 * the tracee may have named the l2s file directly.  */
+	if (resolve_faked_hard_link(config->dereferenced_link, final) < 0)
+		return NULL;
+	if (strcmp(final, host_path) != 0)
+		return NULL;
+
+	return config->dereferenced_link;
+}
+
+/**
+ * Report in @state the faked hard link the program being executed was
+ * reached through, rather than the file of the l2s directory PRoot
+ * loads.  That link is what the kernel reports in "/proc/<PID>/exe"
+ * for a real hard link, and multi-call programs -- the uutils coreutils
+ * of Ubuntu -- refuse to run unless its name is the utility they were
+ * invoked as.
+ */
+static void execve_proc_exe(Extension *extension, struct execve_proc_exe_state *state)
+{
+	const char *link;
+	char guest_link[PATH_MAX];
+	int status;
+
+	link = l2s_link_to_host_path(extension, state->host_path);
+	if (link == NULL)
+		return;
+
+	strcpy(guest_link, link);
+	status = detranslate_path(TRACEE(extension), guest_link, NULL);
+	if (status < 0)
+		return;
+
+	strcpy(state->guest_path, guest_link);
 	state->substituted = true;
 }
 
@@ -948,24 +1053,14 @@ static void remember_opened_link(Extension *extension, const char host_path[PATH
 {
 	Tracee *tracee = TRACEE(extension);
 	Link2SymlinkConfig *config;
-	char final[PATH_MAX];
+	const char *link;
 
-	if (!is_l2s_file(host_path))
+	link = l2s_link_to_host_path(extension, host_path);
+	if (link == NULL)
 		return;
 
 	config = get_config(extension, false);
-	if (config == NULL || config->final_component[0] == '\0')
-		return;
-
-	/* Ensure the name that was dereferenced while this path was
-	 * canonicalized is indeed a faked hard link to this very file:
-	 * the tracee may have named the l2s file directly.  */
-	if (resolve_faked_hard_link(config->final_component, final) < 0)
-		return;
-	if (strcmp(final, host_path) != 0)
-		return;
-
-	strcpy(config->pending_link, config->final_component);
+	strcpy(config->pending_link, link);
 
 	/* The descriptor number is only known at the exit stage, which
 	 * seccomp lets PRoot skip by default.  */
@@ -981,6 +1076,14 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 {
 	Tracee *tracee = TRACEE(extension);
 	char final[PATH_MAX];
+
+	/* The tracee is not started yet: PRoot is looking up the program
+	 * to launch, c.f. which().  Keep the name of a faked hard link
+	 * there, as the kernel would, so that the canonicalization of
+	 * the first execve(2) goes through it and "/proc/<PID>/exe"
+	 * reports it, c.f. execve_proc_exe().  */
+	if (tracee->exe == NULL)
+		return;
 
 	/* Don't translate l2s symlinks if call is (un)link */
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
@@ -1285,34 +1388,14 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		/* A new path is about to be canonicalized.  */
 		Link2SymlinkConfig *config = get_config(extension, false);
 		if (config != NULL)
-			config->final_component[0] = '\0';
+			config->dereferenced_link[0] = '\0';
 
 		return 0;
 	}
 
-	case HOST_PATH: {
-		/* Remember how the tracee named the last component of the
-		 * path being canonicalized, that is, before PRoot follows
-		 * it -- a faked hard link is a symbolic link.  Only the
-		 * first notification describes it, the last one describes
-		 * what it points to.  This is only worth doing when a
-		 * descriptor is about to be opened on that file.  */
-		Link2SymlinkConfig *config;
-
-		if (!(bool) data2)
-			return 0;
-
-		if (!is_open_syscall(get_sysnum(TRACEE(extension), ORIGINAL)))
-			return 0;
-
-		config = get_config(extension, true);
-		if (config == NULL || config->final_component[0] != '\0')
-			return 0;
-
-		strcpy(config->final_component, (const char *) data1);
-
+	case SYMLINK_DEREFERENCED:
+		remember_dereferenced_link(extension, (const char *) data1, (const char *) data2);
 		return 0;
-	}
 
 	case TRANSLATED_PATH:
 		translated_path(extension, (char *) data1);
@@ -1324,6 +1407,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 
 	case READLINK_PROC_FD:
 		readlink_proc_fd((struct readlink_proc_fd_state *) data1);
+		return 0;
+
+	case EXECVE_PROC_EXE:
+		execve_proc_exe(extension, (struct execve_proc_exe_state *) data1);
 		return 0;
 
 	case INHERIT_PARENT:

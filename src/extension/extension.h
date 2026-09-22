@@ -49,6 +49,15 @@ typedef enum {
 	 * as-is.  */
 	HOST_PATH,
 
+	/* A symbolic link is being dereferenced during the translation
+	 * of a guest path: "(const char *) data1" is the host path of
+	 * this link and "(const char *) data2" is its content, as read
+	 * from the host.  Several links can be dereferenced for a given
+	 * guest path; extensions are notified in the order PRoot follows
+	 * them.  If the extension returns < 0, then PRoot reports this
+	 * errno as-is.  */
+	SYMLINK_DEREFERENCED,
+
 	/* The canonicalization succeed: "(char *) data1" is the
 	 * translated path from the host point-of-view.  It can be
 	 * substituted by the extension.  If the extension returns <
@@ -156,6 +165,14 @@ typedef enum {
 	 * differently than the tracee does, as link2symlink does for the
 	 * files it hides in the l2s directory.  */
 	READLINK_PROC_FD,
+
+	/* The tracee has executed a program and PRoot is about to remember
+	 * the value reported by "/proc/<PID>/exe": "(struct
+	 * execve_proc_exe_state *) data1" -- defined in execve/execve.h --
+	 * holds the executable's host path and the guest path PRoot will
+	 * report.  An extension may replace the guest path when the host path
+	 * names internal storage rather than the path the tracee executed.  */
+	EXECVE_PROC_EXE,
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)

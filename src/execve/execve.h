@@ -24,6 +24,7 @@
 #define EXECVE_H
 
 #include <linux/limits.h>    /* PATH_MAX, */
+#include <stdbool.h>         /* bool, */
 
 #include "tracee/tracee.h"
 #include "execve/elf.h"
@@ -32,6 +33,22 @@
 extern int translate_execve_enter(Tracee *tracee);
 extern void translate_execve_exit(Tracee *tracee);
 extern int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const char *user_path);
+
+/**
+ * State passed along with the EXECVE_PROC_EXE event.
+ */
+struct execve_proc_exe_state {
+	/* Host path of the executable PRoot will load.  */
+	const char *host_path;
+
+	/* Guest path to report through "/proc/<PID>/exe".  An extension may
+	 * overwrite it -- the buffer is PATH_MAX bytes long -- and set
+	 * @substituted accordingly.  */
+	char *guest_path;
+
+	/* Whether @guest_path was replaced by an extension.  */
+	bool substituted;
+};
 
 typedef struct mapping {
 	word_t addr;
