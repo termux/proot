@@ -41,10 +41,9 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg);
  * children.
  */
 typedef struct {
-	/* Host path of the last faked hard link the canonicalization of
-	 * the path being translated went through, that is, the name the
-	 * tracee reached a file of the l2s directory by.  Empty when it
-	 * went through none.  */
+	/* Host path of the last faked hard link the path being translated
+	 * went through, that is, the name the tracee reached a file of the
+	 * l2s directory by.  Empty when it went through none.  */
 	char dereferenced_link[PATH_MAX];
 
 	/* Host path of the faked hard link the syscall being processed
@@ -527,9 +526,9 @@ static void remember_dereferenced_link(Extension *extension, const char *link, c
 }
 
 /**
- * Return the host path of the faked hard link the canonicalization of
- * the path being translated went through to reach @host_path -- a file
- * of the l2s directory --, or NULL if there's none.
+ * Return the host path of the faked hard link the path being translated
+ * went through to reach @host_path -- a file of the l2s directory --, or
+ * NULL if there's none.
  */
 static const char *l2s_link_to_host_path(Extension *extension, const char host_path[PATH_MAX])
 {
@@ -1045,7 +1044,7 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 /**
  * Remember the name the tracee of @extension used for the file it is
  * about to open, when @host_path -- the path this open was redirected
- * to during the canonicalization -- is a file of the l2s directory.
+ * to -- is a file of the l2s directory.
  * The kernel knows nothing about faked hard links, so it would report
  * @host_path in "/proc/<PID>/fd/<FD>", c.f. readlink_proc_fd().
  */
@@ -1075,6 +1074,7 @@ static void remember_opened_link(Extension *extension, const char host_path[PATH
 static void translated_path(Extension *extension, char translated_path[PATH_MAX])
 {
 	Tracee *tracee = TRACEE(extension);
+	Link2SymlinkConfig *config;
 	char final[PATH_MAX];
 
 	/* The tracee is not started yet: PRoot is looking up the program
@@ -1101,16 +1101,20 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 		return;
 
 	/* The canonicalization dereferenced the faked hard links this
-	 * path was made of, including its last component when this
-	 * syscall is about to return a descriptor on it.  */
+	 * path was made of, except its last component when it was asked
+	 * not to -- lstat(2), open(O_NOFOLLOW), ... -- in which case
+	 * that is done here.  The name of that link is remembered the
+	 * same way, a faked hard link is a regular file to the tracee.  */
+	if (resolve_faked_hard_link(translated_path, final) == 0) {
+		config = get_config(extension, true);
+		if (config != NULL)
+			strcpy(config->dereferenced_link, translated_path);
+
+		strcpy(translated_path, final);
+	}
+
 	if (is_open_syscall(sysnum))
 		remember_opened_link(extension, translated_path);
-
-	if (resolve_faked_hard_link(translated_path, final) < 0)
-		return;
-
-	strcpy(translated_path, final);
-	return;
 }
 
 /**
