@@ -1,4 +1,5 @@
 #include <dirent.h>    /* DIR, struct dirent, opendir, closedir, readdir) */
+#include <fcntl.h>     /* AT_* */
 #include <stdio.h>     /* rename(2), */
 #include <stdlib.h>    /* atoi */
 #include <unistd.h>    /* symlink(2), symlinkat(2), readlink(2), lstat(2), unlink(2), unlinkat(2)*/
@@ -32,6 +33,8 @@ static int handle_sysexit_end(Tracee *tracee)
 
     switch (sysnum) {
 
+    case PR_newfstatat:                //int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);
+    case PR_fstatat64:                 //int fstatat64(int dirfd, const char *pathname, struct stat *buf, int flags);
     case PR_lstat64:                   //int lstat(const char *path, struct stat *buf);
     case PR_lstat: {                     //int lstat(const char *path, struct stat *buf);
         word_t result;
@@ -50,7 +53,17 @@ static int handle_sysexit_end(Tracee *tracee)
 
         /*for lstat, the link2symlink extension should have already drilled down to the final final and past a fake hard link
           so if the path returned points to a symbolic link, it should be a normal symbolic link*/
-        sysarg_path = SYSARG_1;
+        if (sysnum == PR_newfstatat || sysnum == PR_fstatat64) {
+            const word_t flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+            /* Only adjust results that explicitly requested lstat semantics. */
+            if ((flags & AT_SYMLINK_NOFOLLOW) == 0)
+                return 0;
+
+            sysarg_path = SYSARG_2;
+        } else {
+            sysarg_path = SYSARG_1;
+        }
         size = read_string(tracee, original, peek_reg(tracee, MODIFIED, sysarg_path), PATH_MAX);
         if (size < 0)
             return size;
@@ -73,7 +86,7 @@ static int handle_sysexit_end(Tracee *tracee)
         if (size < 0)
             return size;
 
-        sysarg_stat = SYSARG_2;
+        sysarg_stat = (sysnum == PR_newfstatat || sysnum == PR_fstatat64) ? SYSARG_3 : SYSARG_2;
 
         /* Overwrite the stat struct with the correct size. */
         read_data(tracee, &statl, peek_reg(tracee, ORIGINAL, sysarg_stat), sizeof(statl));
@@ -103,6 +116,8 @@ int fix_symlink_size_callback(Extension *extension, ExtensionEvent event,
         static FilteredSysnum filtered_sysnums[] = {
             { PR_lstat,     FILTER_SYSEXIT },
             { PR_lstat64,       FILTER_SYSEXIT },
+            { PR_newfstatat,    FILTER_SYSEXIT },
+            { PR_fstatat64,     FILTER_SYSEXIT },
             FILTERED_SYSNUM_END,
         };
         extension->filtered_sysnums = filtered_sysnums;
