@@ -93,6 +93,31 @@
 		       CLONE_NEWCGROUP | CLONE_NEWTIME)
 
 /**
+ * Force PRoot to intercept the exit stage of the fork-family syscall
+ * the @tracee is entering, i.e. restart it with PTRACE_SYSCALL rather
+ * than the seccomp PTRACE_CONT fast path.
+ *
+ * A plain syscall restarted with PTRACE_CONT after its
+ * PTRACE_EVENT_SECCOMP stop simply runs to completion, so PRoot
+ * normally takes that shortcut for syscalls it doesn't need the exit
+ * of.  But on some kernels (seen on aarch64 4.14 openela) a *forking*
+ * syscall restarted that way never runs: the kernel keeps re-reporting
+ * its seccomp entry stop instead of executing it and delivering
+ * PTRACE_EVENT_FORK/CLONE, so the tracee spins forever entering
+ * clone(2) and no child is ever created.  Restarting it with
+ * PTRACE_SYSCALL (as the exit-intercepted syscalls that do work on
+ * that kernel are) lets it proceed; asking for the exit stage keeps the
+ * event loop synchronised (the parent's clone(2) still reports a
+ * sysexit after PTRACE_EVENT_FORK).  Harmless on kernels where the
+ * fast path already worked: it only adds one ptrace stop per fork.
+ */
+static void force_fork_sysexit(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
  * Translate @path and put the result in the @tracee's memory address
  * space pointed to by the @reg argument of the current syscall. See
  * the documentation of translate_path() about the meaning of
@@ -2423,6 +2448,7 @@ int translate_syscall_enter(Tracee *tracee)
 				tracee->clone_stripped_newnet = true;
 			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
 		}
+		force_fork_sysexit(tracee);
 		status = 0;
 		break;
 	}
@@ -2443,9 +2469,16 @@ int translate_syscall_enter(Tracee *tracee)
 					  flags & ~(word_t) CLONE_NS_MASK);
 			}
 		}
+		force_fork_sysexit(tracee);
 		status = 0;
 		break;
 	}
+
+	case PR_fork:
+	case PR_vfork:
+		force_fork_sysexit(tracee);
+		status = 0;
+		break;
 
 	/* mount(2) and pivot_root(2) are emulated by translating them
 	 * into PRoot bindings (see emulate_mount/emulate_pivot_root)
