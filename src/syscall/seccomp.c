@@ -522,12 +522,50 @@ int enable_syscall_filtering(const Tracee *tracee)
 	return 0;
 }
 
+/**
+ * Return the flags the filter of enable_syscall_filtering() associates
+ * with @sysnum for @tracee, ie. the data PTRACE_EVENT_SECCOMP stops of
+ * that syscall report: the filter was built from the very same lists.
+ */
+int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum)
+{
+	Extension *extension;
+	int flags = 0;
+	size_t i;
+
+	for (i = 0; proot_sysnums[i].value != PR_void; i++) {
+		if (proot_sysnums[i].value == sysnum)
+			flags |= proot_sysnums[i].flags;
+	}
+
+	if (tracee->extensions == NULL)
+		return flags;
+
+	LIST_FOREACH(extension, tracee->extensions, link) {
+		if (extension->filtered_sysnums == NULL)
+			continue;
+
+		for (i = 0; extension->filtered_sysnums[i].value != PR_void; i++) {
+			if (extension->filtered_sysnums[i].value == sysnum)
+				flags |= extension->filtered_sysnums[i].flags;
+		}
+	}
+
+	return flags;
+}
+
 #else
 
+#include "syscall/seccomp.h"
 #include "tracee/tracee.h"
 #include "attribute.h"
 
 int enable_syscall_filtering(const Tracee *tracee UNUSED)
+{
+	return 0;
+}
+
+int filtered_sysnum_flags(const Tracee *tracee UNUSED, Sysnum sysnum UNUSED)
 {
 	return 0;
 }
