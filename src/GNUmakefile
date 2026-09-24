@@ -11,6 +11,7 @@ INSTALL  = install
 CC       ?= $(CROSS_COMPILE)gcc
 LD       = $(CC)
 STRIP    ?= $(CROSS_COMPILE)strip
+READELF  ?= $(CROSS_COMPILE)readelf
 OBJCOPY  ?= $(CROSS_COMPILE)objcopy
 OBJDUMP  ?= $(CROSS_COMPILE)objdump
 
@@ -91,7 +92,7 @@ OBJECTS += \
 	extension/fix_symlink_size/fix_symlink_size.o
 
 define define_from_arch.h
-$2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(SRC)/arch.h | grep -w $2 | cut -f 3 -d ' ')
+$2$1 := $(shell $(CC) $1 -E -dM -DNO_LIBC_HEADER $(VPATH)/arch.h | grep -w $2 | cut -f 3 -d ' ')
 endef
 
 $(eval $(call define_from_arch.h,,HAS_LOADER_32BIT))
@@ -177,7 +178,9 @@ ROSEGMENT := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--ro
 ######################################################################
 # Build rules
 
-COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -c $(SRC)$< -o $@
+# Use $< instead of $(SRC)$< because VPATH already resolves source paths.
+# $(SRC)$< duplicates the prefix in out-of-tree builds.
+COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -c $< -o $@
 LINK    = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
 OBJIFY = $($(quiet)GEN)									\
@@ -194,7 +197,7 @@ proot: $(OBJECTS)
 
 # Special case to compute which files depend on the auto-generated
 # file "build.h".
-USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell egrep -sl 'include[[:space:]]+"build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS))))
+USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell grep -E -sl 'include[[:space:]]+"build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS))))
 $(USE_BUILD_H): build.h
 
 %.o: %.c
@@ -243,7 +246,7 @@ $(eval $(call build_loader,-m32))
 endif
 
 loader/loader-info.c: loader/loader
-	readelf -s $< | awk -f loader/loader-info.awk > $@
+	$(READELF) -s $< | awk -f $(VPATH)/loader/loader-info.awk > $@
 
 ######################################################################
 # Dependencies
