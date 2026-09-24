@@ -139,9 +139,14 @@ static int bind_proc_pid_auxv(const Tracee *ptracee)
 
 /**
  * Convert @mappings into load @script statements at the given @cursor
- * position.  This function returns the new cursor position.
+ * position.  When @is_pic is true the PIE action variants are emitted
+ * so the loader will let the kernel choose the base address for the
+ * first segment (avoiding hardcoded EXEC_PIC_ADDRESS / INTERP_PIC_ADDRESS
+ * that may collide with vdso/kshare guard zones on some ARM64 kernels),
+ * then MAP_FIXED subsequent segments at the correct offsets.
+ * This function returns the new cursor position.
  */
-static void *transcript_mappings(void *cursor, const Mapping *mappings)
+static void *transcript_mappings(void *cursor, const Mapping *mappings, bool is_pic)
 {
 	size_t nb_mappings;
 	size_t i;
@@ -151,9 +156,9 @@ static void *transcript_mappings(void *cursor, const Mapping *mappings)
 		LoadStatement *statement = cursor;
 
 		if ((mappings[i].flags & MAP_ANONYMOUS) != 0)
-			statement->action = LOAD_ACTION_MMAP_ANON;
+			statement->action = is_pic ? LOAD_ACTION_MMAP_PIC_ANON : LOAD_ACTION_MMAP_ANON;
 		else
-			statement->action = LOAD_ACTION_MMAP_FILE;
+			statement->action = is_pic ? LOAD_ACTION_MMAP_PIC_FILE : LOAD_ACTION_MMAP_FILE;
 
 		statement->mmap.addr   = mappings[i].addr;
 		statement->mmap.length = mappings[i].length;
@@ -216,7 +221,9 @@ static int transfer_load_script(Tracee *tracee)
 	needs_executable_stack = (tracee->load_info->needs_executable_stack
 				|| (   tracee->load_info->interp != NULL
 				    && tracee->load_info->interp->needs_executable_stack));
-
+	bool exec_is_pic = IS_POSITION_INDENPENDANT(tracee->load_info->elf_header);
+	bool interp_is_pic = tracee->load_info->interp != NULL
+			  && IS_POSITION_INDENPENDANT(tracee->load_info->interp->elf_header);
 	/* Strings addresses are required to generate the load script,
 	 * for "open" actions.  Since I want to generate it in one
 	 * pass, these strings will be put right below the current
@@ -277,7 +284,7 @@ static int transfer_load_script(Tracee *tracee)
 	cursor += LOAD_STATEMENT_SIZE(*statement, open);
 
 	/* Load script statements: mmap.  */
-	cursor = transcript_mappings(cursor, tracee->load_info->mappings);
+	cursor = transcript_mappings(cursor, tracee->load_info->mappings, exec_is_pic);
 
 	if (tracee->load_info->interp != NULL) {
 		/* Load script statement: open.  */
@@ -288,7 +295,7 @@ static int transfer_load_script(Tracee *tracee)
 		cursor += LOAD_STATEMENT_SIZE(*statement, open);
 
 		/* Load script statements: mmap.  */
-		cursor = transcript_mappings(cursor, tracee->load_info->interp->mappings);
+		cursor = transcript_mappings(cursor, tracee->load_info->interp->mappings, interp_is_pic);
 
 		entry_point = ELF_FIELD(tracee->load_info->interp->elf_header, entry);
 	}

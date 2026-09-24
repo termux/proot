@@ -74,5 +74,11 @@ typedef struct load_statement LoadStatement;
 #define LOAD_ACTION_MAKE_STACK_EXEC	4
 #define LOAD_ACTION_START_TRACED	5
 #define LOAD_ACTION_START		6
+/* PIE variants: loader performs mmap(addr=0) on the first segment to obtain a
+ * kernel-assigned base address, then applies a fixed delta to all subsequent
+ * segments.  This avoids EXEC_PIC_ADDRESS / INTERP_PIC_ADDRESS falling inside
+ * device-specific protection zones (e.g. ~2 GB vdso guard region on some ARM64 kernels). */
+#define LOAD_ACTION_MMAP_PIC_FILE	7
+#define LOAD_ACTION_MMAP_PIC_ANON	8
 
 #endif /* SCRIPT */
