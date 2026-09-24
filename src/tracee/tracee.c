@@ -22,6 +22,8 @@
 
 #include <sched.h>      /* CLONE_*,  */
 #include <sys/types.h>  /* pid_t, size_t, */
+#include <stdio.h>      /* fopen(3), fgets(3), sscanf(3), */
+#include <unistd.h>     /* getpid(2), */
 #include <stdlib.h>     /* NULL, */
 #include <assert.h>     /* assert(3), */
 #include <string.h>     /* bzero(3), */
@@ -375,6 +377,204 @@ void free_terminated_tracees()
 	}
 }
 
+static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid);
+
+/**
+ * Read the Tgid, PPid and TracerPid fields of /proc/@pid/status.  This
+ * function returns -1 if they can't all be read, otherwise 0.
+ */
+static int read_proc_status_ids(pid_t pid, pid_t *tgid, pid_t *ppid, pid_t *tracer)
+{
+	char path[64];
+	char line[128];
+	int found = 0;
+	FILE *file;
+
+	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	file = fopen(path, "r");
+	if (file == NULL)
+		return -1;
+
+	while (found != 7 && fgets(line, sizeof(line), file) != NULL) {
+		if (sscanf(line, "Tgid: %d", tgid) == 1)
+			found |= 1;
+		else if (sscanf(line, "PPid: %d", ppid) == 1)
+			found |= 2;
+		else if (sscanf(line, "TracerPid: %d", tracer) == 1)
+			found |= 4;
+	}
+	fclose(file);
+
+	return (found == 7 ? 0 : -1);
+}
+
+/**
+ * Return the stack pointer the child of the fork-like syscall @parent
+ * is stopped in starts with: the stack the syscall was given, if any,
+ * otherwise the stack of @parent itself.
+ */
+static word_t new_child_stack(Tracee *parent)
+{
+	word_t stack = 0;
+
+	switch (get_sysnum(parent, CURRENT)) {
+	case PR_clone:
+		stack = peek_reg(parent, CURRENT, SYSARG_2);
+		break;
+
+	case PR_clone3: {
+		/* The child starts at the top of the area described
+		 * by the "stack" and "stack_size" fields of struct
+		 * clone_args, the 6th and 7th 64-bit words.  */
+		word_t args = peek_reg(parent, CURRENT, SYSARG_1);
+		word_t size;
+
+		errno = 0;
+		stack = peek_word(parent, args + 5 * 8);
+		size  = peek_word(parent, args + 6 * 8);
+		stack = (errno != 0 || stack == 0 ? 0 : stack + size);
+		break;
+	}
+
+	default:
+		break;
+	}
+
+	return (stack != 0 ? stack : peek_reg(parent, CURRENT, STACK_POINTER));
+}
+
+/**
+ * Tell whether @child, stopped but unknown to PRoot yet, was created
+ * by the fork-like syscall whose event didn't name the child @parent
+ * got (see new_child()).
+ */
+static bool is_pending_child_of(const Tracee *parent, Tracee *child)
+{
+	word_t flags = parent->pending_clone_flags;
+	pid_t child_tgid, child_ppid, parent_tgid, parent_ppid, tracer;
+	bool related;
+
+	if (read_proc_status_ids(child->pid, &child_tgid, &child_ppid, &tracer) < 0
+	    || read_proc_status_ids(parent->pid, &parent_tgid, &parent_ppid, &tracer) < 0)
+		return false;
+
+	/* A new thread joins the thread group of its creator; a new
+	 * process is the child of the process which forked it, unless
+	 * it was given the parent of that process.  */
+	if ((flags & CLONE_THREAD) != 0)
+		related = (child_tgid == parent_tgid);
+	else if ((flags & CLONE_PARENT) != 0)
+		related = (child_ppid == parent_ppid);
+	else
+		related = (child_ppid == parent_tgid);
+
+	if (!related)
+		return false;
+
+	/* That still can't tell apart the threads of a process forking
+	 * at the same time, but their children can: the stack a new
+	 * child starts with, untouched until its first stop, is the one
+	 * its parent asked for, and no two threads share a stack.  */
+#if defined(ARCH_ARM64)
+	child->is_aarch32 = parent->is_aarch32;
+#endif
+	if (fetch_regs(child) < 0)
+		return false;
+
+	return (peek_reg(child, CURRENT, STACK_POINTER) == parent->pending_child_sp);
+}
+
+/**
+ * Register the stopped tracees PRoot doesn't know yet whose parent is
+ * blocked in a vfork-like syscall that was reported without the new
+ * child's PID (see new_child()).  Such a parent reaches the exit of
+ * that syscall only once its child has run, so its child can't wait
+ * for it.  Other parents are handled when their syscall exits, where
+ * its result names the child exactly (see resolve_pending_child()).
+ */
+void adopt_held_children(void)
+{
+	bool vfork_pending = false;
+	Tracee *parent;
+	Tracee *child;
+
+	LIST_FOREACH(parent, &tracees, link) {
+		if (parent->pending_child && (parent->pending_clone_flags & CLONE_VFORK) != 0)
+			vfork_pending = true;
+	}
+
+	if (!vfork_pending)
+		return;
+
+	LIST_FOREACH(child, &tracees, link) {
+		if (child->exe != NULL || child->sigstop != SIGSTOP_PENDING || child->terminated)
+			continue;
+
+		LIST_FOREACH(parent, &tracees, link) {
+			if (!parent->pending_child
+			    || (parent->pending_clone_flags & CLONE_VFORK) == 0
+			    || parent->exe == NULL
+			    || parent->terminated
+			    || !is_pending_child_of(parent, child))
+				continue;
+
+			parent->pending_child = false;
+			(void) attach_child(parent, parent->pending_clone_flags, child->pid);
+			break;
+		}
+	}
+}
+
+/**
+ * Register the child @parent created with a fork-like syscall that was
+ * reported without the new child's PID (see new_child()), now that
+ * @parent is at the exit stage of a syscall.  If that syscall is the
+ * one which forked, its result is the PID in question.
+ */
+void resolve_pending_child(Tracee *parent)
+{
+	pid_t tgid, ppid, tracer;
+	Tracee *child;
+	pid_t pid;
+
+	switch (get_sysnum(parent, ORIGINAL)) {
+	case PR_clone:
+	case PR_clone3:
+	case PR_fork:
+	case PR_vfork:
+		break;
+
+	default:
+		/* The result of any other syscall isn't a PID: never
+		 * mistake it for the child's.  */
+		return;
+	}
+
+	parent->pending_child = false;
+
+	pid = (pid_t) (int) peek_reg(parent, CURRENT, SYSARG_RESULT);
+
+	/* Already registered by adopt_held_children()?  */
+	child = (pid > 0 ? get_tracee(parent, pid, false) : NULL);
+	if (child != NULL && child->exe != NULL)
+		return;
+
+	/* Make sure that PID designates a process PRoot is tracing
+	 * before tracking it (and killing it on exit).  */
+	if (pid <= 0
+	    || read_proc_status_ids(pid, &tgid, &ppid, &tracer) < 0
+	    || tracer != getpid()) {
+		note(parent, WARNING, INTERNAL,
+			"vpid %" PRIu64 ": can't find the child of a fork reported without its pid",
+			parent->vpid);
+		parent->clone_stripped_newns = false;
+		parent->clone_stripped_newnet = false;
+		return;
+	}
+
+	(void) attach_child(parent, parent->pending_clone_flags, pid);
+}
+
 /**
  * Make new @parent's child inherit from it.  Depending on
  * @clone_flags, some information are copied or shared.  This function
@@ -382,9 +582,7 @@ void free_terminated_tracees()
  */
 int new_child(Tracee *parent, word_t clone_flags)
 {
-	int ptrace_options;
-	unsigned long pid;
-	Tracee *child;
+	unsigned long pid = 0;
 	int status;
 
 	/* If the tracee calls clone(2) with the CLONE_VFORK flag,
@@ -405,14 +603,37 @@ int new_child(Tracee *parent, word_t clone_flags)
                 // contains the usual clone flags.
                 clone_flags = peek_word(parent, peek_reg(parent, CURRENT, SYSARG_1));
 
-	/* Get the pid of the parent's new child.  */
+	/* Get the pid of the parent's new child.  Some kernels (seen
+	 * on aarch64 4.14.357 builds) clear the message of the last
+	 * ptrace event on every ptrace request, so the PID reads as 0,
+	 * although the fork succeeded and the child is already waiting
+	 * for PRoot, stopped.  Register that child later: from the
+	 * result of the syscall once @parent reaches its exit, or from
+	 * the child's own stop when @parent can't get there before the
+	 * child has run, ie. when blocked in vfork(2).  */
 	status = ptrace(PTRACE_GETEVENTMSG, parent->pid, NULL, &pid);
 	if (status < 0 || pid == 0) {
-		note(parent, WARNING, SYSTEM, "ptrace(GETEVENTMSG)");
-		return status;
+		VERBOSE(parent, 1, "vpid %" PRIu64 ": fork event without the child's pid",
+			parent->vpid);
+		parent->pending_child = true;
+		parent->pending_clone_flags = clone_flags;
+		parent->pending_child_sp = new_child_stack(parent);
+		adopt_held_children();
+		return 0;
 	}
 
-	child = get_tracee(parent, (pid_t) pid, true);
+	return attach_child(parent, clone_flags, (pid_t) pid);
+}
+
+/**
+ * Register @pid as the new child of @parent, see new_child().
+ */
+static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
+{
+	int ptrace_options;
+	Tracee *child;
+
+	child = get_tracee(parent, pid, true);
 	if (child == NULL) {
 		note(parent, WARNING, SYSTEM, "running out of memory");
 		return -ENOMEM;

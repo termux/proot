@@ -321,6 +321,14 @@ typedef struct tracee {
 	/* Ensure the sysexit stage is always hit under seccomp.  */
 	bool sysexit_pending;
 
+	/* True when the kernel reported a fork event of this tracee
+	 * without the new child's PID; the child, created with
+	 * pending_clone_flags and starting with the stack pointer
+	 * pending_child_sp, is then registered later (see new_child()).  */
+	bool pending_child;
+	word_t pending_clone_flags;
+	word_t pending_child_sp;
+
 	/* If true, syscall entry was handled by seccomp and next SIGTRAP | 0x80
 	 * has to be ignored as it's same syscall entry */
 	bool seccomp_already_handled_enter;
@@ -401,6 +409,8 @@ extern Tracee *get_stopped_ptracee(const Tracee *ptracer, pid_t pid,
 				bool only_with_pevent, word_t wait_options);
 extern bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options);
 extern int new_child(Tracee *parent, word_t clone_flags);
+extern void resolve_pending_child(Tracee *parent);
+extern void adopt_held_children(void);
 extern Tracee *new_dummy_tracee(TALLOC_CTX *context);
 extern void terminate_tracee(Tracee *tracee);
 extern void free_terminated_tracees();

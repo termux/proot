@@ -586,6 +586,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
 					translate_syscall(tracee);
 
+					/* The exit of a fork-like syscall whose
+					 * event didn't name the new child: its
+					 * result does (see new_child()).  */
+					if (!was_sysenter && tracee->pending_child)
+						resolve_pending_child(tracee);
+
 					/* In case we've changed on enter sysnum to PR_void,
 					 * the outer seccomp policy may check the syscall
 					 * after our change and raise SIGSYS on the avoider
@@ -761,6 +767,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (tracee->exe == NULL) {
 				tracee->sigstop = SIGSTOP_PENDING;
 				signal = -1;
+
+				/* Unless that notification came without
+				 * the child's PID and its parent can't go
+				 * on before the child has run (see
+				 * new_child()).  */
+				adopt_held_children();
 			}
 
 			/* For each tracee, the first SIGSTOP
