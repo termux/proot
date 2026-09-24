@@ -332,12 +332,30 @@ int push_specific_regs(Tracee *tracee, bool including_sysnum)
 
 		/* Update syscall number if needed.  On arm64, a new
 		 * subcommand has been added to PTRACE_{S,G}ETREGSET
-		 * to allow write/read of current sycall number.  */
+		 * to allow write/read of current sycall number.
+		 *
+		 * Kernel-capability cache: NT_ARM_SYSTEM_CALL is a
+		 * kernel-global feature — if it is rejected once with
+		 * EINVAL, it will never succeed under the same running
+		 * kernel. We short-circuit subsequent requests so the
+		 * caller (see syscall.c unmodifiable-sysnum workaround)
+		 * hits its fallback path immediately without paying the
+		 * cost of a guaranteed-failing ptrace on every intercepted
+		 * syscall. Only EINVAL is cached: ESRCH/EPERM/EFAULT are
+		 * per-tracee state issues, not kernel capability. Memory
+		 * only (not persisted); a new proot run re-probes. */
+		static bool sysnum_regset_unavailable = false;
 		if (including_sysnum && current_sysnum != REG(tracee, ORIGINAL, SYSARG_NUM)) {
+			if (sysnum_regset_unavailable) {
+				errno = EINVAL;
+				return -1;
+			}
 			regs.iov_base = &current_sysnum;
 			regs.iov_len = sizeof(current_sysnum);
 			status = ptrace(PTRACE_SETREGSET, tracee->pid, NT_ARM_SYSTEM_CALL, &regs);
 			if (status < 0) {
+				if (errno == EINVAL)
+					sysnum_regset_unavailable = true;
 				//note(tracee, WARNING, SYSTEM, "can't set the syscall number");
 				return status;
 			}
