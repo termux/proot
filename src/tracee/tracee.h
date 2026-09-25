@@ -292,10 +292,11 @@ typedef struct tracee {
 	 * loader temp file, but we want it to point to the actual program name. */
 	word_t execfn_addr;
 
-	/* fd the tracee used to open /proc/self/auxv, tracked so that read()
-	 * calls on it can have AT_EXECFN patched (fallback for kernels < 6.4
-	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
-	int auxv_fd;
+	/* Copy of the tracee's own auxiliary vector with AT_EXECFN patched the
+	 * same way, handed out when it opens /proc/self/auxv.  That is where
+	 * kernels older than 6.4, which have no PR_GET_AUXV, are read instead.
+	 * NULL until the tracee asks for it. */
+	char *auxv_path;
 
 #ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;
