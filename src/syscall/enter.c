@@ -199,6 +199,25 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 }
 
 /**
+ * With AT_EMPTY_PATH in @flags, an empty @path makes the kernel act on
+ * @dir_fd itself, that is on the current working directory when
+ * @dir_fd is AT_FDCWD.  The tracee's actual cwd is still the host
+ * directory PRoot was launched from (the guest one is only emulated),
+ * so replace @path with "." in that case: it is then translated
+ * against the guest cwd like any other relative path.  A NULL pointer,
+ * which get_sysarg_path() also reports as an empty @path, is left as
+ * is for the kernel to reject.
+ */
+static void empty_path_at_cwd(const Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg, word_t flags)
+{
+	if (   path[0] == '\0'
+	    && dir_fd == AT_FDCWD
+	    && (flags & AT_EMPTY_PATH) != 0
+	    && peek_reg(tracee, CURRENT, reg) != 0)
+		strcpy(path, ".");
+}
+
+/**
  * A helper, see the comment of the function above.
  */
 static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
@@ -2538,6 +2557,8 @@ int translate_syscall_enter(Tracee *tracee)
 			? peek_reg(tracee, CURRENT, SYSARG_5)
 			: peek_reg(tracee, CURRENT, SYSARG_4);
 
+		empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
+
 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		else
@@ -2554,6 +2575,11 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
+
+		/* Only faccessat2 has a flags argument.  */
+		if (syscall_number == PR_faccessat2)
+			empty_path_at_cwd(tracee, dirfd, path, SYSARG_2,
+					peek_reg(tracee, CURRENT, SYSARG_4));
 
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
@@ -2605,6 +2631,8 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, newpath, SYSARG_4);
 		if (status < 0)
 			break;
+
+		empty_path_at_cwd(tracee, olddirfd, oldpath, SYSARG_2, flags);
 
 		if ((flags & AT_SYMLINK_FOLLOW) != 0)
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, REGULAR);
@@ -2748,6 +2776,9 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, newpath, SYSARG_2);
 		if (status < 0)
 			break;
+
+		empty_path_at_cwd(tracee, newdirfd, newpath, SYSARG_2,
+				peek_reg(tracee, CURRENT, SYSARG_3));
 
 		status = translate_path2(
 			tracee,

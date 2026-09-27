@@ -28,8 +28,14 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 		if ((flags & AT_EMPTY_PATH) == 0) {
 			return -ENOENT;
 		}
-		status = readlink_proc_pid_fd(tracee->pid, dirfd, state.host_path);
-		do_fstat = true;
+		/* The empty path names the cwd, which is emulated: the
+		 * guest one, not the tracee's actual cwd on the host.  */
+		if ((int) dirfd == AT_FDCWD) {
+			status = translate_path(tracee, state.host_path, AT_FDCWD, ".", !do_lstat);
+		} else {
+			status = readlink_proc_pid_fd(tracee->pid, dirfd, state.host_path);
+			do_fstat = true;
+		}
 	} else {
 		if (status >= PATH_MAX) {
 			return -ENAMETOOLONG;
