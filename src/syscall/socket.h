@@ -28,5 +28,10 @@
 
 int translate_socketcall_enter(Tracee *tracee, word_t *sock_addr, int size);
 int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr, word_t max_size);
+int translate_send_address(Tracee *tracee, word_t *sock_addr, int size);
+int translate_sendmsg_enter(Tracee *tracee, word_t *msghdr_addr);
+int translate_sendmmsg_enter(Tracee *tracee, word_t *vector_addr, word_t *vlen);
+int translate_sendmmsg_exit(Tracee *tracee, word_t vector_addr, word_t copy_addr, word_t count);
+int translate_socketcall_send_enter(Tracee *tracee, word_t call, word_t *args_addr);
 
 #endif /* SOCKET_H */

@@ -122,6 +122,23 @@ static void force_fork_sysexit(Tracee *tracee)
 }
 
 /**
+ * Force PRoot to intercept the exit stage of the syscall the @tracee
+ * is entering, whose arguments now point to data PRoot pushed below
+ * its stack pointer.  On the seccomp PTRACE_CONT fast path, the stack
+ * pointer is given back before the syscall runs: a signal handler
+ * that interrupts a blocking syscall then overwrites these data, and
+ * the syscall is restarted with arguments that point to garbage.  The
+ * exit stage keeps the stack pointer lowered until the syscall is
+ * over and restores the original arguments, so a restarted syscall
+ * is translated anew.
+ */
+static void keep_pushed_args(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
  * Translate @path and put the result in the @tracee's memory address
  * space pointed to by the @reg argument of the current syscall. See
  * the documentation of translate_path() about the meaning of
@@ -2135,6 +2152,7 @@ int translate_syscall_enter(Tracee *tracee)
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 		word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
+		word_t address;
 		struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
 
 		if (sock != NULL) {
@@ -2146,6 +2164,19 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 		}
 		note_netns_netlink_request(tracee, fd, buf, len);
+
+		/* The destination can be a named Unix domain socket,
+		 * as the address given to connect(2).  */
+		address = peek_reg(tracee, CURRENT, SYSARG_5);
+		status = translate_send_address(tracee, &address,
+						(int) peek_reg(tracee, CURRENT, SYSARG_6));
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_5, address);
+		poke_reg(tracee, SYSARG_6, sizeof(struct sockaddr_un));
+		keep_pushed_args(tracee);
+
 		status = 0;
 		break;
 	}
@@ -2180,6 +2211,32 @@ int translate_syscall_enter(Tracee *tracee)
 		if (   is_netns_netlink_fd(tracee, fd)
 		    && msghdr_first_iovec(tracee, msghdr_addr, &base, &len))
 			note_netns_netlink_request(tracee, fd, base, len);
+
+		/* msg_name is the destination, see PR_sendto above.  */
+		status = translate_sendmsg_enter(tracee, &msghdr_addr);
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_2, msghdr_addr);
+		keep_pushed_args(tracee);
+
+		status = 0;
+		break;
+	}
+
+	case PR_sendmmsg: {
+		word_t vector = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t vlen   = (unsigned int) peek_reg(tracee, CURRENT, SYSARG_3);
+
+		/* Each msg_name is a destination, see PR_sendto above.  */
+		status = translate_sendmmsg_enter(tracee, &vector, &vlen);
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_2, vector);
+		poke_reg(tracee, SYSARG_3, vlen);
+		keep_pushed_args(tracee);
+
 		status = 0;
 		break;
 	}
@@ -2363,6 +2420,21 @@ int translate_syscall_enter(Tracee *tracee)
 
 			/* See case PR_accept for explanation.  */
 			poke_reg(tracee, SYSARG_6, size);
+			status = 0;
+			break;
+
+		case SYS_SENDTO:
+		case SYS_SENDMSG:
+		case SYS_SENDMMSG:
+			/* See case PR_sendto and the following ones.  */
+			status = translate_socketcall_send_enter(tracee,
+					peek_reg(tracee, CURRENT, SYSARG_1), &args_addr);
+			if (status <= 0)
+				break;
+
+			poke_reg(tracee, SYSARG_2, args_addr);
+			keep_pushed_args(tracee);
+
 			status = 0;
 			break;
 

@@ -155,6 +155,21 @@ void translate_syscall_exit(Tracee *tracee)
 		goto end;
 	}
 
+	case PR_sendmmsg: {
+		word_t vector = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		word_t copy   = peek_reg(tracee, MODIFIED, SYSARG_2);
+
+		/* Nothing to report if nothing was sent, or if the kernel
+		 * used the tracee's vector, see the enter stage.  */
+		if ((int) syscall_result <= 0 || copy == vector)
+			goto end;
+
+		/* These messages were sent anyway: don't overwrite the
+		 * syscall result.  */
+		(void) translate_sendmmsg_exit(tracee, vector, copy, syscall_result);
+		goto end;
+	}
+
 #define SYSARG_ADDR(n) (args_addr + ((n) - 1) * sizeof_word(tracee))
 
 #define POKE_WORD(addr, value)			\
@@ -204,6 +219,28 @@ void translate_syscall_exit(Tracee *tracee)
 
 			status = 0;
 			break;
+
+		case SYS_SENDMMSG: {
+			word_t copy_args_addr = peek_reg(tracee, MODIFIED, SYSARG_2);
+			word_t vector;
+			word_t copy;
+
+			/* See case PR_sendmmsg.  These messages were sent
+			 * anyway: don't overwrite the syscall result.  */
+			if ((int) syscall_result <= 0 || copy_args_addr == args_addr)
+				goto end;
+
+			vector = peek_word(tracee, SYSARG_ADDR(2));
+			if (errno != 0)
+				goto end;
+
+			copy = peek_word(tracee, copy_args_addr + sizeof_word(tracee));
+			if (errno != 0 || copy == vector)
+				goto end;
+
+			(void) translate_sendmmsg_exit(tracee, vector, copy, syscall_result);
+			goto end;
+		}
 
 		default:
 			status = 0;
