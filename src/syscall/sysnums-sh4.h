@@ -342,4 +342,5 @@ static const Sysnum sysnums_sh4[] = {
 	[ 435 ] = PR_clone3,
 	[ 437 ] = PR_openat2,
 	[ 439 ] = PR_faccessat2,
+	[ 452 ] = PR_fchmodat2,
 };

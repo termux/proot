@@ -359,4 +359,5 @@ static const Sysnum sysnums_arm[] = {
 	[ 439 ] = PR_faccessat2,
 	[ 435 ] = PR_clone3,
 	[ 437 ] = PR_openat2,
+	[ 452 ] = PR_fchmodat2,
 };
