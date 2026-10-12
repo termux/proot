@@ -111,7 +111,8 @@ ROOTFS_BIN = $(ROOTFS)/bin/true $(ROOTFS)/bin/false    				 \
        $(ROOTFS)/bin/puts_proc_self_exe $(ROOTFS)/bin/exec $(ROOTFS)/bin/exec-m32 \
        $(ROOTFS)/bin/exec-suid $(ROOTFS)/bin/exec-sgid $(ROOTFS)/bin/exec-m32-suid \
        $(ROOTFS)/bin/exec-m32-sgid $(ROOTFS)/bin/getresuid $(ROOTFS)/bin/getresgid \
-       $(ROOTFS)/bin/open_nofollow $(ROOTFS)/bin/fchmodat2
+       $(ROOTFS)/bin/open_nofollow $(ROOTFS)/bin/fchmodat2 \
+       $(ROOTFS)/bin/open_tree
 
 ROOTFS_DIR = $(ROOTFS)/bin $(ROOTFS)/tmp
 
