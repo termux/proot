@@ -135,9 +135,19 @@ typedef unsigned char byte_t;
     #define OFFSETOF_STAT_UID_32 24
     #define OFFSETOF_STAT_GID_32 28
 
-    #define LOADER_ADDRESS     0x2000000000
-    #define EXEC_PIC_ADDRESS   0x3000000000
-    #define INTERP_PIC_ADDRESS 0x3f00000000
+    /* These are fixed mappings, so they split the address space of the
+     * tracee.  Android kernels often have only 39 bits of user address
+     * space (512 GiB), where the former 128..253 GiB placement left
+     * no hole bigger than ~260 GiB (less once mmap(2) is randomized),
+     * and a large reservation like mmap(NULL, 256 GiB, PROT_NONE, ...)
+     * failed with ENOMEM under PRoot only.  Keep them together, right
+     * below where the kernel itself loads PIE executables (2/3 of
+     * 512 GiB), so that [0, 336 GiB) stays one free hole as natively.
+     * They must also stay above 128 GiB, which is the start of the
+     * app memory expected by ASan on 39-bit.  */
+    #define LOADER_ADDRESS     0x5400000000
+    #define EXEC_PIC_ADDRESS   0x5500000000
+    #define INTERP_PIC_ADDRESS 0x5900000000
     #define HAS_POKEDATA_WORKAROUND true
 
     #define HAS_LOADER_32BIT true
