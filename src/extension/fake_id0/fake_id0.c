@@ -73,10 +73,34 @@
 #endif
 
 /**
- * Copy config->@field to the tracee's memory location pointed to by @sysarg.
+ * Return true if @sysnum is the legacy getresuid/getresgid of a 32-bit
+ * ABI, which reports 16-bit IDs; getres[ug]id32 and the syscalls of
+ * 64-bit ABIs report 32-bit IDs.
  */
-#define POKE_MEM_ID(sysarg, field) do {					\
-	poke_uint16(tracee, peek_reg(tracee, ORIGINAL, sysarg), config->field);	\
+static bool is_16bit_id_syscall(const Tracee *tracee, Sysnum sysnum)
+{
+	if (sysnum != PR_getresuid && sysnum != PR_getresgid)
+		return false;
+#if defined(ARCH_X86_64) || defined(ARCH_ARM64)
+	return get_abi(tracee) == ABI_2;
+#else
+	(void) tracee;
+	return true;
+#endif
+}
+
+/**
+ * Copy config->@field to the tracee's memory location pointed to by
+ * @sysarg, 16 or 32 bits wide according to @sysnum.  Android apps
+ * outside the owner user have IDs above 65535, so a 16-bit write
+ * would leave their high bits in the tracee's 32-bit uid_t.
+ */
+#define POKE_MEM_ID(sysnum, sysarg, field) do {				\
+	word_t address = peek_reg(tracee, ORIGINAL, sysarg);		\
+	if (is_16bit_id_syscall(tracee, sysnum))			\
+		poke_uint16(tracee, address, config->field);		\
+	else								\
+		poke_uint32(tracee, address, config->field);		\
 	if (errno != 0)							\
 		return -errno;						\
 } while (0)
@@ -559,17 +583,17 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config, bool even_if
 	return 0;
 }
 
-static int handle_getresuid_exit_end(Tracee *tracee, Config *config) {
-	POKE_MEM_ID(SYSARG_1, ruid);
-	POKE_MEM_ID(SYSARG_2, euid);
-	POKE_MEM_ID(SYSARG_3, suid);
+static int handle_getresuid_exit_end(Tracee *tracee, Config *config, Sysnum sysnum) {
+	POKE_MEM_ID(sysnum, SYSARG_1, ruid);
+	POKE_MEM_ID(sysnum, SYSARG_2, euid);
+	POKE_MEM_ID(sysnum, SYSARG_3, suid);
 	return 0;
 }
 
-static int handle_getresgid_exit_end(Tracee *tracee, Config *config) {
-	POKE_MEM_ID(SYSARG_1, rgid);
-	POKE_MEM_ID(SYSARG_2, egid);
-	POKE_MEM_ID(SYSARG_3, sgid);
+static int handle_getresgid_exit_end(Tracee *tracee, Config *config, Sysnum sysnum) {
+	POKE_MEM_ID(sysnum, SYSARG_1, rgid);
+	POKE_MEM_ID(sysnum, SYSARG_2, egid);
+	POKE_MEM_ID(sysnum, SYSARG_3, sgid);
 	return 0;
 }
 
@@ -1015,11 +1039,11 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 
 	case PR_getresuid:
 	case PR_getresuid32:
-		return handle_getresuid_exit_end(tracee, config);
+		return handle_getresuid_exit_end(tracee, config, sysnum);
 
 	case PR_getresgid:
 	case PR_getresgid32:
-		return handle_getresgid_exit_end(tracee, config);
+		return handle_getresgid_exit_end(tracee, config, sysnum);
 
 #ifdef USERLAND
 	case PR_umask:
