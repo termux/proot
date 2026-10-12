@@ -29,6 +29,7 @@ OBJECTS += \
 	execve/enter.o		\
 	execve/exit.o		\
 	execve/shebang.o	\
+	execve/binfmt.o		\
 	execve/elf.o		\
 	execve/ldso.o		\
 	execve/auxv.o		\
