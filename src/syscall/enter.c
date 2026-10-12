@@ -1820,12 +1820,17 @@ static bool is_proc_userns_file(const char *path)
 /**
  * Redirect openat()/open() of /proc/.../uid_map etc. to /dev/null so
  * that writes appear to succeed.  @reg holds the path argument; the
- * path has already been translated to host form.
+ * path has already been translated to host form.  Read-only opens go
+ * to the kernel: an empty uid_map tells readers they are in a user
+ * namespace without a mapping, so tools that verify file or socket
+ * ownership (Claude Code's background daemon, for one) refuse to run.
  */
-static void maybe_redirect_userns_file(Tracee *tracee, Reg reg)
+static void maybe_redirect_userns_file(Tracee *tracee, Reg reg, int flags)
 {
 	char host_path[PATH_MAX];
 
+	if ((flags & O_ACCMODE) == O_RDONLY)
+		return;
 	if (get_sysarg_path(tracee, host_path, reg) < 0)
 		return;
 	if (!is_proc_userns_file(host_path))
@@ -2513,7 +2518,7 @@ int translate_syscall_enter(Tracee *tracee)
 		else
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		if (status >= 0)
-			maybe_redirect_userns_file(tracee, SYSARG_1);
+			maybe_redirect_userns_file(tracee, SYSARG_1, flags);
 		break;
 
 	case PR_fchownat:
@@ -2652,7 +2657,7 @@ int translate_syscall_enter(Tracee *tracee)
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		if (status >= 0)
-			maybe_redirect_userns_file(tracee, SYSARG_2);
+			maybe_redirect_userns_file(tracee, SYSARG_2, flags);
 		break;
 
 	case PR_readlinkat:
