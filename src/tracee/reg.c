@@ -383,8 +383,10 @@ int push_regs(Tracee *tracee) {
 
 word_t get_systrap_size(Tracee *tracee) {
 #if defined(ARCH_ARM_EABI)
-	/* On ARM thumb mode systrap size is 2 */
-	if (tracee->_regs[CURRENT].ARM_cpsr & PSR_T_BIT) {
+	/* On ARM thumb mode systrap size is 2.  uregs[16] is CPSR and 0x20 its
+	 * Thumb bit: ARM_cpsr and PSR_T_BIT come from bionic's headers only,
+	 * while struct user_regs is uregs[18] on both bionic and glibc. */
+	if (tracee->_regs[CURRENT].uregs[16] & 0x20) {
 		return 2;
 	}
 #elif defined(ARCH_ARM64)
