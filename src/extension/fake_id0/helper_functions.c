@@ -12,8 +12,6 @@
 #include "extension/fake_id0/config.h"
 #include "extension/fake_id0/helper_functions.h"
 
-#define META_TAG ".proot-meta-file."
-
 #define OWNER_PERMS	 0
 #define GROUP_PERMS	 1
 #define OTHER_PERMS	 2
