@@ -1388,6 +1388,21 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return handle_sysexit_end(extension);
 	}
 
+#ifdef USERLAND
+	/* fake_id0 emulates fstat(2) with a readlinkat(2) of
+	 * /proc/<pid>/fd/<fd> and a chained fstatat(2) of its target.  */
+	case SYSCALL_CHAINED_EXIT: {
+		Tracee *tracee = TRACEE(extension);
+		word_t sysnum = get_sysnum(tracee, ORIGINAL);
+		word_t chained_sysnum = get_sysnum(tracee, CURRENT);
+
+		if ((sysnum == PR_fstat || sysnum == PR_fstat64)
+		    && (chained_sysnum == PR_fstatat64 || chained_sysnum == PR_newfstatat))
+			return handle_sysexit_end(extension);
+		return 0;
+	}
+#endif
+
 	case GUEST_PATH: {
 		/* A new path is about to be canonicalized.  */
 		Link2SymlinkConfig *config = get_config(extension, false);
