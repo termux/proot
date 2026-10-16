@@ -965,9 +965,11 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		if ((int)result <= 0)
 			return result;
+		if (result >= PATH_MAX)
+			return -ENAMETOOLONG;
 
-		status = read_sysarg_path(tracee, path, SYSARG_3, MODIFIED);
-		if(status < 0) 
+		status = read_data(tracee, path, peek_reg(tracee, MODIFIED, SYSARG_3), result);
+		if (status < 0)
 			return status;
 
 		path[result] = '\0';
