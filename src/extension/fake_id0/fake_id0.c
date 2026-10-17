@@ -681,10 +681,21 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	case PR_fchmod: 
 		return handle_chmod_enter_end(tracee, IGNORE_SYSARG, SYSARG_2, 
 			SYSARG_1, IGNORE_SYSARG, config);
+	/* int fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags) */
+	case PR_fchmodat2: {
+		char path[2];
+
+		/* With AT_EMPTY_PATH, an empty path makes fchmodat2 act on
+		 * dirfd itself, as fchmod does.  */
+		if ((peek_reg(tracee, ORIGINAL, SYSARG_4) & AT_EMPTY_PATH) != 0
+		    && read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(path)) > 0
+		    && path[0] == '\0')
+			return handle_chmod_enter_end(tracee, IGNORE_SYSARG, SYSARG_3,
+				SYSARG_1, IGNORE_SYSARG, config);
+	}
+		/* Fall through.  */
 	/* int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags (unused)) */
-	/* int fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags (unused)) */
 	case PR_fchmodat:
-	case PR_fchmodat2:
 		return handle_chmod_enter_end(tracee, SYSARG_2, SYSARG_3, 
 			IGNORE_SYSARG, SYSARG_1, config);
 
