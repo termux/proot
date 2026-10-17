@@ -330,6 +330,9 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_linkat,		FILTER_SYSEXIT },
 	{ PR_mkdir,		FILTER_SYSEXIT },
 	{ PR_mkdirat,		FILTER_SYSEXIT },
+	{ PR_rename,		FILTER_SYSEXIT },
+	{ PR_renameat,		FILTER_SYSEXIT },
+	{ PR_renameat2,		FILTER_SYSEXIT },
 	{ PR_symlink,		FILTER_SYSEXIT },
 	{ PR_symlinkat,		FILTER_SYSEXIT },
 	{ PR_umask,		FILTER_SYSEXIT },
@@ -665,16 +668,15 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	case PR_unlink:
 		return handle_unlink_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, config);
 
-	/* handle_rename(tracee, oldfd_sysarg, oldpath_sysarg, newfd_sysarg, newpath_sysarg, flags_sysarg, config) */
+	/* handle_rename(tracee, oldfd_sysarg, oldpath_sysarg, newfd_sysarg, newpath_sysarg, config) */
 	/* int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) */
 	case PR_renameat2:
-		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, SYSARG_5, config);
 	/* int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) */
 	case PR_renameat:
-		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, IGNORE_SYSARG, config);
+		return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, config);
 	/* int rename(const char *oldpath, const char *newpath) */
 	case PR_rename:
-		return handle_rename_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, IGNORE_SYSARG, SYSARG_2, IGNORE_SYSARG, config);
+		return handle_rename_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, IGNORE_SYSARG, SYSARG_2, config);
 
 	/* handle_chmod(tracee, path_sysarg, mode_sysarg, fd_sysarg, dirfd_sysarg, config) */
 	/* int chmod(const char *pathname, mode_t mode) */
@@ -1144,6 +1146,14 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_getsockopt_exit_end(tracee);
 
 #ifdef USERLAND
+	/* handle_rename_exit_end(tracee, oldpath_sysarg, newpath_sysarg, flags_sysarg, config) */
+	case PR_renameat2:
+		return handle_rename_exit_end(tracee, SYSARG_2, SYSARG_4, SYSARG_5, config);
+	case PR_renameat:
+		return handle_rename_exit_end(tracee, SYSARG_2, SYSARG_4, IGNORE_SYSARG, config);
+	case PR_rename:
+		return handle_rename_exit_end(tracee, SYSARG_1, SYSARG_2, IGNORE_SYSARG, config);
+
 /** Check to see if a meta was created for a file that no longer exists.
  *  If so, delete it.
  */
