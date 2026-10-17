@@ -60,7 +60,9 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 	if(config->euid != owner && config->euid != 0) 
 		return -EPERM;
 
-	call_mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
+	/* Like the kernel, use only the permission bits: callers such as
+	 * cp -p pass a whole st_mode, file type included.  */
+	call_mode = peek_reg(tracee, ORIGINAL, mode_sysarg) & 07777;
 	status = write_meta_file(meta_path, call_mode, owner, group, 0, config);
 	if(status < 0)
 		return status;
