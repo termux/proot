@@ -31,6 +31,14 @@ typedef struct {
 	 * a follow-up capset() lets a process retain CAP_SETUID/CAP_SETGID
 	 * across setresuid().  Cleared by execve, per Linux semantics. */
 	bool keep_caps;
+
+#ifdef USERLAND
+	/* Host path of the file whose meta file is to get pending_mode
+	 * once the current chmod(2) family syscall succeeds, NULL if
+	 * there's no such file.  */
+	char *pending_path;
+	mode_t pending_mode;
+#endif
 } Config;
 
 #endif /* FAKE_ID0_CONFIG_H */

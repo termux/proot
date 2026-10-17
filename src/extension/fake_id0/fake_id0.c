@@ -1101,18 +1101,35 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_mknod:
 	case PR_mknodat:
 	case PR_capset:
+#ifndef USERLAND
 	case PR_chmod:
+#endif
 	case PR_chown:
+#ifndef USERLAND
 	case PR_fchmod:
+#endif
 	case PR_fchown:
 	case PR_lchown:
 	case PR_chown32:
 	case PR_fchown32:
 	case PR_lchown32:
+#ifndef USERLAND
 	case PR_fchmodat:
 	case PR_fchmodat2:
+#endif
 	case PR_fchownat: 
 		return handle_perm_err_exit_end(tracee, config, false);
+
+#ifdef USERLAND
+	case PR_chmod:
+	case PR_fchmod:
+	case PR_fchmodat:
+	case PR_fchmodat2:
+		/* Record the new mode once a permission error may have
+		 * been turned into a success.  */
+		(void) handle_perm_err_exit_end(tracee, config, false);
+		return handle_chmod_exit_end(tracee, config);
+#endif
 
 	case PR_setxattr:
 	case PR_lsetxattr:
@@ -1319,6 +1336,9 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->keep_caps = false;
 			/* Set the umask to the typical linux value. */
 			config->umask = 022;
+#ifdef USERLAND
+		config->pending_path = NULL;
+#endif
 
 		extension->filtered_sysnums = filtered_sysnums;
 		return 0;
@@ -1346,6 +1366,10 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 			return -1;
 
 		memcpy(extension->config, parent->config, sizeof(Config));
+#ifdef USERLAND
+		/* This one belongs to the parent's current syscall.  */
+		((Config *) extension->config)->pending_path = NULL;
+#endif
 		return 0;
 	}
 

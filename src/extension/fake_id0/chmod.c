@@ -1,15 +1,18 @@
 #include <errno.h>
 #include <linux/limits.h>
 #include <sys/stat.h>
+#include <talloc.h>
 
 #include "syscall/sysnum.h"
 #include "extension/fake_id0/chmod.h"
 
 #include "extension/fake_id0/helper_functions.h"
 
-/** Handles chmod, fchmod, fchmodat, and fchmodat2 syscalls. Changes meta files
- *  to the new permissions if the meta file exists. See chmod(2) for returned
- *  permission errors.
+#ifdef USERLAND
+/** Handles chmod, fchmod, fchmodat, and fchmodat2 syscalls. If the meta file
+ *  of the file exists, lets the kernel apply the new permissions to the real
+ *  file and has handle_chmod_exit_end() write them to the meta file. See
+ *  chmod(2) for returned permission errors.
  */
 int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg, 
 	Reg fd_sysarg, Reg dirfd_sysarg, Config *config)
@@ -22,6 +25,8 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 	char path[PATH_MAX];
 	char rel_path[PATH_MAX];
 	char meta_path[PATH_MAX];
+
+	TALLOC_FREE(config->pending_path);
 
 	// When path_sysarg is set to IGNORE, the call being handled is fchmod.
 	if(path_sysarg == IGNORE_SYSARG) 
@@ -63,9 +68,13 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 	/* Like the kernel, use only the permission bits: callers such as
 	 * cp -p pass a whole st_mode, file type included.  */
 	call_mode = peek_reg(tracee, ORIGINAL, mode_sysarg) & 07777;
-	status = write_meta_file(meta_path, call_mode, owner, group, 0, config);
-	if(status < 0)
-		return status;
+
+	/* The kernel may still reject the call: write the meta file
+	 * only once it has applied the mode.  */
+	config->pending_path = talloc_strdup(config, path);
+	if(config->pending_path == NULL)
+		return -ENOMEM;
+	config->pending_mode = call_mode;
 
 	/* The kernel still checks the real mode, execute permission
 	 * in particular: apply the mode to the real file too. Its owner,
@@ -79,3 +88,29 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 	poke_reg(tracee, mode_sysarg, real_mode);
 	return 0;
 }
+
+/** Writes to the meta file the mode that handle_chmod_enter_end() left
+ *  pending, if the syscall succeeded.
+ */
+int handle_chmod_exit_end(Tracee *tracee, Config *config)
+{
+	int status = 0;
+	mode_t read_mode;
+	uid_t owner;
+	gid_t group;
+	char meta_path[PATH_MAX];
+
+	if(config->pending_path == NULL)
+		return 0;
+
+	if((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0
+	   && get_meta_path(config->pending_path, meta_path) == 0
+	   && path_exists(meta_path) == 0) {
+		read_meta_file(meta_path, &read_mode, &owner, &group, config);
+		status = write_meta_file(meta_path, config->pending_mode, owner, group, 0, config);
+	}
+
+	TALLOC_FREE(config->pending_path);
+	return status;
+}
+#endif /* ifdef USERLAND */
