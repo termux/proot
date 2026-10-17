@@ -699,6 +699,16 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return handle_chmod_enter_end(tracee, SYSARG_2, SYSARG_3, 
 			IGNORE_SYSARG, SYSARG_1, config);
 
+	/* handle_acl(tracee, path_sysarg, fd_sysarg, config) */
+	/* int setxattr(const char *path, const char *name, const void *value, size_t size, int flags) */
+	/* int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) */
+	case PR_setxattr:
+	case PR_lsetxattr:
+		return handle_acl_enter_end(tracee, SYSARG_1, IGNORE_SYSARG, config);
+	/* int fsetxattr(int fd, const char *name, const void *value, size_t size, int flags) */
+	case PR_fsetxattr:
+		return handle_acl_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, config);
+
 	/* handle_chown(tracee, path_sysarg, owner_sysarg, group_sysarg, fd_sysarg, dirfd_sysarg, config) */
 	/* int chown(const char *pathname, uid_t owner, gid_t group) */
 	case PR_chown:
@@ -1134,6 +1144,11 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_setxattr:
 	case PR_lsetxattr:
 	case PR_fsetxattr:
+#ifdef USERLAND
+		/* Before a permission error is turned into a success: the
+		 * ACL, if any, didn't change the mode then.  */
+		(void) handle_acl_exit_end(tracee, config);
+#endif
 		return handle_perm_err_exit_end(tracee, config, true);
 
 	case PR_socket: 
