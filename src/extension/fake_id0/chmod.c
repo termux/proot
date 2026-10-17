@@ -24,8 +24,16 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 	// When path_sysarg is set to IGNORE, the call being handled is fchmod.
 	if(path_sysarg == IGNORE_SYSARG) 
 		status = get_fd_path(tracee, path, fd_sysarg, CURRENT);
-	else
+	else {
 		status = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
+		/* chmod("/proc/self/fd/<n>") is how programs change the mode of
+		 * a file they have open where the kernel lacks fchmodat2(2).  */
+		if(status == 1) {
+			int resolved = resolve_proc_fd_path(tracee, path);
+			if(resolved >= 0)
+				status = resolved;
+		}
+	}
 	if(status < 0)
 		return status;
 	// If the file exists outside the guestfs, drop the syscall.
