@@ -1,5 +1,6 @@
 #include <linux/limits.h>
 #include <fcntl.h>       /* AT_EMPTY_PATH, */
+#include <string.h>      /* strcpy(3), */
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <unistd.h>	  /* get*id(2),  */
 #include <assert.h>	  /* assert(3), */
@@ -99,10 +100,17 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 	else 
 		status = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
 
-	/* fstatat(fd, "", buf, AT_EMPTY_PATH) stats the descriptor itself.  */
+	/* fstatat(fd, "", buf, AT_EMPTY_PATH) stats the descriptor itself: use
+	 * the path of the file it is open on if that is in the guestfs. Other
+	 * descriptors (pipes, sockets, ...) keep the empty path, which gets the
+	 * uid/gid mapping below.  */
 	if((sysnum == PR_fstatat64 || sysnum == PR_newfstatat) && status == 0 && path[0] == '\0'
-	   && (peek_reg(tracee, MODIFIED, SYSARG_4) & AT_EMPTY_PATH) != 0)
-		status = get_fd_path(tracee, path, SYSARG_1, MODIFIED);
+	   && (peek_reg(tracee, MODIFIED, SYSARG_4) & AT_EMPTY_PATH) != 0) {
+		char fd_path[PATH_MAX];
+
+		if(get_fd_path(tracee, fd_path, SYSARG_1, MODIFIED) == 0)
+			strcpy(path, fd_path);
+	}
 
 	if(status < 0) 
 		return status;
