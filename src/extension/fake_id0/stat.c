@@ -1,4 +1,5 @@
 #include <linux/limits.h>
+#include <fcntl.h>       /* AT_EMPTY_PATH, */
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <unistd.h>	  /* get*id(2),  */
 #include <assert.h>	  /* assert(3), */
@@ -97,6 +98,11 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 		status = read_sysarg_path(tracee, path, SYSARG_2, MODIFIED);
 	else 
 		status = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
+
+	/* fstatat(fd, "", buf, AT_EMPTY_PATH) stats the descriptor itself.  */
+	if((sysnum == PR_fstatat64 || sysnum == PR_newfstatat) && status == 0 && path[0] == '\0'
+	   && (peek_reg(tracee, MODIFIED, SYSARG_4) & AT_EMPTY_PATH) != 0)
+		status = get_fd_path(tracee, path, SYSARG_1, MODIFIED);
 
 	if(status < 0) 
 		return status;
