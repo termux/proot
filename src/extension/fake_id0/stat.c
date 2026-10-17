@@ -168,7 +168,7 @@ int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t stat
 		}
 	}
 	if (state->statx_buf.stx_mask & STATX_GID) {
-		if (state->statx_buf.stx_gid == getuid()) {
+		if (state->statx_buf.stx_gid == getgid()) {
 			state->statx_buf.stx_gid = config->sgid;
 			state->updated_stats = true;
 		}
