@@ -78,6 +78,9 @@ int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 	if((int) owner == -1)
 		owner = read_owner;
 	group = peek_reg(tracee, ORIGINAL, group_sysarg);
+	/* Likewise for the group: chown 1000 'file' passes -1.  */
+	if((int) group == -1)
+		group = read_group;
 	if(config->euid == 0) 
 		write_meta_file(meta_path, mode, owner, group, 0, config);
 
