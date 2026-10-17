@@ -4,6 +4,7 @@
 #include <assert.h>	  /* assert(3), */
 
 #include "tracee/mem.h"
+#include "path/path.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/seccomp.h"
@@ -158,9 +159,30 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 #endif /* ifdef USERLAND */
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
-	(void) tracee;
-	// TODO: USERLAND
 	struct statx_syscall_state *state = (struct statx_syscall_state *) statx_state_raw;
+#ifdef USERLAND
+	char meta_path[PATH_MAX];
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
+
+	/* Report what the meta file says, as stat(2) does.  */
+	if (belongs_to_guestfs(tracee, state->host_path)
+	    && get_meta_path(state->host_path, meta_path) == 0
+	    && path_exists(meta_path) == 0) {
+		read_meta_file(meta_path, &mode, &uid, &gid, config);
+		if (state->statx_buf.stx_mask & STATX_MODE)
+			state->statx_buf.stx_mode = mode | (state->statx_buf.stx_mode & (S_IFMT | 07000));
+		if (state->statx_buf.stx_mask & STATX_UID)
+			state->statx_buf.stx_uid = uid;
+		if (state->statx_buf.stx_mask & STATX_GID)
+			state->statx_buf.stx_gid = gid;
+		state->updated_stats = true;
+		return 0;
+	}
+#else
+	(void) tracee;
+#endif
 	if (state->statx_buf.stx_mask & STATX_UID) {
 		if (state->statx_buf.stx_uid == getuid()) {
 			state->statx_buf.stx_uid = config->suid;
