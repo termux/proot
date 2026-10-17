@@ -97,6 +97,32 @@ int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion v
 	return 0;
 }
 
+/** A path through /proc/<pid>/fd/<n>, or /proc/self/fd/<n> (the
+ *  tracee's), stands for the file that descriptor is open on, whose meta
+ *  file isn't under /proc. Replaces path with that file's and returns 0,
+ *  or 1 if it isn't in the guestfs; returns -1 for any other path.
+ */
+int resolve_proc_fd_path(Tracee *tracee, char path[PATH_MAX])
+{
+	char target[PATH_MAX];
+	unsigned long pid, fd;
+	int end = 0;
+
+	if (sscanf(path, "/proc/self/fd/%lu%n", &fd, &end) == 1 && end > 0 && path[end] == '\0')
+		pid = tracee->pid;
+	else {
+		end = 0;
+		if (sscanf(path, "/proc/%lu/fd/%lu%n", &pid, &fd, &end) != 2
+		    || end == 0 || path[end] != '\0')
+			return -1;
+	}
+
+	if (readlink_proc_pid_fd(pid, fd, target) < 0 || target[0] != '/')
+		return -1;
+	strcpy(path, target);
+	return belongs_to_guestfs(tracee, path) ? 0 : 1;
+}
+
 /** Reads a path from path_sysarg into path.
  */
 
