@@ -626,6 +626,21 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 
+	case PR_fork:
+		/* Android's app seccomp policy only allows fork(2) on
+		 * 32-bit ABIs, yet musl calls it directly on x86_64.
+		 * fork(2) is clone(2) with just SIGCHLD and no other
+		 * argument, on every architecture PRoot supports (only
+		 * the last two arguments are ever swapped).  */
+		set_sysnum(tracee, PR_clone);
+		poke_reg(tracee, SYSARG_1, SIGCHLD);
+		poke_reg(tracee, SYSARG_2, 0);
+		poke_reg(tracee, SYSARG_3, 0);
+		poke_reg(tracee, SYSARG_4, 0);
+		poke_reg(tracee, SYSARG_5, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
 	case PR_set_robust_list:
 	default:
 		/* Set errno to -ENOSYS */
