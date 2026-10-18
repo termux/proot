@@ -631,7 +631,10 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		 * 32-bit ABIs, yet musl calls it directly on x86_64.
 		 * fork(2) is clone(2) with just SIGCHLD and no other
 		 * argument, on every architecture PRoot supports (only
-		 * the last two arguments are ever swapped).  */
+		 * the last two arguments are ever swapped).  The parent
+		 * gets back the registers overwritten here at the exit
+		 * stage, the child at its first stop (see
+		 * attach_child()).  */
 		set_sysnum(tracee, PR_clone);
 		poke_reg(tracee, SYSARG_1, SIGCHLD);
 		poke_reg(tracee, SYSARG_2, 0);

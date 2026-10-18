@@ -381,6 +381,40 @@ int push_regs(Tracee *tracee) {
 	return push_specific_regs(tracee, true);
 }
 
+/**
+ * Give @child, stopped for the first time, the registers its parent
+ * had before PRoot rewrote the syscall which created it, after the
+ * outer seccomp policy rejected that syscall (see attach_child()).
+ * They are restored as the parent's are at the exit stage (see
+ * push_specific_regs()), except the result register, which holds
+ * the child's own result, and the stack pointer, which is the
+ * child's own.
+ */
+void restore_child_regs_after_seccomp(Tracee *child)
+{
+	Reg reg;
+
+	if (!child->restore_regs_at_first_stop)
+		return;
+	child->restore_regs_at_first_stop = false;
+
+	if (fetch_regs(child) < 0) {
+		VERBOSE(child, 1, "vpid %" PRIu64 ": can't restore the registers of a new child",
+			child->vpid);
+		return;
+	}
+
+	for (reg = SYSARG_NUM; reg <= SYSARG_6; reg++) {
+		/* On ARM, SYSARG_1 is also the result register.  */
+		if (reg_offset[reg] != reg_offset[SYSARG_RESULT])
+			poke_reg(child, reg, peek_reg(child, ORIGINAL_SECCOMP_REWRITE, reg));
+	}
+
+	if (push_specific_regs(child, false) < 0)
+		VERBOSE(child, 1, "vpid %" PRIu64 ": can't restore the registers of a new child",
+			child->vpid);
+}
+
 word_t get_systrap_size(Tracee *tracee) {
 #if defined(ARCH_ARM_EABI)
 	/* On ARM thumb mode systrap size is 2 */

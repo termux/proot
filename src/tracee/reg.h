@@ -45,6 +45,7 @@ typedef enum {
 extern int fetch_regs(Tracee *tracee);
 extern int push_specific_regs(Tracee *tracee, bool including_sysnum);
 extern int push_regs(Tracee *tracee);
+extern void restore_child_regs_after_seccomp(Tracee *child);
 
 extern word_t peek_reg(const Tracee *tracee, RegVersion version, Reg reg);
 extern void poke_reg(Tracee *tracee, Reg reg, word_t value);

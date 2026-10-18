@@ -427,6 +427,12 @@ int event_loop()
 
 		tracee->running = false;
 
+		/* Fix up the registers of a new child at its first
+		 * stop (see attach_child()), before anything looks at
+		 * them, its ptracer included.  */
+		if (WIFSTOPPED(tracee_status))
+			restore_child_regs_after_seccomp(tracee);
+
 		status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
 		if (status != 0)
 			continue;

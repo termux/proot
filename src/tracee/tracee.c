@@ -603,6 +603,12 @@ int new_child(Tracee *parent, word_t clone_flags)
                 // contains the usual clone flags.
                 clone_flags = peek_word(parent, peek_reg(parent, CURRENT, SYSARG_1));
 
+	/* A fork-like syscall that PRoot restarted in place of one the
+	 * outer seccomp policy rejected (see
+	 * restart_syscall_after_seccomp()) can only be the clone(2) it
+	 * runs for fork(2).  */
+	parent->fork_rewritten_after_seccomp = parent->restore_original_regs_after_seccomp_event;
+
 	/* Get the pid of the parent's new child.  Some kernels (seen
 	 * on aarch64 4.14.357 builds) clear the message of the last
 	 * ptrace event on every ptrace request, so the PID reads as 0,
@@ -664,6 +670,18 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 #ifdef ARCH_ARM64
 	child->is_aarch32 = parent->is_aarch32;
 #endif
+
+	/* The child starts with a copy of the registers its parent
+	 * had when entering the syscall, ie. with the arguments PRoot
+	 * put there to run fork(2) as clone(2).  The kernel would have
+	 * preserved the original ones, so give them back to the child
+	 * at its first stop, as they are to the parent at the exit
+	 * stage.  */
+	if (parent->fork_rewritten_after_seccomp) {
+		parent->fork_rewritten_after_seccomp = false;
+		child->_regs[ORIGINAL_SECCOMP_REWRITE] = parent->_regs[ORIGINAL_SECCOMP_REWRITE];
+		child->restore_regs_at_first_stop = true;
+	}
 
 	/* If CLONE_VM is set, the calling process and the child
 	 * process run in the same memory space [...] any memory
@@ -846,6 +864,9 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 		bool keep_stopped = false;
 
 		child->sigstop = SIGSTOP_ALLOWED;
+
+		/* This SIGSTOP was its first stop.  */
+		restore_child_regs_after_seccomp(child);
 
 		/* Notify its ptracer if it is ready to be traced.  */
 		if (child->as_ptracee.ptracer != NULL) {
