@@ -7,6 +7,8 @@
  * deleted by wildcard expressions.
  */
 
+#include <talloc.h>
+
 #include "extension/extension.h"
 #include "tracee/mem.h"
 #include "syscall/chain.h"
@@ -64,16 +66,26 @@ static int handle_getdents(Tracee *tracee)
     switch (get_sysnum(tracee, ORIGINAL)) {
     case PR_getdents64: 
     case PR_getdents: {
-        /* get the result of the syscall, which is the number of bytes read by getdents */
-        unsigned int res = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+        /* get the result of the syscall, which is the number of bytes read by getdents,
+         * or -errno: there is nothing to hide then.  It used to be read as unsigned,
+         * so an error was taken for a huge size, and that many bytes were copied into
+         * the buffer below -- PRoot crashed whenever getdents failed.  */
+        int res = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
         if (res <= 0) {
-            return res;
+            return 0;
         }
 
         /* get the system call arguments */
         word_t orig_start = peek_reg(tracee, CURRENT, SYSARG_2);
         unsigned int count = peek_reg(tracee, CURRENT, SYSARG_3);
-        char orig[count];
+
+        /* Only the bytes the kernel filled matter, and count -- chosen by the
+         * tracee -- is no size for buffers on the stack.  */
+        char *orig = talloc_size(tracee->ctx, res);
+        char *copy = talloc_size(tracee->ctx, res);
+        if (orig == NULL || copy == NULL) {
+            return 0;
+        }
 
         char path[PATH_MAX];
         int status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, ORIGINAL, SYSARG_1), path);
@@ -89,8 +101,6 @@ static int handle_getdents(Tracee *tracee)
             return status;
         }
 
-        /* allocate a space for the copy of the data we want */
-        char copy[count];
         /* curr will hold the current struct we're examining */
         struct linux_dirent64 *curr64;
         struct linux_dirent *curr32;

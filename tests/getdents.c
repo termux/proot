@@ -2,17 +2,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
-/* List DIR with getdents64(2) -- and with getdents(2) where the ABI has
- * it -- both with a large buffer and with a buffer that holds a single
- * entry, then print "<syscall> <name> <d_type> <type from lstat>" for
- * each entry but "." and "..".  This program exits with 1 if any d_type
- * is not the type lstat(2) reports, or if a listing fails.  */
+/* List PATH with getdents64(2) -- and with getdents(2) where the ABI
+ * has it -- both with a large buffer and with a buffer that holds a
+ * single entry, then print "<syscall> <name> <d_type> <type from lstat>"
+ * for each entry but "." and "..", or "<syscall> error <errno>" when a
+ * listing fails.  PATH is opened as is, so that a file that is not a
+ * directory makes getdents(2) itself fail.  This program exits with 1
+ * if any d_type is not the type lstat(2) reports, or if a listing
+ * fails.  */
 
 struct dirent64_raw {
 	unsigned long long d_ino;
@@ -57,7 +61,7 @@ static int list(const char *path, int use_getdents64, size_t size)
 	int fd;
 
 	buffer = malloc(size);
-	fd = open(path, O_RDONLY | O_DIRECTORY);
+	fd = open(path, O_RDONLY);
 	if (buffer == NULL || fd < 0) {
 		perror(path);
 		return 1;
@@ -71,7 +75,7 @@ static int list(const char *path, int use_getdents64, size_t size)
 #endif
 			result = syscall(SYS_getdents64, fd, buffer, size);
 		if (result < 0) {
-			perror(syscall_name);
+			printf("%s error %d\n", syscall_name, errno);
 			status = 1;
 			break;
 		}
@@ -109,7 +113,7 @@ int main(int argc, char *argv[])
 	int status = 0;
 
 	if (argc != 2) {
-		fprintf(stderr, "usage: %s DIR\n", argv[0]);
+		fprintf(stderr, "usage: %s PATH\n", argv[0]);
 		return 2;
 	}
 
