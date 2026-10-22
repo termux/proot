@@ -10,6 +10,7 @@
 #include <limits.h>    /* PATH_MAX, */
 #include <ctype.h>     /* isdigit, */
 #include <stdbool.h>   /* bool, true, false, */
+#include <dirent.h>    /* DT_LNK, IFTODT, */
 #include <talloc.h>    /* talloc_*, */
 
 #include "cli/note.h"
@@ -38,6 +39,10 @@
 #endif
 #ifndef RENAME_EXCHANGE
 #define RENAME_EXCHANGE (1 << 1)
+#endif
+
+#ifndef IFTODT
+#define IFTODT(mode) (((mode) & S_IFMT) >> 12)
 #endif
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
@@ -1146,6 +1151,158 @@ static void forget_removed_link(Extension *extension)
 }
 
 /**
+ * Return the d_type of what lstat(2) reports to the tracee for @path --
+ * a host path -- if it is a faked hard link, that is, the type of its
+ * file, c.f. translated_path().  This function returns -errno if @path
+ * is not a faked hard link, or if its file can't be reached.
+ */
+static int get_faked_hard_link_type(const char path[PATH_MAX])
+{
+	char final[PATH_MAX];
+	struct stat statl;
+	int status;
+
+	status = resolve_faked_hard_link(path, final);
+	if (status < 0)
+		return status;
+
+	/* The paths this extension records are absolute; a relative one
+	 * would be resolved against the directory of PRoot.  */
+	if (final[0] != '/')
+		return -EINVAL;
+
+	if (l2s_lstat(final, &statl) < 0)
+		return -errno;
+
+	return IFTODT(statl.st_mode);
+}
+
+/**
+ * Give the faked hard links listed by the getdents(2) or getdents64(2)
+ * @tracee has just performed the type lstat(2) reports for them, instead
+ * of DT_LNK, the type of the symbolic links they really are.  Programs
+ * that rely on d_type -- "find -type f", ripgrep, Rust's
+ * DirEntry::file_type(), Python's DirEntry.is_symlink() -- otherwise see
+ * a symbolic link where lstat(2) sees a regular file, then skip it or
+ * trip over the contradiction.
+ *
+ * Intermediates are left alone: they are symbolic links to statx(2),
+ * hence to most recent programs, even though the stat(2) family reports
+ * them as the file they point to, c.f. handle_sysexit_end().
+ *
+ * This syscall is never failed: an entry that can't be checked is left
+ * as the kernel reported it.
+ */
+static int handle_getdents_exit(Tracee *tracee)
+{
+	char directory[PATH_MAX];
+	char path[PATH_MAX];
+	bool directory_known = false;
+	bool dirent64;
+	size_t reclen_offset;
+	size_t name_offset;
+	size_t type_offset;
+	size_t first_modified;
+	size_t last_modified;
+	size_t offset;
+	size_t length;
+	unsigned short reclen;
+	const char *name;
+	char *buffer;
+	word_t address;
+	int status;
+	int fd;
+
+	status = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if (status <= 0)
+		return 0;
+	length = status;
+
+	/* The first argument is overwritten by the result on some
+	 * architectures, hence ORIGINAL.  */
+	fd = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+	address = peek_reg(tracee, ORIGINAL, SYSARG_2);
+
+	dirent64 = (get_sysnum(tracee, ORIGINAL) == PR_getdents64);
+	if (dirent64) {
+		/* struct linux_dirent64: 64-bit d_ino and d_off whatever
+		 * the ABI, d_reclen, d_type, then d_name.  */
+		reclen_offset = 16;
+		name_offset = 19;
+	}
+	else {
+		/* struct linux_dirent: d_ino and d_off of a word each,
+		 * d_reclen, d_name, then d_type in the last byte of the
+		 * record.  */
+		reclen_offset = 2 * sizeof_word(tracee);
+		name_offset = reclen_offset + 2;
+	}
+
+	buffer = talloc_size(tracee->ctx, length);
+	if (buffer == NULL)
+		return 0;
+
+	status = read_data(tracee, buffer, address, length);
+	if (status < 0)
+		return 0;
+
+	first_modified = length;
+	last_modified = 0;
+
+	for (offset = 0; offset + name_offset < length; offset += reclen) {
+		memcpy(&reclen, buffer + offset + reclen_offset, sizeof(reclen));
+
+		/* Room for an empty name at least, plus d_type at the end
+		 * for struct linux_dirent.  */
+		if (reclen < name_offset + 2 || reclen > length - offset)
+			break;
+
+		type_offset = (dirent64 ? 18 : reclen - 1u);
+		if ((unsigned char) buffer[offset + type_offset] != DT_LNK)
+			continue;
+
+		name = buffer + offset + name_offset;
+		if (memchr(name, '\0', reclen - name_offset) == NULL)
+			break;
+
+		/* Only now that it's needed: most directories hold no
+		 * symbolic link at all.  */
+		if (!directory_known) {
+			status = readlink_proc_pid_fd(tracee->pid, fd, directory);
+			if (status < 0 || directory[0] != '/')
+				return 0;
+			if (strcmp(directory, "/") == 0)
+				directory[0] = '\0';
+			directory_known = true;
+		}
+
+		status = snprintf(path, PATH_MAX, "%s/%s", directory, name);
+		if (status < 0 || status >= PATH_MAX)
+			continue;
+
+		status = get_faked_hard_link_type(path);
+		if (status < 0 || status == DT_LNK)
+			continue;
+
+		buffer[offset + type_offset] = status;
+
+		if (first_modified == length)
+			first_modified = offset + type_offset;
+		last_modified = offset + type_offset;
+	}
+
+	if (first_modified == length)
+		return 0;
+
+	/* Only the span of the entries that changed: without
+	 * process_vm_writev(2), this is written word by word.  */
+	(void) write_data(tracee, address + first_modified, buffer + first_modified,
+			last_modified - first_modified + 1);
+
+	return 0;
+}
+
+/**
  * sizeof(struct stat) cut to contain only fields that are at same addresses
  * regardless of whenever tracee is 32-bit or 64-bit.
  *
@@ -1341,6 +1498,10 @@ static int handle_sysexit_end(Extension *extension)
 
 		return 0;
 	}
+
+	case PR_getdents:                  //int getdents(unsigned int fd, struct linux_dirent *dirp, unsigned int count);
+	case PR_getdents64:                //ssize_t getdents64(int fd, void *dirp, size_t count);
+		return handle_getdents_exit(tracee);
 
 	default:
 		return 0;
@@ -1574,6 +1735,8 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			{ PR_rename,		FILTER_SYSEXIT },
 			{ PR_renameat,		FILTER_SYSEXIT },
 			{ PR_renameat2,		FILTER_SYSEXIT },
+			{ PR_getdents,		FILTER_SYSEXIT },
+			{ PR_getdents64,	FILTER_SYSEXIT },
 			FILTERED_SYSNUM_END,
 		};
 		extension->filtered_sysnums = filtered_sysnums;
@@ -1729,20 +1892,26 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return handle_sysexit_end(extension);
 	}
 
-#ifdef USERLAND
-	/* fake_id0 emulates fstat(2) with a readlinkat(2) of
-	 * /proc/<pid>/fd/<fd> and a chained fstatat(2) of its target.  */
 	case SYSCALL_CHAINED_EXIT: {
 		Tracee *tracee = TRACEE(extension);
 		word_t sysnum = get_sysnum(tracee, ORIGINAL);
 		word_t chained_sysnum = get_sysnum(tracee, CURRENT);
 
+		/* hidden_files reissues getdents(2), with the same
+		 * arguments, when it hid every entry it returned.  */
+		if ((sysnum == PR_getdents || sysnum == PR_getdents64) && chained_sysnum == sysnum)
+			return handle_getdents_exit(tracee);
+
+#ifdef USERLAND
+		/* fake_id0 emulates fstat(2) with a readlinkat(2) of
+		 * /proc/<pid>/fd/<fd> and a chained fstatat(2) of its
+		 * target.  */
 		if ((sysnum == PR_fstat || sysnum == PR_fstat64)
 		    && (chained_sysnum == PR_fstatat64 || chained_sysnum == PR_newfstatat))
 			return handle_sysexit_end(extension);
+#endif
 		return 0;
 	}
-#endif
 
 	case GUEST_PATH: {
 		/* A new path is about to be canonicalized.  */
