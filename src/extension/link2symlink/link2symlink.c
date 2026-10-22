@@ -781,9 +781,11 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		 * moved, then left without any name when the intermediate
 		 * could not be created.  The final file a broken chain left
 		 * behind is not replaced either, and nothing is moved when
-		 * there's no free slot left.  */
+		 * there's no free slot left.  The suffix has 4 digits, so
+		 * up to 9999 files of the same name can be linked at once:
+		 * per directory, or in the whole l2s directory.  */
 		for (intermediate_suffix = 1; ; intermediate_suffix++) {
-			if (intermediate_suffix >= 1000)
+			if (intermediate_suffix > 9999)
 				return -EMLINK;
 
 			status = snprintf(final, PATH_MAX, "%s%04d.0002", intermediate, intermediate_suffix);

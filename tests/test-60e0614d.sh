@@ -1,4 +1,4 @@
-if [ -z "$(which mcookie)" ] || [ -z "$(which gcc)" ] || [ -z "$(which find)" ]; then
+if [ -z "$(which mcookie)" ] || [ -z "$(which gcc)" ] || [ -z "$(which find)" ] || [ -z "$(which xargs)" ]; then
     exit 125;
 fi
 
@@ -27,7 +27,8 @@ ln -s nowhere "${DIR}/.l2s.a0001"
 echo new > "${DIR}/c"
 echo old > "${DIR}/.l2s.c0001.0002"
 
-# No free intermediate left.
+# No free intermediate left: 0001 to 0999 are taken by intermediates,
+# 1000 to 9999 by the final files of broken chains.
 echo mine > "${DIR}/e"
 I=1
 while [ ${I} -le 999 ]; do
@@ -35,6 +36,10 @@ while [ ${I} -le 999 ]; do
     I=$((I + 1))
 done
 echo other > "${DIR}/.l2s.e0999.0002"
+while [ ${I} -le 9999 ]; do
+    printf '%s/.l2s.e%04d.0002\n' "${DIR}" ${I}
+    I=$((I + 1))
+done | xargs touch
 
 # A dangling intermediate in the l2s directory.
 echo 7 > "${DIR}/g"
