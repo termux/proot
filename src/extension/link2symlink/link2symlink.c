@@ -238,7 +238,7 @@ static int l2s_entry(const char *path, int *dir_fd, const char **name)
  * when that is where it lies.  They keep the return convention of the
  * calls they stand for: 0 or -1 with errno set.
  */
-static int l2s_access(const char *path)
+static int l2s_lstat(const char *path, struct stat *statl)
 {
 	const char *name;
 	int dir_fd;
@@ -246,9 +246,7 @@ static int l2s_access(const char *path)
 	if (l2s_entry(path, &dir_fd, &name) < 0)
 		return -1;
 
-	/* No AT_SYMLINK_NOFOLLOW: access(2) follows, and a dangling
-	 * intermediate has always counted as a free slot here.  */
-	return (dir_fd < 0) ? access(path, F_OK) : faccessat(dir_fd, name, F_OK, 0);
+	return (dir_fd < 0) ? lstat(path, statl) : fstatat(dir_fd, name, statl, AT_SYMLINK_NOFOLLOW);
 }
 
 static int l2s_symlink(const char *target, const char *path)
@@ -726,31 +724,58 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	}
 
 	if (first_link) {
-		/*Move the original content to the new path. */
-		do {
+		/* Reserve a free intermediate by creating it, pointing to
+		 * the final file the original one is about to become, since
+		 * symlink(2) fails on anything in the way.  The slot used to
+		 * be told free by access(2), which follows a dangling
+		 * intermediate -- that of a broken chain -- so the file was
+		 * moved, then left without any name when the intermediate
+		 * could not be created.  The final file a broken chain left
+		 * behind is not replaced either, and nothing is moved when
+		 * there's no free slot left.  */
+		for (intermediate_suffix = 1; ; intermediate_suffix++) {
+			if (intermediate_suffix >= 1000)
+				return -EMLINK;
+
+			status = snprintf(final, PATH_MAX, "%s%04d.0002", intermediate, intermediate_suffix);
+			if (status < 0 || status >= PATH_MAX)
+				return -ENAMETOOLONG;
 			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
-			intermediate_suffix++;
-		} while ((l2s_access(new_intermediate) != -1) && (intermediate_suffix < 1000));
+
+			if (l2s_lstat(final, &statl) == 0)
+				continue;
+
+			if (l2s_symlink(final, new_intermediate) == 0)
+				break;
+
+			if (errno != EEXIST)
+				return -errno;
+		}
 		strcpy(intermediate, new_intermediate);
 
-		strcpy(final, intermediate);
-		strcat(final, ".0002");
+		/*Move the original content to the new path. */
 		status = l2s_rename(original, final);
-		if (status < 0)
-			return -errno;
-		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
-		if (status < 0)
+		if (status < 0) {
+			status = -errno;
+			(void) l2s_unlink(intermediate);
 			return status;
-
-		/* Symlink the intermediate to the final file.  */
-		status = l2s_symlink(final, intermediate);
-		if (status < 0)
-			return -errno;
+		}
+		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
 
 		/* Symlink the original path to the intermediate one.  */
-		status = symlink(intermediate, original);
-		if (status < 0)
-			return -errno;
+		if (status >= 0 && symlink(intermediate, original) < 0)
+			status = -errno;
+
+		/* Otherwise put the file back where it was, unless its name
+		 * was taken in the meantime.  */
+		if (status < 0) {
+			if (status != -EEXIST && l2s_rename(final, original) == 0) {
+				(void) notify_extensions(tracee, LINK2SYMLINK_RENAME,
+							(intptr_t) final, (intptr_t) original);
+				(void) l2s_unlink(intermediate);
+			}
+			return status;
+		}
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
 		status = read_intermediate(intermediate, final);
