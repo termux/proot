@@ -414,6 +414,29 @@ static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MA
 }
 
 /**
+ * Copy in @final the path of the file the @intermediate -- a host path
+ * -- points to.  This function returns -errno if @intermediate can't be
+ * read, -ENOENT if it doesn't point to a file named with a link count,
+ * that is, if the chain is broken, otherwise 0.
+ */
+static int read_intermediate(const char intermediate[PATH_MAX], char final[PATH_MAX])
+{
+	int status;
+
+	status = my_readlink(intermediate, final);
+	if (status < 0)
+		return status;
+
+	/* Not a chain this extension made: there is no count to parse
+	 * out of this name -- it may not even be 4 characters long --
+	 * and nothing to rename or to delete on its behalf.  */
+	if (!is_l2s_file(final))
+		return -ENOENT;
+
+	return 0;
+}
+
+/**
  * Remember that the descriptor @fd of the process @pid was opened
  * through the faked hard link @link (a host path).
  */
@@ -730,9 +753,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 			return -errno;
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
-		size = my_readlink(intermediate, final);
-		if (size < 0)
-			return size;
+		status = read_intermediate(intermediate, final);
+		if (status < 0)
+			return status;
 
 		link_count = atoi(final + strlen(final) - 4);
 		link_count++;
@@ -828,15 +851,13 @@ static int decrement_intermediate_count(Tracee *tracee, const char original[PATH
 {
 	char final[PATH_MAX];
 	char new_final[PATH_MAX];
-	ssize_t size;
 	int status;
 	int link_count;
 
 	/* Read intermediate link - if this fails then
 	 * this link2symlink is broken and we silently
 	 * skip as we were removing it anyway.  */
-	size = my_readlink(intermediate, final);
-	if (size < 0) {
+	if (read_intermediate(intermediate, final) < 0) {
 		VERBOSE(tracee, 1, "Skiping deref of broken link2symlink \"%s\" -> \"%s\"", original, intermediate);
 		return 0;
 	}
@@ -1160,9 +1181,15 @@ static int handle_sysexit_end(Extension *extension)
 		if (!S_ISLNK(statl.st_mode))
 			return 0;
 
-		size = my_readlink(original, intermediate);
-		if (size < 0)
-			return size;
+		/* From here on, a faked hard link that can't be followed
+		 * down to its file -- whose backing files were removed
+		 * along with the directory of its first name, typically --
+		 * is left as the kernel reported it, that is, as the
+		 * dangling symbolic link it is.  Failing this syscall made it
+		 * impossible to lstat(2), hence to list or to remove with
+		 * most tools.  */
+		if (my_readlink(original, intermediate) < 0)
+			return 0;
 
 		name = strrchr(intermediate, '/');
 		if (name == NULL)
@@ -1173,13 +1200,13 @@ static int handle_sysexit_end(Extension *extension)
 		if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
 			return 0;
 
-		intermediate_proc: size = my_readlink(intermediate, final);
-		if (size < 0)
-			return size;
+		intermediate_proc:
+		if (read_intermediate(intermediate, final) < 0)
+			return 0;
 
-		final_proc: status = lstat(final,&finalStat);
-		if (status < 0)
-			return status;
+		final_proc:
+		if (!is_l2s_file(final) || lstat(final, &finalStat) < 0)
+			return 0;
 
 		finalStat.st_nlink = atoi(final + strlen(final) - 4);
 
