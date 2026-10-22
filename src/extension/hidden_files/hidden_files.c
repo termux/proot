@@ -7,30 +7,17 @@
  * deleted by wildcard expressions.
  */
 
+#include <string.h>
 #include <talloc.h>
 
 #include "extension/extension.h"
+#include "tracee/abi.h"
 #include "tracee/mem.h"
 #include "syscall/chain.h"
 #include "path/path.h"
 
 /* Change the HIDDEN_PREFIX to change which files are hidden */
 #define HIDDEN_PREFIX ".proot"
-
-struct linux_dirent {
-    unsigned long d_ino;
-    unsigned long d_off;
-    unsigned short d_reclen;
-    char d_name[];
-};
-
-struct linux_dirent64 {
-    unsigned long long d_ino;
-    long long d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[];
-};
 
 /*
  * Blind copies the given num of bytes from src to dst
@@ -87,6 +74,21 @@ static int handle_getdents(Tracee *tracee)
             return 0;
         }
 
+        /* Where d_reclen and d_name lie in each record.  The d_ino and d_off of
+         * struct linux_dirent64 are 64-bit whatever the ABI.  Those of struct
+         * linux_dirent are a word of the ABI of the tracee -- not of PRoot: they
+         * are half as large for a 32-bit tracee of a 64-bit PRoot -- and its
+         * d_type is the last byte of the record.  */
+        size_t reclen_offset;
+        size_t name_offset;
+        if (get_sysnum(tracee, ORIGINAL) == PR_getdents64) {
+            reclen_offset = 16;
+            name_offset = 19;
+        } else {
+            reclen_offset = 2 * sizeof_word(tracee);
+            name_offset = reclen_offset + 2;
+        }
+
         char path[PATH_MAX];
         int status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, ORIGINAL, SYSARG_1), path);
         if (status < 0) {
@@ -101,55 +103,41 @@ static int handle_getdents(Tracee *tracee)
             return status;
         }
 
-        /* curr will hold the current struct we're examining */
-        struct linux_dirent64 *curr64;
-        struct linux_dirent *curr32;
-        /* pos keeps track of where in memory the copy is */
-        char *pos = copy;
-        /* ptr keeps track of where in memory the original is */
-        char *ptr = orig;
+        /* offset keeps track of where in memory the original is */
+        size_t offset = 0;
         /* nleft keeps track of how many bytes we've saved */
         unsigned int nleft = 0;
 
         /* while we're still within the memory allowed */
-        if (get_sysnum(tracee, ORIGINAL) == PR_getdents64) {
-            while (ptr < orig + res) {
+        while (offset < (size_t) res) {
+            unsigned short reclen;
+            char *name;
 
-                /* get the current struct */
-                curr64 = (struct linux_dirent64 *)ptr;
-
-                /* if the name does not matche a given prefix */
-                if (!hasprefix(HIDDEN_PREFIX, curr64->d_name)) {
-
-                    /* copy the information */
-                    mybcopy(ptr, pos, curr64->d_reclen);
-
-                    /* move the pos and nleft */
-                    pos += curr64->d_reclen;
-                    nleft += curr64->d_reclen;
-                }
-                /* move to the next linux_dirent */
-                ptr += curr64->d_reclen;
+            /* Leave a listing that can't be parsed as it is, rather than loop
+             * forever on a null d_reclen or read past the buffer.  */
+            if (offset + name_offset >= (size_t) res) {
+                return 0;
             }
-        } else {
-            while (ptr < orig + res) {
-
-                /* get the current struct */
-                curr32 = (struct linux_dirent *)ptr;
-
-                /* if the name does not matche a given prefix */
-                if (!hasprefix(HIDDEN_PREFIX, curr32->d_name)) {
-
-                    /* copy the information */
-                    mybcopy(ptr, pos, curr32->d_reclen);
-
-                    /* move the pos and nleft */
-                    pos += curr32->d_reclen;
-                    nleft += curr32->d_reclen;
-                }
-                /* move to the next linux_dirent */
-                ptr += curr32->d_reclen;
+            memcpy(&reclen, orig + offset + reclen_offset, sizeof(reclen));
+            if (reclen <= name_offset || reclen > (size_t) res - offset) {
+                return 0;
             }
+            name = orig + offset + name_offset;
+            if (memchr(name, '\0', reclen - name_offset) == NULL) {
+                return 0;
+            }
+
+            /* if the name does not matche a given prefix */
+            if (!hasprefix(HIDDEN_PREFIX, name)) {
+
+                /* copy the information */
+                mybcopy(orig + offset, copy + nleft, reclen);
+
+                /* move nleft */
+                nleft += reclen;
+            }
+            /* move to the next record */
+            offset += reclen;
         }
         /* If there is nothing left */
         if (!nleft) {
