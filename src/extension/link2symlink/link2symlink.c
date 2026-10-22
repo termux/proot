@@ -311,7 +311,7 @@ static int my_readlink(const char symlink[PATH_MAX], char value[PATH_MAX])
 		? readlink(symlink, value, PATH_MAX)
 		: readlinkat(dir_fd, name, value, PATH_MAX);
 	if (size < 0)
-		return size;
+		return -errno;
 	if (size >= PATH_MAX)
 		return -ENAMETOOLONG;
 	value[size] = '\0';
@@ -714,7 +714,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		strcat(final, ".0002");
 		status = l2s_rename(original, final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
 		if (status < 0)
 			return status;
@@ -722,12 +722,12 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_symlink(final, intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 
 		/* Symlink the original path to the intermediate one.  */
 		status = symlink(intermediate, original);
 		if (status < 0)
-			return status;
+			return -errno;
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
 		size = my_readlink(intermediate, final);
@@ -742,7 +742,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
@@ -750,20 +750,17 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = l2s_symlink(final, intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 	}
 
 	/* Perform symlink() operation within PRoot.  */
 	status = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
-	if (status >= 0) {
-		status = symlink(intermediate, final);
-		if (status < 0) status = -errno;
-	}
-	if (status < 0) {
+	if (status >= 0 && symlink(intermediate, final) < 0)
 		status = -errno;
+	if (status < 0) {
 		decrement_link_count(tracee, sysarg);
 		return status;
 	}
@@ -823,8 +820,8 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg)
 /**
  * Decrement the count of the file the @intermediate of the faked hard
  * link @original -- both host paths -- points to, deleting both of them
- * when it was the last link.  This function returns a negative value if
- * an error occured, otherwise 0.
+ * when it was the last link.  This function returns -errno if an error
+ * occured, otherwise 0.
  */
 static int decrement_intermediate_count(Tracee *tracee, const char original[PATH_MAX],
 					const char intermediate[PATH_MAX])
@@ -854,7 +851,7 @@ static int decrement_intermediate_count(Tracee *tracee, const char original[PATH
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
@@ -864,19 +861,19 @@ static int decrement_intermediate_count(Tracee *tracee, const char original[PATH
 		/* Symlink the intermediate to the final file.  */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 
 		status = l2s_symlink(final, intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 	} else {
 		/* If it is the last, delete the intermediate and final */
 		status = l2s_unlink(intermediate);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = l2s_unlink(final);
 		if (status < 0)
-			return status;
+			return -errno;
 		status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t) final, 0);
 		if (status < 0)
 			return status;
@@ -981,8 +978,8 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
  * grants it, c.f. override_permissions() -- and the directory of
  * @intermediate can be another one.  The count is PRoot's own business
  * though, hence the write permission on the latter is granted for the
- * time being when it's lacking.  This function returns a negative
- * value if an error occured, otherwise 0.
+ * time being when it's lacking.  This function returns -errno if an
+ * error occured, otherwise 0.
  */
 static int decrement_removed_link_count(Tracee *tracee, const char link[PATH_MAX],
 					const char intermediate[PATH_MAX])
@@ -993,7 +990,7 @@ static int decrement_removed_link_count(Tracee *tracee, const char link[PATH_MAX
 	int status;
 
 	status = decrement_intermediate_count(tracee, link, intermediate);
-	if (status >= 0 || errno != EACCES)
+	if (status != -EACCES)
 		return status;
 
 	strcpy(directory, intermediate);
