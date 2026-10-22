@@ -1,5 +1,5 @@
 #include <stdio.h>     /* rename(2), renameat(2), */
-#include <stdlib.h>    /* atoi */
+#include <stdlib.h>    /* getenv, free, */
 #include <fcntl.h>     /* open(2), openat(2), AT_FDCWD, O_*, */
 #include <unistd.h>    /* symlink(2), symlinkat(2), readlink(2), lstat(2), unlink(2), unlinkat(2)*/
 #include <string.h>    /* str*, strrchr, strcat, strcpy, strncpy, strncmp */
@@ -336,37 +336,86 @@ static bool is_open_syscall(Sysnum sysnum)
 }
 
 /**
- * Check whether @host_path names a file this extension has moved into
- * the l2s directory, that is, "<PREFIX><name><NNNN>.<NNNN>".
+ * The highest link count, c.f. get_link_count().
  */
-static bool is_l2s_file(const char *host_path)
+#define MAX_LINK_COUNT 999999999
+
+/**
+ * Return the link count recorded in the name of @host_path, a file this
+ * extension has moved into the l2s directory, that is,
+ * "<PREFIX><name><NNNN>.<count>" where <NNNN> is the suffix of its
+ * intermediate and <count> is written with 4 digits at least -- 5 from
+ * 10000 links on -- and 9 at most, so it fits an int.  This function
+ * returns -1 if @host_path is not named that way.
+ */
+static int get_link_count(const char *host_path)
 {
 	const char *name;
+	const char *dot;
 	size_t length;
 	size_t i;
+	int count;
 
 	name = strrchr(host_path, '/');
 	if (name == NULL)
-		return false;
+		return -1;
 	name++;
 
 	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-		return false;
+		return -1;
 
-	/* 5 = strlen(".0002")  */
-	length = strlen(name);
-	if (length < strlen(PREFIX) + 5)
-		return false;
-
-	if (name[length - 5] != '.')
-		return false;
+	/* Note: PREFIX ends with a dot, hence there's one.  */
+	dot = strrchr(name, '.');
+	if ((size_t) (dot - name) < strlen(PREFIX) + 4)
+		return -1;
 
 	for (i = 1; i <= 4; i++) {
-		if (!isdigit(name[length - i]))
-			return false;
+		if (!isdigit((unsigned char) dot[-i]))
+			return -1;
 	}
 
-	return true;
+	length = strlen(dot + 1);
+	if (length < 4 || length > 9)
+		return -1;
+
+	count = 0;
+	for (i = 1; i <= length; i++) {
+		if (!isdigit((unsigned char) dot[i]))
+			return -1;
+		count = count * 10 + (dot[i] - '0');
+	}
+
+	return count;
+}
+
+/**
+ * Check whether @host_path names a file this extension has moved into
+ * the l2s directory, c.f. get_link_count().
+ */
+static bool is_l2s_file(const char *host_path)
+{
+	return get_link_count(host_path) >= 0;
+}
+
+/**
+ * Copy in @new_final the name the file @final -- c.f. get_link_count()
+ * -- has once its link count is @link_count.  This function returns
+ * -errno if an error occured, otherwise 0.
+ */
+static int name_link_count(const char final[PATH_MAX], int link_count, char new_final[PATH_MAX])
+{
+	int length;
+	int status;
+
+	/* The count is rewritten as a whole, rather than its last 4
+	 * characters, since it gains or loses a digit at 10000.  */
+	length = strrchr(final, '.') + 1 - final;
+
+	status = snprintf(new_final, PATH_MAX, "%.*s%04d", length, final, link_count);
+	if (status < 0 || status >= PATH_MAX)
+		return -ENAMETOOLONG;
+
+	return 0;
 }
 
 /**
@@ -425,9 +474,8 @@ static int read_intermediate(const char intermediate[PATH_MAX], char final[PATH_
 	if (status < 0)
 		return status;
 
-	/* Not a chain this extension made: there is no count to parse
-	 * out of this name -- it may not even be 4 characters long --
-	 * and nothing to rename or to delete on its behalf.  */
+	/* Not a chain this extension made: there is no count to read in
+	 * this name, and nothing to rename or to delete on its behalf.  */
 	if (!is_l2s_file(final))
 		return -ENOENT;
 
@@ -557,12 +605,13 @@ static void remember_dereferenced_link(Extension *extension, const char *link, c
 
 	/* Both a faked hard link and its intermediate point to a name
 	 * that starts with PREFIX, but only the intermediate points to
-	 * its own name followed by the link count: "<name>.<NNNN>".  */
+	 * its own name followed by the link count: "<name>.<NNNN>", with
+	 * more digits from 10000 links on.  */
 	link_name = strrchr(link, '/');
 	link_name = (link_name == NULL ? link : link_name + 1);
 	length = strlen(link_name);
 
-	if (   strlen(name) == length + 5
+	if (   strlen(name) >= length + 5
 	    && strncmp(name, link_name, length) == 0
 	    && name[length] == '.') {
 		for (i = length + 1; isdigit((unsigned char) name[i]); i++)
@@ -782,11 +831,13 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		if (status < 0)
 			return status;
 
-		link_count = atoi(final + strlen(final) - 4);
-		link_count++;
+		link_count = get_link_count(final);
+		if (link_count >= MAX_LINK_COUNT)
+			return -EMLINK;
 
-		strncpy(new_final, final, strlen(final) - 4);
-		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
+		status = name_link_count(final, link_count + 1, new_final);
+		if (status < 0)
+			return status;
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
@@ -887,13 +938,14 @@ static int decrement_intermediate_count(Tracee *tracee, const char original[PATH
 		return 0;
 	}
 
-	link_count = atoi(final + strlen(final) - 4);
+	link_count = get_link_count(final);
 	link_count--;
 
 	/* Check if it is or is not the last link to delete */
 	if (link_count > 0) {
-		strncpy(new_final, final, strlen(final) - 4);
-		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
+		status = name_link_count(final, link_count, new_final);
+		if (status < 0)
+			return status;
 
 		status = l2s_rename(final, new_final);
 		if (status < 0)
@@ -1148,6 +1200,7 @@ static int handle_sysexit_end(Extension *extension)
 		char final[PATH_MAX];
 		char * name;
 		struct stat finalStat;
+		int link_count;
 
 		/* Override only if it succeed.  */
 		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1230,10 +1283,11 @@ static int handle_sysexit_end(Extension *extension)
 			return 0;
 
 		final_proc:
-		if (!is_l2s_file(final) || lstat(final, &finalStat) < 0)
+		link_count = get_link_count(final);
+		if (link_count < 0 || lstat(final, &finalStat) < 0)
 			return 0;
 
-		finalStat.st_nlink = atoi(final + strlen(final) - 4);
+		finalStat.st_nlink = link_count;
 
 		/* Get the address of the 'stat' structure.  */
 		if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
@@ -1293,14 +1347,16 @@ static int handle_sysexit_end(Extension *extension)
 
 static void link2symlink_handle_statx(struct statx_syscall_state *state)
 {
+	int link_count;
+
 	if (!(state->statx_buf.stx_mask & STATX_NLINK))
 		return;
 
-	if (!is_l2s_file(state->host_path))
+	link_count = get_link_count(state->host_path);
+	if (link_count < 0)
 		return;
 
-	size_t ending_len = strlen(state->host_path);
-	state->statx_buf.stx_nlink = atoi(&state->host_path[ending_len - 4]);
+	state->statx_buf.stx_nlink = link_count;
 
 	/* The statx() that PRoot let the kernel perform did succeed, so
 	 * its result was read back from the tracee and is not written
