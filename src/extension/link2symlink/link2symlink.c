@@ -687,6 +687,37 @@ static void execve_proc_exe(Extension *extension, struct execve_proc_exe_state *
 }
 
 /**
+ * Make the path @tracee's @link_target_sysarg names a symbolic link to
+ * @target, the content of the ordinary symbolic link link(2) is asked to
+ * link -- it doesn't follow it.  That link is left where it is: its
+ * content is a path of the guest, relative to the directory of the link
+ * more often than not, not the host path the files of a faked hard link
+ * could be created at.  Both names are then two symbolic links with the
+ * same content rather than a single one with a link count of 2; the
+ * content of a symbolic link can't be changed, so this only shows in
+ * their own metadata -- inode, link count, owner, times.  This function
+ * returns -errno if an error occured, otherwise 0.
+ */
+static int link_symbolic_link(Tracee *tracee, const char target[PATH_MAX], Reg link_target_sysarg)
+{
+	char link[PATH_MAX];
+	int status;
+
+	/* Note: this path was already canonicalized.  */
+	status = read_path(tracee, link, peek_reg(tracee, CURRENT, link_target_sysarg));
+	if (status < 0)
+		return status;
+
+	if (symlink(target, link) < 0)
+		return -errno;
+
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	set_sysnum(tracee, PR_void);
+
+	return 0;
+}
+
+/**
  * Move the path pointed to by @tracee's @sysarg to a new location,
  * symlink the original path to this new one, make @tracee's @sysarg
  * point to the new location.  This function returns -errno if an
@@ -736,6 +767,14 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 
 		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
 			first_link = 0;
+		else {
+			/* An ordinary symbolic link used to be moved as a
+			 * file, under the name its content spells, followed
+			 * by the suffixes: in the directory of PRoot for a
+			 * relative content, and anywhere on the host for an
+			 * absolute one, out of the guest rootfs.  */
+			return link_symbolic_link(tracee, intermediate, link_target_sysarg);
+		}
 	} else {
 		/* compute new name */
 		name = strrchr(original,'/');
