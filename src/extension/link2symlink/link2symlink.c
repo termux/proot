@@ -1488,6 +1488,13 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	case SYSCALL_ENTER_END: {
 		Tracee *tracee = TRACEE(extension);
 
+		/* Nothing to do if this syscall is being discarded
+		 * because its translation failed: its paths are not all
+		 * translated then, and an untranslated one names a file
+		 * of the host, out of the guest rootfs.  */
+		if ((int) data1 < 0)
+			return 0;
+
 		switch (get_sysnum(tracee, ORIGINAL)) {
 		case PR_rename:
 			/*int rename(const char *oldpath, const char *newpath);
