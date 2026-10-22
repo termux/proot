@@ -52,6 +52,13 @@
 #include "attribute.h"
 #include "compat.h"
 
+/* Not in compat.h: glibc >= 2.43 declares SYS_SECCOMP as an enum
+ * constant in <signal.h>, so the fallback must only be seen once
+ * <signal.h> has been included.  */
+#ifndef SYS_SECCOMP
+#define SYS_SECCOMP 1
+#endif
+
 static bool seccomp_after_ptrace_enter = false;
 static bool seccomp_ptrace_event_supported = false;
 
