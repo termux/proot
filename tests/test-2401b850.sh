@@ -14,6 +14,16 @@ fi
 # reaches the command given to -q.
 unset LD_PRELOAD
 
+# The multi-call binary of uutils (the coreutils of Ubuntu 26.04) refuses
+# to run as a utility /proc/self/exe doesn't name, and PRoot reports the
+# guest program there: prefer the GNU utilities installed next to it.
+gnu() {
+    if [ -n "$(which gnu$1 2>/dev/null)" ]; then echo gnu$1; else echo $1; fi
+}
+TRUE=$(gnu true)
+FALSE=$(gnu false)
+ECHO=$(gnu echo)
+
 TMP=${TMPDIR:?}/$(mcookie)
 TMP2=${TMPDIR:?}/$(mcookie)
 
@@ -48,33 +58,33 @@ else
     COMMAND2="-0 ${TMP} ${TMP} ${TMP2}"
 fi
 
-  ${PROOT} -q true ${TMP}
-! ${PROOT} -q false ${TMP}
+  ${PROOT} -q ${TRUE} ${TMP}
+! ${PROOT} -q ${FALSE} ${TMP}
 [ $? -eq 0 ]
 
-  (cd /; ${PROOT} -q ./$(which true) ${TMP})
-! (cd /; ${PROOT} -q ./$(which false) ${TMP})
+  (cd /; ${PROOT} -q ./$(which ${TRUE}) ${TMP})
+! (cd /; ${PROOT} -q ./$(which ${FALSE}) ${TMP})
 [ $? -eq 0 ]
 
-HOST_LD_LIBRARY_PATH=$(${PROOT} -q 'echo --' env | grep LD_LIBRARY_PATH)
+HOST_LD_LIBRARY_PATH=$(${PROOT} -q "${ECHO} --" env | grep LD_LIBRARY_PATH)
 test ! -z "${HOST_LD_LIBRARY_PATH}"
 
 unset LD_LIBRARY_PATH
-${PROOT} -q 'echo --' ${TMP} | grep -- "^-- -U LD_LIBRARY_PATH ${COMMAND1}$"
-${PROOT} -q 'echo --' env LD_LIBRARY_PATH=test1 ${TMP} | grep -- "^${TEST1}$"
-env LD_LIBRARY_PATH=test2 ${PROOT} -q 'echo --' ${TMP} | grep -- "^${TEST2}$"
+${PROOT} -q "${ECHO} --" ${TMP} | grep -- "^-- -U LD_LIBRARY_PATH ${COMMAND1}$"
+${PROOT} -q "${ECHO} --" env LD_LIBRARY_PATH=test1 ${TMP} | grep -- "^${TEST1}$"
+env LD_LIBRARY_PATH=test2 ${PROOT} -q "${ECHO} --" ${TMP} | grep -- "^${TEST2}$"
 
-env LD_LIBRARY_PATH=test2 ${PROOT} -q 'echo --' env LD_LIBRARY_PATH=test1 ${TMP} | grep -- "^${TEST3}$"
+env LD_LIBRARY_PATH=test2 ${PROOT} -q "${ECHO} --" env LD_LIBRARY_PATH=test1 ${TMP} | grep -- "^${TEST3}$"
 
-${PROOT} -q 'echo --' env LD_TRACE_LOADED_OBJECTS=1 ${TMP} | grep -E -- "^${TEST4}$"
+${PROOT} -q "${ECHO} --" env LD_TRACE_LOADED_OBJECTS=1 ${TMP} | grep -E -- "^${TEST4}$"
 
-env LD_LIBRARY_PATH=test5 ${PROOT} -q 'echo --' sh -c ${TMP} | grep -- "^${TEST5}$"
-env LD_LIBRARY_PATH=test5 ${PROOT} -q 'echo --' sh -c "sh -c ${TMP}" | grep -- "^${TEST52}$"
-env LD_LIBRARY_PATH=test5 ${PROOT} -q 'echo --' env LD_LIBRARY_PATH=test6 ${TMP} | grep -- "^${TEST6}$"
+env LD_LIBRARY_PATH=test5 ${PROOT} -q "${ECHO} --" sh -c ${TMP} | grep -- "^${TEST5}$"
+env LD_LIBRARY_PATH=test5 ${PROOT} -q "${ECHO} --" sh -c "sh -c ${TMP}" | grep -- "^${TEST52}$"
+env LD_LIBRARY_PATH=test5 ${PROOT} -q "${ECHO} --" env LD_LIBRARY_PATH=test6 ${TMP} | grep -- "^${TEST6}$"
 
 rm -f ${TMP2}
 echo "#!${TMP}" > ${TMP2}
 chmod +x ${TMP2}
-${PROOT} -q 'echo --' ${TMP2} | grep -- "^-- -U LD_LIBRARY_PATH ${COMMAND2}$"
+${PROOT} -q "${ECHO} --" ${TMP2} | grep -- "^-- -U LD_LIBRARY_PATH ${COMMAND2}$"
 
 rm -fr ${TMP} ${TMP2}
