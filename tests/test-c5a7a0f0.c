@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <string.h>
+#include <sys/wait.h>
 
 static void *setuid_124(void *unused)
 {

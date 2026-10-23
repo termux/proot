@@ -3,6 +3,7 @@
 #include <limits.h> /* PATH_MAX, */
 #include <stdlib.h> /* exit(3), */
 #include <fcntl.h> /* openat(2), */
+#include <string.h> /* strcmp(3), */
 
 int main(void)
 {

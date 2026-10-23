@@ -30,6 +30,7 @@
 #include <stdbool.h>    /* bool, true, false, */
 #include <stdlib.h>     /* exit, EXIT_*, */
 #include <stdio.h>      /* fprintf(3), stderr, */
+#include <string.h>     /* strerror(3), */
 #include <stdint.h>     /* *int*_t, */
 #include <sys/uio.h>    /* struct iovec */
 #include <elf.h>        /* NT_PRSTATUS */

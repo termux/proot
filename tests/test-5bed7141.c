@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <string.h>
+#include <sys/wait.h>
 
 static void *routine(void *path)
 {

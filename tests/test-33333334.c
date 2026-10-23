@@ -1,5 +1,7 @@
-#include <stdlib.h> /* exit(3), */
-#include <unistd.h> /* fork(2), */
+#include <stdlib.h>   /* exit(3), */
+#include <unistd.h>   /* fork(2), */
+#include <stdio.h>    /* perror(3), */
+#include <sys/wait.h> /* wait(2), WIFEXITED, */
 
 int main(void)
 {
