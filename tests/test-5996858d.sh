@@ -9,7 +9,8 @@ ${PROOT} -k ${UTSNAME} uname -n | grep ^nodename$
 ${PROOT} -k ${UTSNAME} uname -v | grep ^version$
 ${PROOT} -k ${UTSNAME} uname -m | grep ^machine$
 ${PROOT} -k ${UTSNAME} domainname | grep ^domainname$
-${PROOT} -k ${UTSNAME} env LD_SHOW_AUXV=1 true | grep -E '^AT_HWCAP:[[:space:]]*0?$'
+# Recent versions of glibc print "0x0" where older ones print "0".
+${PROOT} -k ${UTSNAME} env LD_SHOW_AUXV=1 true | grep -E '^AT_HWCAP:[[:space:]]*(0x)?0?$'
 
 # PRoot lets the kernel run sethostname(2) and setdomainname(2), -0 only
 # turns their refusal into a success before the names are faked: as root,
