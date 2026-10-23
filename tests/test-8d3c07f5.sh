@@ -22,6 +22,8 @@ mkdir -p "${ROOTFS}/bin" "${ROOTFS}/.l2s" "${OUTSIDE}"
 # A shell inside the rootfs, so the test needs no binding to run.
 cp "$(which busybox)" "${ROOTFS}/bin/busybox"
 
+# The final "ln" is expected to fail: what matters is where it would have
+# created the backing file, so its status doesn't stop the test.
 MARKER=$(PROOT_L2S_DIR="${ROOTFS}/.l2s" ${PROOT} -l --rootfs="${ROOTFS}" \
     /bin/busybox sh -c '
         echo escaped > /original
@@ -29,7 +31,7 @@ MARKER=$(PROOT_L2S_DIR="${ROOTFS}/.l2s" ${PROOT} -l --rootfs="${ROOTFS}" \
         /bin/busybox ln -s '"${OUTSIDE}"' /.l2s
         /bin/busybox test -L /.l2s && echo READY
         /bin/busybox ln /original /link
-    ' 2>/dev/null)
+    ' 2>/dev/null) || true
 
 ESCAPED=$(ls -A "${OUTSIDE}" | wc -l)
 
