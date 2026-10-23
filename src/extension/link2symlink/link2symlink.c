@@ -374,8 +374,10 @@ static int get_link_count(const char *host_path)
 	if ((size_t) (dot - name) < strlen(PREFIX) + 4)
 		return -1;
 
+	/* Not "dot[-i]": -i is a huge unsigned offset, clang 21 then
+	 * assumes dot is NULL, and PRoot crashes.  */
 	for (i = 1; i <= 4; i++) {
-		if (!isdigit((unsigned char) dot[-i]))
+		if (!isdigit((unsigned char) *(dot - i)))
 			return -1;
 	}
 
