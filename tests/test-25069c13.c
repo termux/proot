@@ -4,7 +4,9 @@
 
 int main(int argc, char *argv[])
 {
-	if (argc == 0)
+	/* Since Linux 5.18 the kernel replaces an empty argv with
+	 * { "", NULL }.  */
+	if (argc == 0 || (argc == 1 && argv[0][0] == '\0'))
 		exit(EXIT_SUCCESS);
 
 	execve("/proc/self/exe", NULL, NULL);
