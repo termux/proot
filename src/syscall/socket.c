@@ -28,7 +28,8 @@
 #include <sys/socket.h>  /* struct sockaddr_un, AF_UNIX, */
 #include <sys/un.h>      /* struct sockaddr_un, */
 #include <sys/param.h>   /* MIN(), MAX(), */
-#include <sys/stat.h>    /* lstat(2), */
+#include <sys/stat.h>    /* lstat(2), S_ISSOCK(), */
+#include <unistd.h>      /* unlink(2), */
 #include <sys/uio.h>     /* UIO_MAXIOV, */
 #include <linux/net.h>   /* SYS_*, */
 #include <stdint.h>      /* uint8_t, uint32_t, int32_t, */
@@ -41,6 +42,7 @@
 #include "path/binding.h"
 #include "path/temp.h"
 #include "path/path.h"
+#include "cli/note.h"
 #include "arch.h"
 
 #include "compat.h"
@@ -115,6 +117,29 @@ static int push_sockaddr_un(Tracee *tracee, struct sockaddr_un *sockaddr,
 }
 
 /**
+ * Remove the socket that lies at the shorter host @path, if any.  A
+ * file of another type was put there by the tracees through the
+ * binding, it is theirs.
+ *
+ * Note: this is a talloc destructor.
+ */
+static int remove_shorter_host_path(char *path)
+{
+	struct stat statl;
+	int status;
+
+	status = lstat(path, &statl);
+	if (status < 0 || !S_ISSOCK(statl.st_mode))
+		return 0;
+
+	status = unlink(path);
+	if (status < 0)
+		note(NULL, WARNING, SYSTEM, "can't remove '%s'", path);
+
+	return 0;
+}
+
+/**
  * Translate the pathname of the struct sockaddr_un currently stored
  * in the @tracee memory at the given @address.  See the documentation
  * of read_sockaddr_un() for the meaning of the @size parameter.
@@ -146,31 +171,39 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
 		Binding *binding;
 
 		/* The translated path is too long to fit the sun_path
-		 * array, so let's bind it to a shorter path.  */
-		shorter_host_path = create_temp_name(tracee->ctx, "proot");
-		if (shorter_host_path == NULL || strlen(shorter_host_path) > sizeof_path)
+		 * array, so let's bind it to a shorter path.  The socket
+		 * bound there, if any, is removed when PRoot exits rather
+		 * than with this binding: the copies of the bindings made
+		 * for a child that asked for a mount name-space of its
+		 * own still lead there.  */
+		shorter_host_path = create_temp_name(NULL, "proot");
+		if (shorter_host_path == NULL)
 			return -EINVAL;
 
 		(void) mktemp(shorter_host_path);
 
-		if (strlen(shorter_host_path) > sizeof_path)
+		if (strlen(shorter_host_path) > sizeof_path) {
+			TALLOC_FREE(shorter_host_path);
 			return -EINVAL;
+		}
 
 		/* Ensure the guest path of this new binding is
 		 * canonicalized, as it is always assumed.  */
 		strcpy(user_path, host_path);
 		status = detranslate_path(tracee, user_path, NULL);
-		if (status < 0)
+		if (status < 0) {
+			TALLOC_FREE(shorter_host_path);
 			return -EINVAL;
+		}
 
 		/* Bing the guest path to a shorter host path.  */
 		binding = insort_binding3(tracee, tracee->ctx, shorter_host_path, user_path);
-		if (binding == NULL)
+		if (binding == NULL) {
+			TALLOC_FREE(shorter_host_path);
 			return -EINVAL;
+		}
 
-		/* This temporary file (shorter_host_path) will be removed once the
-		 * binding is destroyed.  */
-		talloc_reparent(tracee->ctx, binding, shorter_host_path);
+		talloc_set_destructor(shorter_host_path, remove_shorter_host_path);
 
 		/* Let's use this shorter path now.  */
 		strcpy(host_path, shorter_host_path);

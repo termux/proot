@@ -128,7 +128,7 @@ ROOTFS_BIN = $(ROOTFS)/bin/true $(ROOTFS)/bin/false    				 \
        $(ROOTFS)/bin/exec-m32-sgid $(ROOTFS)/bin/getresuid $(ROOTFS)/bin/getresgid \
        $(ROOTFS)/bin/open_nofollow $(ROOTFS)/bin/fchmodat2 \
        $(ROOTFS)/bin/open_tree $(ROOTFS)/bin/fork_regs $(ROOTFS)/bin/statx \
-       $(ROOTFS)/bin/statx-m32
+       $(ROOTFS)/bin/statx-m32 $(ROOTFS)/bin/unix_socket
 
 ROOTFS_DIR = $(ROOTFS)/bin $(ROOTFS)/tmp
 
