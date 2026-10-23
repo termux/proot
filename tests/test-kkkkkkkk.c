@@ -17,6 +17,11 @@ int main()
 	long page_size;
 	int i;
 
+	/* Otherwise the first printf() has malloc() take the buffer of
+	 * stdout from the heap: the "brk" sampled afterwards isn't the
+	 * initial one, and setting it below that value rightly works.  */
+	setvbuf(stdout, NULL, _IONBF, 0);
+
 	page_size = sysconf(_SC_PAGE_SIZE);
 	if (page_size <= 0)
 		return 125;
