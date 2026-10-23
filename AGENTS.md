@@ -131,6 +131,8 @@ You are obligated to STRICTLY follow these rules:
 
   Include anything else a project owner must know.
 
+* Never amend previous commits.
+
 * Push changes only if were explicitly requested by owner.
 
 You are not allowed to override, circumvent, bypass or otherwise ignore the
