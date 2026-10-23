@@ -71,8 +71,10 @@ check-test-kkkkkkkk.c: test-kkkkkkkk
 check-test-25069c12.c: test-25069c12
 	$(call check_c,$<,$(PROOT) ./$<)
 
+# The execve(2) wrapper of libtermux-exec, that Termux preloads, crashes
+# on the NULL argv this test passes.
 check-test-25069c13.c: test-25069c13
-	$(call check_c,$<,$(PROOT) ./$<)
+	$(call check_c,$<,env -u LD_PRELOAD $(PROOT) ./$<)
 
 check-test-1ffc8309.c: test-1ffc8309
 	$(call check_c,$<,env PROOT_FORCE_KOMPAT=1 $(PROOT) -k $(shell uname -r) ./$<)
@@ -152,12 +154,12 @@ $(ROOTFS)/bin/statx-m32: statx.c
 	$(Q)$(CC) -m32 -static $^ -o $@ $(silently) || true
 
 $(ROOTFS)/bin/exec-suid: $(ROOTFS)/bin/exec
-	$(Q)cp $^ $@
-	$(Q)chmod u+s $@
+	$(Q)cp $^     $@ $(silently) || true
+	$(Q)chmod u+s $@ $(silently) || true
 
 $(ROOTFS)/bin/exec-sgid: $(ROOTFS)/bin/exec
-	$(Q)cp $^ $@
-	$(Q)chmod g+s $@
+	$(Q)cp $^ $@      $(silently) || true
+	$(Q)chmod g+s $@  $(silently) || true
 
 $(ROOTFS)/bin/exec-m32-suid: $(ROOTFS)/bin/exec-m32
 	$(Q)cp $^     $@ $(silently) || true

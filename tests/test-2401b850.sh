@@ -9,6 +9,11 @@ if [ `id -u` -eq 0 ]; then
     exit 125;
 fi
 
+# Termux preloads libtermux-exec in every program, PRoot included: the
+# empty program below then runs as an empty shell script, it never
+# reaches the command given to -q.
+unset LD_PRELOAD
+
 TMP=${TMPDIR:?}/$(mcookie)
 TMP2=${TMPDIR:?}/$(mcookie)
 
@@ -35,7 +40,8 @@ else
     TEST1="-- -E LD_LIBRARY_PATH=test1 ${COMMAND1}"
     TEST2="-- -E LD_LIBRARY_PATH=test2 ${COMMAND1}"
     TEST3="${TEST1}"
-    TEST4="-- -E LD_TRACE_LOADED_OBJECTS=1 -E LD_LIBRARY_PATH=.+ ${COMMAND1}"
+    # In the order of the environment, which differs on Termux.
+    TEST4="-- (-E LD_TRACE_LOADED_OBJECTS=1 -E LD_LIBRARY_PATH=.+|-E LD_LIBRARY_PATH=.+ -E LD_TRACE_LOADED_OBJECTS=1) ${COMMAND1}"
     TEST5="-- -E LD_LIBRARY_PATH=test5 ${COMMAND1}"
     TEST52=${TEST5}
     TEST6="-- -E LD_LIBRARY_PATH=test6 ${COMMAND1}"

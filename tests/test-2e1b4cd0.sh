@@ -20,22 +20,31 @@ for I in 1 2 3; do
 done
 touch "${DIR}/list/.proot"
 
+# PRoot looped without ever looking at SIGTERM.
+TIMEOUT=$(which timeout || true)
+PROBE=
+if [ -n "${TIMEOUT}" ]; then
+    PROBE="${TIMEOUT} -s KILL 10"
+    TIMEOUT="${TIMEOUT} -s KILL 60"
+fi
+
+# Only the helpers the system runs to the end: on Termux, "gcc -m32"
+# builds 32-bit programs that crash or spin at startup.
+runs() {
+    ${PROBE} "$1" "${DIR}" >/dev/null 2>&1
+    [ $? -le 1 ]
+}
+
 HELPERS=
-if gcc "${SCRIPT_DIR}/getdents.c" -o "${DIR}/getdents" >/dev/null 2>&1; then
+if gcc "${SCRIPT_DIR}/getdents.c" -o "${DIR}/getdents" >/dev/null 2>&1 && runs "${DIR}/getdents"; then
     HELPERS="${DIR}/getdents"
 fi
-if gcc -m32 "${SCRIPT_DIR}/getdents.c" -o "${DIR}/getdents-m32" >/dev/null 2>&1; then
+if gcc -m32 "${SCRIPT_DIR}/getdents.c" -o "${DIR}/getdents-m32" >/dev/null 2>&1 && runs "${DIR}/getdents-m32"; then
     HELPERS="${HELPERS} ${DIR}/getdents-m32"
 fi
 if [ -z "${HELPERS}" ]; then
     rm -rf "${DIR}"
     exit 125
-fi
-
-# PRoot looped without ever looking at SIGTERM.
-TIMEOUT=$(which timeout || true)
-if [ -n "${TIMEOUT}" ]; then
-    TIMEOUT="${TIMEOUT} -s KILL 60"
 fi
 
 STATUS=0

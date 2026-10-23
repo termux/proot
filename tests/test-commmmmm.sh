@@ -7,8 +7,15 @@ TMP2=$(echo ${TMP} | cut -b 1-15)
 TMP3=$(mcookie)
 TMP4=$(echo ${TMP3} | cut -b 1-15)
 
-${PROOT} cat /proc/self/comm          | grep cat
-${PROOT} $(which cat) /proc/self/comm | grep cat
+# Like without PRoot: a multi-call cat(1) names itself after its argv[0],
+# "/data/data/com." for "$(which cat)" on Termux.
+[ "$(${PROOT} cat /proc/self/comm)" = "$(cat /proc/self/comm)" ]
+[ "$(${PROOT} $(which cat) /proc/self/comm)" = "$($(which cat) /proc/self/comm)" ]
+
+# Termux preloads libtermux-exec in every program, PRoot included: it
+# runs the interpreter of a script itself, so the kernel names the
+# process after that interpreter instead.
+unset LD_PRELOAD
 
 echo '#!/bin/sh' > ${TMPDIR:?}/${TMP}
 chmod +x ${TMPDIR:?}/${TMP}
