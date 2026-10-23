@@ -256,12 +256,33 @@ not_found:
  */
 int realpath2(Tracee *tracee, char host_path[PATH_MAX], const char *path, bool deref_final)
 {
+	char parent[PATH_MAX];
+	const char *name;
 	int status;
 
-	if (tracee == NULL)
-		status = (realpath(path, host_path) == NULL ? -errno : 0);
-	else
-		status = translate_path(tracee, host_path, AT_FDCWD, path, deref_final);
+	if (tracee != NULL)
+		return translate_path(tracee, host_path, AT_FDCWD, path, deref_final);
+
+	name = strrchr(path, '/');
+	name = (name == NULL ? path : name + 1);
+
+	/* realpath(3) dereferences the final component in any case: a
+	 * symbolic link to a multi-call program, "false" to coreutils
+	 * on Termux for instance, would be run under the name of that
+	 * program.  */
+	if (deref_final || name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+		return (realpath(path, host_path) == NULL ? -errno : 0);
+
+	if ((size_t) (name - path) >= PATH_MAX)
+		return -ENAMETOOLONG;
+	memcpy(parent, path, name - path);
+	parent[name - path] = '\0';
+
+	if (realpath(parent[0] != '\0' ? parent : ".", host_path) == NULL)
+		return -errno;
+	strcpy(parent, host_path);
+
+	status = join_paths(2, host_path, parent, name);
 	return status;
 }
 
