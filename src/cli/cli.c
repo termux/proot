@@ -280,10 +280,6 @@ static int initialize_exe(Tracee *tracee, const char *exe)
 	if (status < 0)
 		return -1;
 
-	status = detranslate_path(tracee, path, NULL);
-	if (status < 0)
-		return -1;
-
 	tracee->exe = talloc_strdup(tracee, path);
 	if (tracee->exe == NULL)
 		return -1;

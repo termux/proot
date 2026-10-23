@@ -1602,14 +1602,6 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 	Link2SymlinkConfig *config;
 	char final[PATH_MAX];
 
-	/* The tracee is not started yet: PRoot is looking up the program
-	 * to launch, c.f. which().  Keep the name of a faked hard link
-	 * there, as the kernel would, so that the canonicalization of
-	 * the first execve(2) goes through it and "/proc/<PID>/exe"
-	 * reports it, c.f. execve_proc_exe().  */
-	if (tracee->exe == NULL)
-		return;
-
 	/* Don't translate l2s symlinks if call is (un)link */
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
 	if (   sysnum == PR_unlink

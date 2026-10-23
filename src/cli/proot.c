@@ -350,19 +350,12 @@ static int post_initialize_exe(Tracee *tracee, const Cli *cli UNUSED,
 	if (tracee->qemu == NULL)
 		return 0;
 
-	/* Resolve the full guest path to tracee->qemu[0].  */
+	/* Resolve the full path to tracee->qemu[0].  Actually it has to
+	 * be a host path from the tracee's point-of-view, not from the
+	 * PRoot's point-of-view.  See translate_execve() for details.  */
 	status = which(tracee->reconf.tracee, tracee->reconf.paths, path, tracee->qemu[0]);
 	if (status < 0)
 		return -1;
-
-	/* Actually tracee->qemu[0] has to be a host path from the tracee's
-	 * point-of-view, not from the PRoot's point-of-view.  See
-	 * translate_execve() for details.  */
-	if (tracee->reconf.tracee != NULL) {
-		status = detranslate_path(tracee->reconf.tracee, path, NULL);
-		if (status < 0)
-			return -1;
-	}
 
 	tracee->qemu[0] = talloc_strdup(tracee->qemu, path);
 	if (tracee->qemu[0] == NULL)
