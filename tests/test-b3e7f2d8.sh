@@ -1,4 +1,4 @@
-if [ -z "$(which bash)" ] || [ -z "$(which mcookie)" ] || [ ! -e /proc/self/fd/0 ]; then
+if [ -z "$(which bash)" ] || [ -z "$(which mcookie)" ] || [ ! -e /proc/self/fd/0 ] || [ ! -e /dev/fd ]; then
     exit 125;
 fi
 

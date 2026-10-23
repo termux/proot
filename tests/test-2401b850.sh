@@ -1,4 +1,11 @@
-if [ -z `which mcookie` ] || [ -z `which echo` ] || [ -z `which rm` ] || [ -z `which touch` ] || [ -z `which chmod` ] || [ -z `which grep` ]; then
+if [ -z `which mcookie` ] || [ -z `which echo` ] || [ -z `which rm` ] || [ -z `which touch` ] || [ -z `which chmod` ] || [ -z `which grep` ] || [ -z `which id` ]; then
+    exit 125;
+fi
+
+# With -q, PRoot binds the host rootfs to /host-rootfs and /dev/null to
+# /etc/ld.so.preload: as root, it would create their placeholders in the
+# / and the /etc of the host.
+if [ `id -u` -eq 0 ]; then
     exit 125;
 fi
 

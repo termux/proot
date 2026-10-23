@@ -14,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <sys/syscall.h>
 
@@ -37,7 +38,11 @@ static int sys_openat2(int dirfd, const char *path, unsigned long long flags,
 	return syscall(__NR_openat2, dirfd, path, &how, sizeof(how));
 }
 
-#define MARKER  "/tmp/openat2_marker"
+/* A directory of the guest only: if openat2() is not translated, the
+ * path doesn't exist on the host and nothing is created there.  */
+#define DIR     "/tmp/proot-test-07e9b1a2"
+#define MARKER  DIR "/openat2_marker"
+#define LINK    DIR "/openat2_link"
 #define PAYLOAD "openat2-payload"
 
 int main(void)
@@ -47,6 +52,10 @@ int main(void)
 
 	/* Create the marker with a regular open(): PRoot always translates
 	 * this, so it reliably lands inside the guest rootfs.  */
+	if (mkdir(DIR, 0755) < 0 && errno != EEXIST) {
+		perror("mkdir");
+		exit(EXIT_FAILURE);
+	}
 	fd = open(MARKER, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
 		perror("open(O_CREAT)");
@@ -80,11 +89,11 @@ int main(void)
 	/* tar's symlink-extraction pattern: open the parent directory with
 	 * openat2(RESOLVE_BENEATH | O_PATH | O_DIRECTORY | O_NOFOLLOW), then
 	 * symlinkat() into it.  */
-	fd = sys_openat2(AT_FDCWD, "/tmp",
+	fd = sys_openat2(AT_FDCWD, DIR,
 			 O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_PATH | O_DIRECTORY,
 			 0, RESOLVE_BENEATH);
 	if (fd < 0) {
-		fprintf(stderr, "openat2(/tmp, RESOLVE_BENEATH): %s\n", strerror(errno));
+		fprintf(stderr, "openat2(%s, RESOLVE_BENEATH): %s\n", DIR, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	unlinkat(fd, "openat2_link", 0);
@@ -95,10 +104,14 @@ int main(void)
 	}
 	close(fd);
 
-	if (readlink("/tmp/openat2_link", buf, sizeof(buf) - 1) < 0) {
+	if (readlink(LINK, buf, sizeof(buf) - 1) < 0) {
 		perror("readlink");
 		exit(EXIT_FAILURE);
 	}
+
+	unlink(LINK);
+	unlink(MARKER);
+	rmdir(DIR);
 
 	exit(EXIT_SUCCESS);
 }

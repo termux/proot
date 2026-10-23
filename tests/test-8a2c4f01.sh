@@ -1,4 +1,4 @@
-if [ -z `which mcookie` ] || [ -z `which cat` ] || [ -z `which grep` ] || [ -z `which sh` ] || [ ! -e /proc/self/fd/0 ]; then
+if [ -z `which mcookie` ] || [ -z `which cat` ] || [ -z `which grep` ] || [ -z `which sh` ] || [ ! -e /proc/self/fd/0 ] || [ ! -e /dev/fd ]; then
     exit 125;
 fi
 

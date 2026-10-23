@@ -13,6 +13,10 @@ $(shell mkdir -p $(TMP_DIR))
 export TMPDIR = $(TMP_DIR)
 export PROOT_TMP_DIR = $(TMP_DIR)
 
+# gdb would otherwise compile its Python modules in the system directory
+# they lie in, when the suite runs as root.
+export PYTHONDONTWRITEBYTECODE = 1
+
 CHECK_TESTS = $(patsubst %,check-%, $(wildcard test-*.sh) $(wildcard test-*.c))
 
 .PHONY: check clean_failure check_failure setup check-%
@@ -89,7 +93,7 @@ check-test-fdf487a0.c: test-fdf487a0
 	$(call check_c,$<,echo test | $(PROOT) ./$<)
 
 check-test-iiiiiiii.c: test-iiiiiiii
-	$(call check_c,$<,echo test | env PROOT_DONT_POLLUTE_ROOTFS=1 $(PROOT) -b /bin:/this_shall_not_exist_outside_proot ./$<)
+	$(call check_c,$<,echo test | env PROOT_DONT_POLLUTE_ROOTFS=1 $(PROOT) -b $(TMP_DIR):/this_shall_not_exist_outside_proot ./$<)
 
 check-test-9c07fad8.c: test-9c07fad8
 	$(call check_c,$<,$(PROOT) ./$<)
