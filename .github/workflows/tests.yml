@@ -1,0 +1,80 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# There is no concurrency group on purpose: each commit gets a run of
+# its own, which neither cancels the runs of the previous commits nor
+# waits for them to complete.
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: make check (${{ matrix.arch }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+            cc: gcc
+            # The 32-bit x86 loader and the -m32 programs of the suite.
+            packages: gcc-multilib
+          - arch: amd64
+            runner: ubuntu-26.04
+            # The compiler of Termux, which may optimize differently.
+            cc: clang
+            packages: gcc-multilib clang
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            # Unlike GCC, Clang builds the 32-bit ARM loader on arm64.
+            # Termux builds PRoot with Clang too.
+            cc: clang
+            packages: clang
+
+    # Unlike the implicit shell, this one runs with "pipefail": the
+    # status of "make check" isn't lost in the pipe to tee(1).
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils gawk gcc libc6-dev libtalloc-dev make \
+            busybox-static diffutils findutils gdb gettext hostname \
+            libcap2-bin procps strace util-linux \
+            ${{ matrix.packages }}
+
+      - name: Build
+        run: make -C src -j"$(nproc)" CC=${{ matrix.cc }}
+
+      - name: Run the test suite
+        run: make -C tests check 2>&1 | tee check.log
+
+      - name: Run the failed tests again, verbosely
+        if: failure() && hashFiles('check.log') != ''
+        run: |
+          sed -n 's/^  CHECK\t\(.*\) FAILED$/\1/p' check.log | sort -u |
+          while read -r name; do
+            for file in "tests/${name}.sh" "tests/${name}.c"; do
+              if [ -e "${file}" ]; then
+                echo "::group::${file}"
+                make -C tests V=1 "check-${file#tests/}" || true
+                echo "::endgroup::"
+              fi
+            done
+          done
