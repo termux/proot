@@ -14,7 +14,7 @@ fi
 # relative to that descriptor, so the link is refused rather than
 # followed.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 ROOTFS="${DIR}/rootfs"
 OUTSIDE="${DIR}/outside"
 mkdir -p "${ROOTFS}/bin" "${ROOTFS}/.l2s" "${OUTSIDE}"

@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which true` ] || [ -z `which mkdir` ]|| [ -z 
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 mkdir -p ${TMP}/true
 
 ! ${PROOT} true

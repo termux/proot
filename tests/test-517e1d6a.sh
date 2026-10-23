@@ -2,7 +2,7 @@ if [ ! -x  ${ROOTFS}/bin/argv ] || [ -z `which mcookie` ] || [ -z `which mkdir` 
     exit 125;
 fi
 
-BIN_DIR=/tmp/$(mcookie)
+BIN_DIR=${TMPDIR:?}/$(mcookie)
 TMP=$(mcookie)
 TMP2=$(mcookie)
 

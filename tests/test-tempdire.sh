@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which mkdir` ] || [ -z `which cp` ] || [ -z `
     exit 125
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 
 mkdir ${TMP}
 

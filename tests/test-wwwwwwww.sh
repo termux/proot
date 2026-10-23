@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which mkdir` ] || [ -z `which rm` ] || [ ! -x
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 mkdir ${TMP}
 cd ${TMP}
 ${PROOT} sh -c "cd ..; rm -r ${TMP}; mkdir ${TMP}; cd ${TMP}; ${ROOTFS}/bin/pwd"

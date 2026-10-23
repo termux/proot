@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which touch` ] || [ -z `which stat` ] || [ -z
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 touch ${TMP}
 
 ${PROOT} -0 stat -c %u:%g ${TMP} | grep 0:0

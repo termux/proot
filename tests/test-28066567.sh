@@ -16,7 +16,7 @@ fi
 NAME=$(mcookie)
 HOST=${ROOTFS}/tmp/${NAME}
 GUEST=/tmp/${NAME}
-OUTSIDE=/tmp/${NAME}.outside
+OUTSIDE=${TMPDIR:?}/${NAME}.outside
 
 trap 'rm -rf "${HOST}" "${OUTSIDE}"' EXIT
 

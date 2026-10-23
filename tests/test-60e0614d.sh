@@ -10,7 +10,7 @@ fi
 # once there were no free intermediates left, which replaced the last
 # one's.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/l2s"
 

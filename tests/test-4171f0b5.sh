@@ -10,7 +10,7 @@ fi
 # reported in /proc/self/fd -- and a count of 0, that is, the file
 # deleted at the first unlink(2), before broken chains were left alone.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}"
 

@@ -2,20 +2,20 @@ if [ ! -x  ${ROOTFS}/bin/readlink ] || [ -z `which mcookie` ] || [ -z `which tou
     exit 125;
 fi
 
+HOST=${TMPDIR:?}
 REGULAR=`mcookie`
 SYMLINK=`mcookie`
 
-touch /tmp/${REGULAR}
-ln -fs /tmp/${REGULAR} /tmp/${SYMLINK}
+touch ${HOST}/${REGULAR}
+ln -fs ${HOST}/${REGULAR} ${HOST}/${SYMLINK}
 
+# Same content in the rootfs, where it is a guest path.
 mkdir -p ${ROOTFS}/tmp
-touch ${ROOTFS}/tmp/${REGULAR}
-ln -fs /tmp/${REGULAR} ${ROOTFS}/tmp/${SYMLINK}
+ln -fs ${HOST}/${REGULAR} ${ROOTFS}/tmp/${SYMLINK}
 
-${PROOT} -b /tmp:/ced -r ${ROOTFS} /bin/readlink /tmp/${SYMLINK} | grep ^/tmp/${REGULAR}$
-${PROOT} -b /tmp:/ced -r ${ROOTFS} /bin/readlink /ced/${SYMLINK} | grep ^/ced/${REGULAR}$
+${PROOT} -b ${HOST}:/ced -r ${ROOTFS} /bin/readlink /tmp/${SYMLINK} | grep ^${HOST}/${REGULAR}$
+${PROOT} -b ${HOST}:/ced -r ${ROOTFS} /bin/readlink /ced/${SYMLINK} | grep ^/ced/${REGULAR}$
 
-rm -f /tmp/${REGULAR}
-rm -f /tmp/${SYMLINK}
-rm -f ${ROOTFS}/tmp/${REGULAR}
-
+rm -f ${HOST}/${REGULAR}
+rm -f ${HOST}/${SYMLINK}
+rm -f ${ROOTFS}/tmp/${SYMLINK}

@@ -4,6 +4,15 @@ PROOT  = $(DIR)/../src/proot
 CC     = gcc
 PROOT_RAW = $(PROOT)
 
+# The temporary files of the tests, of the tools they run and of PRoot
+# itself all go there, so that the suite writes nothing outside of the
+# repository.  The path is canonical: tests compare paths below it with
+# those the kernel reports.
+TMP_DIR := $(or $(realpath $(DIR)),$(error can't resolve $(DIR)))/tmp
+$(shell mkdir -p $(TMP_DIR))
+export TMPDIR = $(TMP_DIR)
+export PROOT_TMP_DIR = $(TMP_DIR)
+
 CHECK_TESTS = $(patsubst %,check-%, $(wildcard test-*.sh) $(wildcard test-*.c))
 
 .PHONY: check clean_failure check_failure setup check-%
@@ -38,8 +47,10 @@ check-test-bdc90417.c: test-bdc90417
 check-test-5bed7141.c: test-5bed7141
 	$(call check_c,$<,$(PROOT) ./$<)
 
+# The first run renames a directory of the guest rootfs, the second one
+# a directory of the host.
 check-test-5bed7143.c: test-5bed7143
-	$(call check_c,$<,$(PROOT) -r $(ROOTFS) -b . ./$<)
+	$(call check_c,$<,env TMPDIR=/tmp $(PROOT) -r $(ROOTFS) -b . ./$<)
 	$(call check_c,$<,$(PROOT) ./$<)
 
 check-test-16573e73.c: test-16573e73

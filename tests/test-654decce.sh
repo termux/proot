@@ -6,7 +6,7 @@ if [ `id -u` -eq 0 ]; then
     exit 125;
 fi
 
-TMP1=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
 TMP2=/tmp/$(mcookie)
 TMP3=$(mcookie)
 TMP4=$(mcookie)
@@ -32,6 +32,9 @@ ${PROOT} -v -1 -r ${ROOTFS} -b /etc/fstab:${TMP2}/${TMP3}/motd -b ${TMP1}:${TMP2
 
 ! chmod +rw ${ROOTFS}/${TMP2}
 rm -fr ${ROOTFS}/${TMP2}
+
+# From now on the guest paths are those of the host.
+TMP2=${TMPDIR:?}/$(mcookie)
 
 mkdir -p ${TMP2}
 chmod -rw ${TMP2}

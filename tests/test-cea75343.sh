@@ -2,9 +2,9 @@ if [ -z `which mcookie` ] || [ -z `which mkdir` ] || [ -z `which cat` ] || [ -z 
     exit 125;
 fi
 
-TMP1=/tmp/`mcookie`
-TMP2=/tmp/`mcookie`
-TMP3=/tmp/`mcookie`
+TMP1=${TMPDIR:?}/`mcookie`
+TMP2=${TMPDIR:?}/`mcookie`
+TMP3=${TMPDIR:?}/`mcookie`
 
 # /a/b/c
 # /a/b

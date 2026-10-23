@@ -8,7 +8,7 @@ fi
 # relative content, anywhere on the host for an absolute one.  Both
 # names were left pointing to these new files.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/l2s" "${DIR}/outside"
 

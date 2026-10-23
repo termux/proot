@@ -6,7 +6,7 @@ fi
 # PRoot rewrites that syscall as execve internally; link2symlink still has to
 # report the faked hard link the path leads to.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir "${DIR}" "${DIR}/bin" "${DIR}/lib"
 cp ${ROOTFS}/bin/puts_proc_self_exe "${DIR}/lib/original"

@@ -20,7 +20,7 @@ fi
 # path that regressed is taken.  The fix coerces the S_IFLNK host to a regular
 # file glue placeholder, so the bindings initialize cleanly with no warning.
 
-ERR=/tmp/$(mcookie).err
+ERR=${TMPDIR:?}/$(mcookie).err
 
 ${PROOT} -b /proc -r ${ROOTFS} \
     -b /proc/self/fd/0:/dev/stdin \

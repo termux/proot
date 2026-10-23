@@ -16,7 +16,7 @@ fi
 # The link has to be faked by PRoot itself: a real hard link created on the
 # host would pass this test without link2symlink doing anything.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 mkdir "${DIR}" "${DIR}/bin" "${DIR}/lib"
 cp ${ROOTFS}/bin/puts_proc_self_exe "${DIR}/lib/original"
 

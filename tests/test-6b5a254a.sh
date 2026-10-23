@@ -2,10 +2,10 @@ if [ -z `which mcookie` ] ||  [ -z `which echo` ] || [ -z `which touch` ] || [ -
     exit 125;
 fi
 
-FOO1=/tmp/$(mcookie)
-FOO2=/tmp/$(mcookie)
-FOO3=/tmp/$(mcookie)
-FOO4=/tmp/$(mcookie)
+FOO1=${TMPDIR:?}/$(mcookie)
+FOO2=${TMPDIR:?}/$(mcookie)
+FOO3=${TMPDIR:?}/$(mcookie)
+FOO4=${TMPDIR:?}/$(mcookie)
 
 echo "content of FOO1" > ${FOO1}
 echo "content of FOO2" > ${FOO2}

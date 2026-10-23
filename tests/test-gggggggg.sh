@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which env` ] || [ -z `which mkdir` ] || [ -z 
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 mkdir ${TMP}
 
 ! env PROOT_DONT_POLLUTE_ROOTFS=1 ${PROOT} -b /bin:${TMP}/dont/create ${ROOTFS}/bin/readdir ${TMP} | grep -w dont

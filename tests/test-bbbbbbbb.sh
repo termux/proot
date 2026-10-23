@@ -6,19 +6,19 @@ DONT_EXIST=$(mcookie)
 TMP1=$(mcookie)
 TMP2=$(mcookie)
 
-rm -f /tmp/${DONT_EXIST}
-${PROOT} ln -sf /${DONT_EXIST} /tmp/
-${PROOT} ln -sf /${DONT_EXIST} /tmp/
+rm -f ${TMPDIR:?}/${DONT_EXIST}
+${PROOT} ln -sf /${DONT_EXIST} ${TMPDIR:?}/
+${PROOT} ln -sf /${DONT_EXIST} ${TMPDIR:?}/
 
-rm -f /tmp/${DONT_EXIST}
-  ${PROOT} ln -sf /etc/fstab/${DONT_EXIST} /tmp/
-! ${PROOT} ln -sf /etc/fstab/${DONT_EXIST} /tmp/
+rm -f ${TMPDIR:?}/${DONT_EXIST}
+  ${PROOT} ln -sf /etc/fstab/${DONT_EXIST} ${TMPDIR:?}/
+! ${PROOT} ln -sf /etc/fstab/${DONT_EXIST} ${TMPDIR:?}/
 
-rm -f /tmp/${DONT_EXIST}
-rm -f /tmp/${TMP1} /tmp/${TMP2}
-touch /tmp/${TMP2}
-ln -sf /tmp/${DONT_EXIST} /tmp/${TMP1}
-! ${PROOT} ln /tmp/${TMP2} /tmp/${TMP1}
+rm -f ${TMPDIR:?}/${DONT_EXIST}
+rm -f ${TMPDIR:?}/${TMP1} ${TMPDIR:?}/${TMP2}
+touch ${TMPDIR:?}/${TMP2}
+ln -sf ${TMPDIR:?}/${DONT_EXIST} ${TMPDIR:?}/${TMP1}
+! ${PROOT} ln ${TMPDIR:?}/${TMP2} ${TMPDIR:?}/${TMP1}
 
-rm -f /tmp/${TMP1} /tmp/${TMP2}
-rm -f /tmp/${DONT_EXIST}
+rm -f ${TMPDIR:?}/${TMP1} ${TMPDIR:?}/${TMP2}
+rm -f ${TMPDIR:?}/${DONT_EXIST}

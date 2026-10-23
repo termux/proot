@@ -9,9 +9,24 @@
 #include <limits.h>
 #include <errno.h>
 
-#define TEMPLATE "/tmp/proot-test-5bed7143-XXXXXX"
+#define TEMPLATE "proot-test-5bed7143-XXXXXX"
 #define COOKIE1 "2fde3df3558fa30bec1b8ebad42df20f"
 #define COOKIE2 "2ba90289e48d1896e0601239ac25f764"
+
+/* A template for a name in $TMPDIR, or in /tmp without it.  */
+static char *temp_template(void)
+{
+	const char *directory = getenv("TMPDIR");
+	char *template;
+
+	if (directory == NULL)
+		directory = "/tmp";
+
+	if (asprintf(&template, "%s/" TEMPLATE, directory) < 0)
+		exit(EXIT_FAILURE);
+
+	return template;
+}
 
 int main()
 {
@@ -20,7 +35,7 @@ int main()
 	char *cwd;
 	int status;
 
-	path1 = mkdtemp(strdup(TEMPLATE));
+	path1 = mkdtemp(temp_template());
 	if (path1 == NULL)
 		exit(EXIT_FAILURE);
 
@@ -41,7 +56,7 @@ int main()
 		exit(EXIT_FAILURE);
 	close(status);
 
-	path2 = mktemp(strdup(TEMPLATE));
+	path2 = mktemp(temp_template());
 	status = rename(path1, path2);
 	if (status < 0)
 		exit(EXIT_FAILURE);

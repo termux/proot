@@ -2,7 +2,7 @@ if [ ! -x ${ROOTFS}/bin/readdir ] || [ -z `which mcookie` ] || [ -z `which rm` ]
     exit 125;
 fi
 
-TMP1=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
 TMP2=${TMP1}/$(mcookie)/$(mcookie)
 
 rm -fr ${TMP1}

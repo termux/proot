@@ -10,7 +10,7 @@ fi
 # on that link, as typescript-go and musl's realpath(3) do -- got
 # "/.l2s/.l2s.<name>0001.0002" instead of the name they opened.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 mkdir "${DIR}"
 echo content > "${DIR}/original"
 

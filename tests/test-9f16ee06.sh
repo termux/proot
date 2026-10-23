@@ -10,7 +10,7 @@ fi
 # symbolic links to the kernel, so renaming one onto the other removed
 # the former instead of doing nothing (#419).
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir "${DIR}"
 
@@ -18,6 +18,14 @@ if ! gcc "${SCRIPT_DIR}/renameat2.c" -o "${DIR}/renameat2" >/dev/null 2>&1; then
     rm -rf "${DIR}"
     exit 125
 fi
+
+# Not every filesystem supports RENAME_EXCHANGE, ecryptfs for instance.
+touch "${DIR}/p" "${DIR}/q"
+if ! "${DIR}/renameat2" "${DIR}/p" "${DIR}/q" 2; then
+    rm -rf "${DIR}"
+    exit 125
+fi
+rm "${DIR}/p" "${DIR}/q"
 
 set +e
 RESULT=$(${PROOT} -l sh -c '

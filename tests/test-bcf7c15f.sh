@@ -8,7 +8,7 @@ fi
 # of them: the 1000th file of a name failed to be linked with EMLINK,
 # or replaced the 999th before free suffixes were reserved.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/d" "${DIR}/l2s"
 

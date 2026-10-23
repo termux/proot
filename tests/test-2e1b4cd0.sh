@@ -8,7 +8,7 @@ fi
 # the middle of d_name: hidden entries were listed, listings were
 # mangled, and PRoot or the tracee looped forever.
 
-DIR=/tmp/$(mcookie).hidden
+DIR=${TMPDIR:?}/$(mcookie).hidden
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/list"
 

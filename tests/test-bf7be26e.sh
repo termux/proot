@@ -11,7 +11,7 @@ fi
 # parsed out of whatever name it ended at, and that file was deleted
 # when this count dropped to 0.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 mkdir -p "${DIR}/d1" "${DIR}/d2"
 
 # A chain link2symlink did not make, and a file it did not name.

@@ -10,7 +10,7 @@ fi
 # asked not to -- and used to leave the descriptor named after the file it
 # is stored as in the l2s directory.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 mkdir "${DIR}"
 echo content > "${DIR}/original"
 

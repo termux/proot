@@ -2,8 +2,8 @@ if [ -z `which mcookie` ] || [ -z `which mkdir` ]  || [ -z `which ln` ] || [ -z 
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
 mkdir ${TMP}
 ln -s /proc/self/fd ${TMP}/fd
 ln -s ${TMP}/fd/0 ${TMP}/stdin

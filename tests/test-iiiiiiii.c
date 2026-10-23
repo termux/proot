@@ -1,4 +1,6 @@
+#define _GNU_SOURCE
 #include <fcntl.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <stdlib.h>
@@ -8,11 +10,16 @@ int main(void)
 {
 	int result;
 	int status;
+	const char *directory;
 	char *path;
 	int fd;
 
-	path = strdup("/tmp/proot-test-iiiiiiii-XXXXXX");
-	if (path == NULL) {
+	directory = getenv("TMPDIR");
+	if (directory == NULL)
+		directory = "/tmp";
+
+	if (asprintf(&path, "%s/proot-test-iiiiiiii-XXXXXX", directory) < 0) {
+		path = NULL;
 		result = 125;
 		goto end;
 	}

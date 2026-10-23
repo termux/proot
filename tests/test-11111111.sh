@@ -48,17 +48,18 @@ if [ -z ${PROOT_STAGE2} ]; then
     create_components 1
     $(cd d1; create_components 2)
 
-    REF=/tmp/`mcookie`
-    mkdir -p /tmp
+    REF=${TMPDIR:?}/`mcookie`
 
     generate $REF
 
     env PROOT_STAGE2=$REF ${PROOT} -w ${PWD} sh ./$0
-    exit $?
+    STATUS=$?
+
+    rm -fr r1 d1 rl1 dl1
+    exit ${STATUS}
 fi
 
-TMP=/tmp/`mcookie`
-mkdir -p /tmp
+TMP=${TMPDIR:?}/`mcookie`
 
 generate $TMP
 

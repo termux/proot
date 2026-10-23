@@ -8,7 +8,7 @@ fi
 # shadow read end must keep the pipe alive; without it the writer is
 # killed by SIGPIPE and never creates the marker.
 
-MARKER=/tmp/$(mcookie).marker
+MARKER=${TMPDIR:?}/$(mcookie).marker
 rm -f "${MARKER}"
 
 ${PROOT} sh -c "{ echo x; sleep 0.2; echo y; touch ${MARKER}; } | head -c 2 > /dev/null"

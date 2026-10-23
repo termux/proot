@@ -8,7 +8,7 @@ fi
 # dropped unless the extension told PRoot the buffer was updated -- every
 # faked hard link looked like a file with a single link.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 mkdir "${DIR}"
 echo content > "${DIR}/original"
 

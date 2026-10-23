@@ -6,7 +6,7 @@ fi
 # link(2) is made of -- rename(2), symlink(2), readlink(2), ... -- to
 # the tracee as is, that is, as -EPERM, instead of their errno.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/l2s"
 

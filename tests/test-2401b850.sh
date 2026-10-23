@@ -2,8 +2,8 @@ if [ -z `which mcookie` ] || [ -z `which echo` ] || [ -z `which rm` ] || [ -z `w
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
 
 rm -f ${TMP}
 touch ${TMP}

@@ -7,7 +7,7 @@ fi
 # size the tracee passed: PRoot crashed whenever a listing failed, for
 # instance on a file that is not a directory.
 
-DIR=/tmp/$(mcookie).hidden
+DIR=${TMPDIR:?}/$(mcookie).hidden
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}"
 touch "${DIR}/file"

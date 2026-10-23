@@ -10,7 +10,7 @@ fi
 # namespace → ENOENT.  The fix normalises /proc/self/... to /proc/<pid>/...
 # inside readlink_proc so DONT_CANONICALIZE is correctly returned.
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 echo "hello" > ${TMP}
 
 # Bind /proc/self/fd explicitly to /dev/fd (common in proot-distro setups).

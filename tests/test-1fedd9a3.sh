@@ -6,7 +6,7 @@ if [ `id -u` -eq 0 ]; then
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 
 mkdir -p ${TMP}/foo
 chmod a-rwx ${TMP}/foo

@@ -2,7 +2,7 @@ if [ -z `which mcookie` ] || [ -z `which mkdir` ] || [ -z `which bash` ] || [ -z
     exit 125;
 fi
 
-TMP=/tmp/$(mcookie)
+TMP=${TMPDIR:?}/$(mcookie)
 
 mkdir -p ${TMP}
 cd ${TMP}

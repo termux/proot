@@ -2,11 +2,11 @@ if [ ! -x  ${ROOTFS}/bin/true ] || [ -z `which gdb` ]; then
     exit 125;
 fi
 
-TMP1=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
-TMP3=/tmp/$(mcookie)
-TMP4=/tmp/$(mcookie)
-TMP5=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
+TMP3=${TMPDIR:?}/$(mcookie)
+TMP4=${TMPDIR:?}/$(mcookie)
+TMP5=${TMPDIR:?}/$(mcookie)
 
 cat > ${TMP5} <<EOF
 break main

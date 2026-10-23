@@ -4,13 +4,13 @@ fi
 
 TMP=$(mcookie)
 
-cat > /tmp/${TMP} <<EOF
+cat > ${TMPDIR:?}/${TMP} <<EOF
 #!/bin/sh
 
 cat /proc/\$$/cmdline
 EOF
 
-chmod +x /tmp/${TMP}
-(cd /tmp; ${PROOT} sh -c "./${TMP}") | tr '\000' ' ' | grep "^/bin/sh ./${TMP} $"
+chmod +x ${TMPDIR:?}/${TMP}
+(cd ${TMPDIR:?}; ${PROOT} sh -c "./${TMP}") | tr '\000' ' ' | grep "^/bin/sh ./${TMP} $"
 
-rm /tmp/${TMP}
+rm ${TMPDIR:?}/${TMP}

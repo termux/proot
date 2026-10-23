@@ -2,8 +2,8 @@ if [ -z `which mcookie` ] || [ -z `which rm` ] || [ -z `which chmod` ] || [ -z `
     exit 125;
 fi
 
-TMP1=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
 
 echo "#! ${TMP2} -a"       > ${TMP1}
 echo "#! $(which echo) -b" > ${TMP2}

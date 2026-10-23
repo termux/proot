@@ -38,14 +38,14 @@ ${PROOT} -b /bin/true:${DONT_EXIST} ${DONT_EXIST}
 
 ${PROOT} -b /etc:/ -r / true
 
-TMP1=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
 
 echo "${TMP1}" > ${TMP1}
 echo "${TMP2}" > ${TMP2}
 
-REGULAR=/tmp/$(mcookie)
-SYMLINK_TO_REGULAR=/tmp/$(mcookie)
+REGULAR=${TMPDIR:?}/$(mcookie)
+SYMLINK_TO_REGULAR=${TMPDIR:?}/$(mcookie)
 ln -s ${REGULAR} ${SYMLINK_TO_REGULAR}
 
 ${PROOT} -v -1 -b ${TMP1}:${REGULAR} -b ${TMP2}:${SYMLINK_TO_REGULAR} cat ${REGULAR} | grep "^${TMP2}$"

@@ -2,8 +2,8 @@ if [ -z `which mcookie` ] || [ -z `which env` ] || [ -z `which head` ] || [ -z `
     exit 125;
 fi
 
-TMP1=/tmp/$(mcookie)
-TMP2=/tmp/$(mcookie)
+TMP1=${TMPDIR:?}/$(mcookie)
+TMP2=${TMPDIR:?}/$(mcookie)
 
 ${ROOTFS}/bin/ptrace-2 ${ROOTFS}/bin/true 2>&1 >${TMP1}
 

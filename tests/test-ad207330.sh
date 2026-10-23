@@ -8,7 +8,7 @@ fi
 # DirEntry::file_type(), Python's DirEntry.is_symlink()) skipped every
 # name of a hard-linked file, or tripped over the contradiction.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/l2s" "${DIR}/sibling" "${DIR}/separate"
 

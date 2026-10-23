@@ -9,8 +9,8 @@ if [ "${CHECK1}" != "${CHECK2}" ]; then
     exit 125;
 fi
 
-TMP="/tmp/$(mcookie)"
-TMP2="/tmp/$(mcookie)"
+TMP="${TMPDIR:?}/$(mcookie)"
+TMP2="${TMPDIR:?}/$(mcookie)"
 
 RMDIR=$(realpath -e $(which rmdir))
 MKDIR=$(realpath -e $(which mkdir))

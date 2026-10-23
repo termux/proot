@@ -3,7 +3,7 @@ if [ -z `which mcookie` ] || [ -z `which rmdir` ] || [ -z `which mkdir` ]; then
 fi
 
 TMP=$(mcookie)
-cd /tmp
+cd ${TMPDIR:?}
 
 ${PROOT} mkdir ./${TMP}
 ${PROOT} rmdir ./${TMP}

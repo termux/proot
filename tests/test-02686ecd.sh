@@ -8,7 +8,7 @@ fi
 # of the host: a file out of the guest rootfs was moved and replaced
 # with a faked hard link.
 
-DIR=/tmp/$(mcookie).l2s
+DIR=${TMPDIR:?}/$(mcookie).l2s
 SCRIPT_DIR=$(dirname "$0")
 mkdir -p "${DIR}/rootfs" "${DIR}/host"
 echo content > "${DIR}/host/file"
