@@ -504,6 +504,7 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 		case PR_stat64:
 		case PR_statfs:
 		case PR_statfs64:
+		case PR_statx:
 			return;
 
 		/* Otherwise: restore the previous mode of the final component.  */
