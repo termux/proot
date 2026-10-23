@@ -13,21 +13,24 @@ EXPECTED=$(${TMP})
 
 [ "${RESULT}" = "${EXPECTED}" ]
 
+# The kernel reads at most BINPRM_BUF_SIZE bytes of the "#!" line and
+# ignores the rest: 128 before Linux 5.1, 256 since then.  The lines below
+# are longer than 128 bytes, so their results are compared with the
+# kernel's rather than with what either size gives.
+
 echo '#!//../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../usr/bin/echo XXXXXXXXX' > ${TMP}
 
 RESULT=$(${PROOT} ${TMP})
 EXPECTED=$(${TMP})
 
 [ "${RESULT}" = "${EXPECTED}" ]
-[ "${RESULT}" = "${TMP}" ]
 
 echo '#!/../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../usr/bin/echo XXXXXXXXX' > ${TMP}
 
-! ${PROOT} ${TMP}
-[ $? -eq 0 ]
+RESULT=$(${PROOT} ${TMP} 2>/dev/null || echo failed)
+EXPECTED=$(${TMP} 2>/dev/null || echo failed)
 
-! ${TMP}
-[ $? -eq 0 ]
+[ "${RESULT}" = "${EXPECTED}" ]
 
 echo '#!                                                                                                                                                                                                        ' > ${TMP}
 
