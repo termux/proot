@@ -22,4 +22,4 @@ ${PROOT} -b ${FOO4}:${FOO3}! cat ${FOO1} | grep '^content of FOO1$'
 ${PROOT} -v -1 -b ${FOO1} -b ${FOO3}                 cat ${FOO1} | grep '^content of FOO1$'
 ${PROOT} -v -1 -b ${FOO1} -b ${FOO2}:/tmp/../${FOO1} cat ${FOO1} | grep '^content of FOO2$'
 
-rm -f ${FOO1} ${FOO2} ${FOO3}
+rm -f ${FOO1} ${FOO2} ${FOO3} ${FOO4}
