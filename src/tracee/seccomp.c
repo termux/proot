@@ -63,6 +63,21 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
 }
 
 /**
+ * Make the ORIGINAL registers those of the syscall that raised the
+ * SIGSYS, for one emulated right here that translates a path.  No
+ * sysenter stop saved them, so the extensions notified during the
+ * translation would see an earlier syscall instead: with -0, fake_id0
+ * took a statx(2) for the chmod(2) made before it, and gave the file
+ * statx(2) looked at the mode chmod(2) had set.
+ */
+static void set_original_regs_after_seccomp(Tracee *tracee)
+{
+	/* Not save_current_regs(): the registers changed so far must still
+	 * be pushed.  */
+	memcpy(&tracee->_regs[ORIGINAL], &tracee->_regs[CURRENT], sizeof(tracee->_regs[CURRENT]));
+}
+
+/**
  * Handle SIGSYS signal that was caused by system seccomp policy.
  *
  * Return 0 to swallow signal or SIGSYS to deliver it to process.
@@ -314,6 +329,9 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		char devshm_path[PATH_MAX];
 		struct statfs64 my_statfs64;
 		struct compat_statfs my_statfs;
+
+		set_original_regs_after_seccomp(tracee);
+
 		size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX);
 		if (size < 0) {
 			set_result_after_seccomp(tracee, size);
@@ -582,6 +600,7 @@ static int handle_seccomp_event_common(Tracee *tracee)
 
 	case PR_statx:
 	{
+		set_original_regs_after_seccomp(tracee);
 		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
 		break;
 	}
