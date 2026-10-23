@@ -28,7 +28,7 @@
 #include <stdlib.h>        /* exit(3), EXIT_*, strtol(3), {g,s}etenv(3), */
 #include <assert.h>        /* assert(3),  */
 #include <sys/types.h>     /* getpid(2),  */
-#include <unistd.h>        /* getpid(2),  */
+#include <unistd.h>        /* getpid(2), _exit(2), */
 #include <errno.h>         /* errno(3), */
 #include <libgen.h>        /* basename(3), */
 #ifdef __GLIBC__
@@ -448,6 +448,7 @@ bool exit_failure = true;
 int main(int argc, char *const argv[])
 {
 	Tracee *tracee;
+	pid_t pid;
 	int status;
 
 	/* Configure the memory allocator.  */
@@ -485,9 +486,22 @@ int main(int argc, char *const argv[])
 		initialize_extension(tracee, mountinfo_callback, NULL);
 
 	/* Start the first tracee.  */
+	pid = getpid();
 	status = launch_process(tracee, &argv[status]);
 	if (status < 0) {
 		print_execve_help(tracee, tracee->exe, status);
+
+		/* This is the child of launch_process() if it couldn't
+		 * execute the program.  Its syscalls are translated by
+		 * the parent now, so the talloc destructors run on exit
+		 * -- removal of the glue and of the placeholders of the
+		 * bindings -- would act on whatever these paths lead to
+		 * in the guest, the content of a host directory bound
+		 * there for instance.  The parent removes them.  */
+		if (getpid() != pid) {
+			fprintf(stderr, "fatal error: see `%s --help`.\n", basename(argv[0]));
+			_exit(EXIT_FAILURE);
+		}
 		goto error;
 	}
 
