@@ -32,6 +32,7 @@
 #include <talloc.h>     /* talloc_*, */
 #include <signal.h>     /* kill(2), SIGKILL, */
 #include <sys/ptrace.h> /* ptrace(2), PTRACE_*, */
+#include <sys/wait.h>   /* waitid(2), */
 #include <errno.h>      /* E*, */
 #include <inttypes.h>   /* PRI*, */
 
@@ -377,6 +378,21 @@ void free_terminated_tracees()
 	}
 }
 
+/**
+ * Tell whether PRoot is still the tracer of its new child @pid.  A
+ * child can be killed before PRoot gets the event of the fork-like
+ * syscall which created it, then its death can be reported first.
+ * PRoot isn't its tracer anymore once that's done.
+ */
+static bool is_still_traced(pid_t pid)
+{
+	siginfo_t info;
+	int status;
+
+	status = waitid(P_PID, pid, &info, WEXITED | WSTOPPED | WNOHANG | WNOWAIT | __WALL);
+	return (status == 0 || errno != ECHILD);
+}
+
 static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid);
 
 /**
@@ -639,7 +655,22 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	int ptrace_options;
 	Tracee *child;
 
-	child = get_tracee(parent, pid, true);
+	child = get_tracee(parent, pid, false);
+
+	/* Nothing was heard from this child yet, but it might be dead
+	 * already, and PRoot done with it (see is_still_traced()).
+	 * An entry created for it would then never be freed.  */
+	if (child == NULL && !is_still_traced(pid)) {
+		VERBOSE(parent, 1, "vpid %" PRIu64 ": child %d is gone already",
+			parent->vpid, pid);
+		parent->fork_rewritten_after_seccomp = false;
+		parent->clone_stripped_newns = false;
+		parent->clone_stripped_newnet = false;
+		return 0;
+	}
+
+	if (child == NULL)
+		child = new_tracee(pid);
 	if (child == NULL) {
 		note(parent, WARNING, SYSTEM, "running out of memory");
 		return -ENOMEM;
