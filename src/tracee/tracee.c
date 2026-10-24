@@ -859,8 +859,10 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	inherit_extensions(child, parent, clone_flags);
 
 	/* Restart the child tracee if it was already alive but
-	 * stopped until that moment.  */
-	if (child->sigstop == SIGSTOP_PENDING) {
+	 * stopped until that moment.  It isn't stopped anymore if it
+	 * was killed in the meantime: it was restarted towards its
+	 * death from its PTRACE_EVENT_EXIT stop already.  */
+	if (child->sigstop == SIGSTOP_PENDING && !child->running) {
 		bool keep_stopped = false;
 
 		child->sigstop = SIGSTOP_ALLOWED;
