@@ -379,6 +379,69 @@ void free_terminated_tracees()
 }
 
 /**
+ * Return the tracee which did the execve(2) reported by the
+ * PTRACE_EVENT_EXEC stop of @leader.  When a thread other than the
+ * leader of its process calls execve(2), the kernel kills all the
+ * other threads, then it releases the leader without reporting its
+ * death and gives its PID to the calling thread, whose own TID
+ * disappears just as silently:
+ *
+ *     In this stop, the tracer can use PTRACE_GETEVENTMSG to
+ *     retrieve the tracee's former thread ID.
+ *     [...]
+ *     On receiving the PTRACE_EVENT_EXEC stop notification, the
+ *     tracer should clean up all its internal data structures
+ *     describing the threads of this process, and retain only one
+ *     data structure
+ *
+ *     -- ptrace(2) man-page
+ *
+ * The one to retain is the entry of the thread, it carries the
+ * state of that execve(2), whose exit stage is still to come.  Left
+ * as is, this exit stage would be handled with the entry of the
+ * leader, and the one of the thread would never be freed, until
+ * attach_child() runs into it once the kernel reuses its TID.
+ *
+ * Note: this is meant to be called by the event loop only, right
+ * after waitpid(2), where nothing refers to the entry it frees.
+ */
+Tracee *get_execve_tracee(Tracee *leader)
+{
+	unsigned long former_pid = 0;
+	Tracee *relative;
+	Tracee *thread;
+	int status;
+
+	status = ptrace(PTRACE_GETEVENTMSG, leader->pid, NULL, &former_pid);
+	if (status < 0 || former_pid == 0 || (pid_t) former_pid == leader->pid)
+		return leader;
+
+	thread = get_tracee(leader, (pid_t) former_pid, false);
+	if (thread == NULL)
+		return leader;
+
+	VERBOSE(thread, 1, "vpid %" PRIu64 ": execve(2) from thread %d of pid %d",
+		thread->vpid, thread->pid, leader->pid);
+
+	/* From now on, the thread is the process the leader was.  */
+	LIST_FOREACH(relative, &tracees, link) {
+		if (relative->parent == leader)
+			relative->parent = thread;
+	}
+
+	thread->pid    = leader->pid;
+	thread->vpid   = leader->vpid;
+	thread->parent = leader->parent;
+	thread->clone  = leader->clone;
+	thread->killall_on_exit = leader->killall_on_exit;
+
+	/* Not terminate_tracee(): the process isn't over.  */
+	TALLOC_FREE(leader);
+
+	return thread;
+}
+
+/**
  * Tell whether PRoot is still the tracer of its new child @pid.  A
  * child can be killed before PRoot gets the event of the fork-like
  * syscall which created it, then its death can be reported first.

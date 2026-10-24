@@ -432,6 +432,13 @@ int event_loop()
 		tracee = get_tracee(NULL, pid, true);
 		assert(tracee != NULL);
 
+		/* The execve(2) of a thread other than the leader of
+		 * its process is reported with the PID of the leader
+		 * (see get_execve_tracee()).  */
+		if (WIFSTOPPED(tracee_status)
+		    && (tracee_status & 0xfff00) >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8))
+			tracee = get_execve_tracee(tracee);
+
 		tracee->running = false;
 
 		/* Fix up the registers of a new child at its first
