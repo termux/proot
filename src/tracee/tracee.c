@@ -732,6 +732,16 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 		return 0;
 	}
 
+	/* The kernel has just given @pid to this new child, so an
+	 * entry already set up for it was left by a former process
+	 * whose end PRoot missed: replace this entry.  */
+	if (child != NULL && child->exe != NULL) {
+		VERBOSE(parent, 1, "vpid %" PRIu64 ": pid %d reused, dropping vpid %" PRIu64,
+			parent->vpid, pid, child->vpid);
+		terminate_tracee(child);
+		child = NULL;
+	}
+
 	if (child == NULL)
 		child = new_tracee(pid);
 	if (child == NULL) {
