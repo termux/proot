@@ -92,9 +92,9 @@ static Link2SymlinkConfig *get_config(Extension *extension, bool allocate)
  * only knows such a file under the name it was given in the l2s
  * directory -- that's what it reports in "/proc/<PID>/fd/<FD>" -- so
  * these entries remember the name its tracee used instead.  There's no
- * bookkeeping for close(2), dup(2) or fork(2): an entry that doesn't
- * describe anymore the file its descriptor refers to is detected when
- * it is used, then discarded.
+ * bookkeeping for close(2), dup(2) or fork(2): an entry is matched by the
+ * file it leads to rather than by its descriptor number alone, and one
+ * that doesn't lead to the expected file is ignored.
  */
 #define FD_CACHE_SIZE 64
 
@@ -561,28 +561,52 @@ static void remember_fd(pid_t pid, int fd, const char link[PATH_MAX])
 }
 
 /**
- * Return the faked hard link the descriptor @fd of the process @pid
- * was opened through, or NULL if it is unknown.  Threads share their
- * descriptors but not their pid, so an entry remembered by a sibling
- * is returned as a fallback; the caller is expected to check it still
- * leads to the expected file.
+ * Return the faked hard link that leads to @host_path -- a file of the
+ * l2s directory -- among the descriptors remembered for the process
+ * @pid, or NULL if there's none.  Entries of @pid are tried before the
+ * ones of other processes, and the entry of the descriptor @fd itself
+ * before any other of its process.
+ *
+ * Descriptor numbers can't be relied on alone: shells open a redirected
+ * file on a high descriptor then dup2(2) it onto the expected one, so
+ * the number PRoot saw at open(2) isn't the one that is read later on.
+ * Likewise threads and children don't share their pid with the process
+ * that opened the file.  Whatever the entry, it is only returned when it
+ * still resolves to @host_path, so a stale one is never reported.
  */
-static const char *recall_fd(pid_t pid, int fd)
+static const char *recall_fd(pid_t pid, int fd, const char host_path[PATH_MAX])
 {
-	const char *fallback = NULL;
+	const char *best = NULL;
+	int best_rank = 3;
+	char final[PATH_MAX];
 	size_t index;
 
 	for (index = 0; index < FD_CACHE_SIZE; index++) {
-		if (fd_cache[index].link == NULL || fd_cache[index].fd != fd)
+		int rank;
+
+		if (fd_cache[index].link == NULL)
 			continue;
 
 		if (fd_cache[index].pid == pid)
-			return fd_cache[index].link;
+			rank = (fd_cache[index].fd == fd ? 0 : 1);
+		else
+			rank = (fd_cache[index].fd == fd ? 2 : 3);
 
-		fallback = fd_cache[index].link;
+		if (rank >= best_rank)
+			continue;
+
+		if (resolve_faked_hard_link(fd_cache[index].link, final) < 0)
+			continue;
+		if (strcmp(final, host_path) != 0)
+			continue;
+
+		best = fd_cache[index].link;
+		best_rank = rank;
+		if (rank == 0)
+			break;
 	}
 
-	return fallback;
+	return best;
 }
 
 /**
@@ -592,7 +616,6 @@ static const char *recall_fd(pid_t pid, int fd)
  */
 static void readlink_proc_fd(struct readlink_proc_fd_state *state)
 {
-	char final[PATH_MAX];
 	const char *link;
 
 	/* Only files that live in the l2s directory are reported by the
@@ -600,15 +623,10 @@ static void readlink_proc_fd(struct readlink_proc_fd_state *state)
 	if (!is_l2s_file(state->host_path))
 		return;
 
-	link = recall_fd(state->pid, state->fd);
+	/* Descriptor numbers get reused and links get removed: the name
+	 * returned is ensured to lead to this very file.  */
+	link = recall_fd(state->pid, state->fd, state->host_path);
 	if (link == NULL)
-		return;
-
-	/* Descriptor numbers get reused and links get removed, so ensure
-	 * the remembered name still leads to this very file.  */
-	if (resolve_faked_hard_link(link, final) < 0)
-		return;
-	if (strcmp(final, state->host_path) != 0)
 		return;
 
 	strcpy(state->host_path, link);
