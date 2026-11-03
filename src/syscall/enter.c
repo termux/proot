@@ -681,9 +681,9 @@ static struct fake_netlink_socket *fake_netlink_socket(Tracee *tracee, int fd)
 	if (fd < 0)
 		return NULL;
 
-	for (i = 0; i < tracee->fake_netlink_fds_count; i++)
-		if (tracee->fake_netlink_fds[i].fd == fd)
-			return &tracee->fake_netlink_fds[i];
+	for (i = 0; i < tracee->netlink->fake_netlink_fds_count; i++)
+		if (tracee->netlink->fake_netlink_fds[i].fd == fd)
+			return &tracee->netlink->fake_netlink_fds[i];
 
 	return NULL;
 }
@@ -703,7 +703,7 @@ static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
 	/* A reply the tracee never got round to reading dies with its
 	 * socket, just like the datagrams left in a receive queue.  */
 	talloc_free(sock->reply);
-	*sock = tracee->fake_netlink_fds[--tracee->fake_netlink_fds_count];
+	*sock = tracee->netlink->fake_netlink_fds[--tracee->netlink->fake_netlink_fds_count];
 }
 
 /**
@@ -718,8 +718,8 @@ static bool is_netlink_route_fd(const Tracee *tracee, int fd)
 	int i;
 	if (fd < 0)
 		return false;
-	for (i = 0; i < tracee->netlink_route_fds_count; i++)
-		if (tracee->netlink_route_fds[i] == fd)
+	for (i = 0; i < tracee->netlink->netlink_route_fds_count; i++)
+		if (tracee->netlink->netlink_route_fds[i] == fd)
 			return true;
 	return false;
 }
@@ -727,10 +727,10 @@ static bool is_netlink_route_fd(const Tracee *tracee, int fd)
 static void unmark_netlink_route_fd(Tracee *tracee, int fd)
 {
 	int i;
-	for (i = 0; i < tracee->netlink_route_fds_count; i++) {
-		if (tracee->netlink_route_fds[i] == fd) {
-			tracee->netlink_route_fds[i] =
-				tracee->netlink_route_fds[--tracee->netlink_route_fds_count];
+	for (i = 0; i < tracee->netlink->netlink_route_fds_count; i++) {
+		if (tracee->netlink->netlink_route_fds[i] == fd) {
+			tracee->netlink->netlink_route_fds[i] =
+				tracee->netlink->netlink_route_fds[--tracee->netlink->netlink_route_fds_count];
 			break;
 		}
 	}
@@ -1434,7 +1434,7 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
 	 * and talloc hands back memory aligned well past what struct
 	 * nlmsghdr and the rtnetlink payloads we lay out in it need.  */
 	if (sock->reply == NULL) {
-		sock->reply = talloc_size(tracee, max);
+		sock->reply = talloc_size(tracee->netlink, max);
 		if (sock->reply == NULL)
 			return;
 	}

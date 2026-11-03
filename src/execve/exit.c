@@ -493,6 +493,20 @@ void translate_execve_exit(Tracee *tracee)
 		talloc_set_name_const(tracee->exe, "$exe");
 	}
 
+	/* execve(2) gives the process a file descriptor table of its
+	 * own when it shared one (clone(2) with CLONE_FILES but not
+	 * CLONE_THREAD), so the netlink sockets PRoot tracks for that
+	 * table stop being shared too.  */
+	if (talloc_reference_count(tracee->netlink) >= 1) {
+		NetlinkFdTable *own = copy_netlink_fds(tracee, tracee->netlink, true);
+		if (own == NULL)
+			note(tracee, ERROR, INTERNAL, "can't alloc netlink fds after execve");
+		else {
+			talloc_unlink(tracee, tracee->netlink);
+			tracee->netlink = own;
+		}
+	}
+
 	/* New processes have no heap.  */
 	if (talloc_reference_count(tracee->heap) >= 1) {
 		talloc_unlink(tracee, tracee->heap);

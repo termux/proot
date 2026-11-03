@@ -782,18 +782,18 @@ void translate_syscall_exit(Tracee *tracee)
 			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
 			if (fd >= 0) {
 				int i;
-				if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+				if (tracee->netlink->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
 					/* Avoid duplicates.  */
 					bool present = false;
-					for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
-						if (tracee->fake_netlink_fds[i].fd == fd) {
+					for (i = 0; i < tracee->netlink->fake_netlink_fds_count; i++) {
+						if (tracee->netlink->fake_netlink_fds[i].fd == fd) {
 							present = true;
 							break;
 						}
 					}
 					if (!present) {
 						struct fake_netlink_socket *sock =
-							&tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++];
+							&tracee->netlink->fake_netlink_fds[tracee->netlink->fake_netlink_fds_count++];
 						memset(sock, 0, sizeof(*sock));
 						sock->fd = fd;
 					}
@@ -809,16 +809,16 @@ void translate_syscall_exit(Tracee *tracee)
 			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
 			if (fd >= 0) {
 				int i;
-				if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
+				if (tracee->netlink->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
 					bool present = false;
-					for (i = 0; i < tracee->netlink_route_fds_count; i++) {
-						if (tracee->netlink_route_fds[i] == fd) {
+					for (i = 0; i < tracee->netlink->netlink_route_fds_count; i++) {
+						if (tracee->netlink->netlink_route_fds[i] == fd) {
 							present = true;
 							break;
 						}
 					}
 					if (!present)
-						tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
+						tracee->netlink->netlink_route_fds[tracee->netlink->netlink_route_fds_count++] = fd;
 				}
 			}
 			tracee->pending_real_netlink_socket = false;
