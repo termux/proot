@@ -197,8 +197,9 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	 * name-space and heap.  */
 	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 	tracee->heap = talloc_zero(tracee, Heap);
+	tracee->netlink = talloc_zero(tracee, NetlinkFdTable);
 	tracee->auxv_fd = -1;
-	if (tracee->fs == NULL || tracee->heap == NULL)
+	if (tracee->fs == NULL || tracee->heap == NULL || tracee->netlink == NULL)
 		goto no_mem;
 
 	return tracee;
@@ -711,6 +712,45 @@ int new_child(Tracee *parent, word_t clone_flags)
 }
 
 /**
+ * Return a copy of @table allocated in @context, or NULL when out of
+ * memory.  The pending replies are copied only when @with_replies is
+ * true: after fork(2) the reply to a request belongs to whoever sent
+ * it, whereas execve(2) keeps the same process, so its replies stay.
+ */
+NetlinkFdTable *copy_netlink_fds(TALLOC_CTX *context, const NetlinkFdTable *table, bool with_replies)
+{
+	NetlinkFdTable *copy;
+	int i;
+
+	copy = talloc_zero(context, NetlinkFdTable);
+	if (copy == NULL)
+		return NULL;
+
+	for (i = 0; i < table->fake_netlink_fds_count; i++) {
+		const struct fake_netlink_socket *from = &table->fake_netlink_fds[i];
+		struct fake_netlink_socket *to = &copy->fake_netlink_fds[i];
+
+		to->fd = from->fd;
+		if (!with_replies || from->reply == NULL)
+			continue;
+
+		to->reply = talloc_memdup(copy, from->reply, MAX_FAKE_NETLINK_REPLY);
+		if (to->reply == NULL) {
+			talloc_free(copy);
+			return NULL;
+		}
+		to->reply_len = from->reply_len;
+		to->reply_off = from->reply_off;
+	}
+	copy->fake_netlink_fds_count = table->fake_netlink_fds_count;
+
+	memcpy(copy->netlink_route_fds, table->netlink_route_fds, sizeof(copy->netlink_route_fds));
+	copy->netlink_route_fds_count = table->netlink_route_fds_count;
+
+	return copy;
+}
+
+/**
  * Register @pid as the new child of @parent, see new_child().
  */
 static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
@@ -933,20 +973,26 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
 	parent->clone_stripped_newnet = false;
 
-	/* Open fds survive fork(2)/clone(2), so the child has to keep
-	 * recognising the netlink sockets its parent opened.  The reply
-	 * pending on either of them doesn't carry over: it belongs to
-	 * whoever sent the request.  */
-	for (int i = 0; i < parent->fake_netlink_fds_count; i++) {
-		child->fake_netlink_fds[i].fd = parent->fake_netlink_fds[i].fd;
-		child->fake_netlink_fds[i].reply = NULL;
-		child->fake_netlink_fds[i].reply_len = 0;
-		child->fake_netlink_fds[i].reply_off = 0;
+	/* With CLONE_FILES the child shares the fd table of its parent
+	 * (a thread, mostly), so it shares the netlink sockets PRoot
+	 * tracks too, with their pending replies: a socket opened, or a
+	 * request sent, by one thread can be read from by another.
+	 *
+	 * Without CLONE_FILES the child gets a copy of the fd table, so
+	 * it has to keep recognising the netlink sockets its parent
+	 * opened.  The reply pending on either of them doesn't carry
+	 * over: it belongs to whoever sent the request.  */
+	TALLOC_FREE(child->netlink);
+	if ((clone_flags & CLONE_FILES) != 0) {
+		child->netlink = talloc_reference(child, parent->netlink);
+		if (child->netlink == NULL)
+			return -ENOMEM;
 	}
-	child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
-	memcpy(child->netlink_route_fds, parent->netlink_route_fds,
-	       sizeof(child->netlink_route_fds));
-	child->netlink_route_fds_count = parent->netlink_route_fds_count;
+	else {
+		child->netlink = copy_netlink_fds(child, parent->netlink, false);
+		if (child->netlink == NULL)
+			return -ENOMEM;
+	}
 
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */

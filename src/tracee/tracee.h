@@ -71,6 +71,28 @@ typedef struct {
 	bool disabled;
 } Heap;
 
+/* The netlink sockets PRoot tracks for one fd table (see the comments
+ * in struct tracee).  Tracees that share their fd table (clone(2) with
+ * CLONE_FILES, ie. the threads of a process) share this structure, or
+ * a socket opened by one thread would be unknown to the others: Go
+ * moves goroutines between threads, so its recvfrom(2) then reached
+ * the empty AF_UNIX substitute and blocked for ever.  */
+typedef struct {
+#define MAX_FAKE_NETLINK_FDS 8
+#define MAX_FAKE_NETLINK_REPLY 8192
+	struct fake_netlink_socket {
+		int fd;
+		uint8_t *reply;
+		size_t reply_len;
+		size_t reply_off;
+	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+	int fake_netlink_fds_count;
+
+#define MAX_NETLINK_ROUTE_FDS 8
+	int netlink_route_fds[MAX_NETLINK_ROUTE_FDS];
+	int netlink_route_fds_count;
+} NetlinkFdTable;
+
 /* Information related to a tracee process. */
 typedef struct tracee {
 	/**********************************************************************
@@ -122,7 +144,7 @@ typedef struct tracee {
 	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
 	 * sandbox helpers like bubblewrap that try to bring up the
 	 * loopback interface inside their would-be net namespace.
-	 * fake_netlink_fds holds one entry per socket we silently
+	 * netlink->fake_netlink_fds holds one entry per socket we silently
 	 * redirected from AF_NETLINK to AF_UNIX/SOCK_DGRAM; see
 	 * enter.c / exit.c for the intercepts.
 	 *
@@ -134,27 +156,17 @@ typedef struct tracee {
 	 * along the way.  The buffer is allocated on demand and handed back
 	 * one datagram at a time ("reply_off" is how far the tracee has
 	 * read), since that is how the kernel delivers a dump.  */
-#define MAX_FAKE_NETLINK_FDS 8
-#define MAX_FAKE_NETLINK_REPLY 8192
-	struct fake_netlink_socket {
-		int fd;
-		uint8_t *reply;
-		size_t reply_len;
-		size_t reply_off;
-	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
-	int fake_netlink_fds_count;
+	NetlinkFdTable *netlink;
 	bool pending_fake_netlink_socket;
 
-	/* Fds of the *real* NETLINK_ROUTE sockets a tracee got when the
-	 * host didn't need the substitution above.  Such a socket lives
+	/* netlink->netlink_route_fds: fds of the *real* NETLINK_ROUTE
+	 * sockets a tracee got when the host didn't need the substitution
+	 * above.  Such a socket lives
 	 * in the host's network namespace, where a tracee has no
 	 * CAP_NET_ADMIN, so the requests a fake_netns tracee sends to
 	 * configure "its" namespace come back as NLMSG_ERROR(-EPERM);
 	 * netlink_ack_* remembers which reply to turn into a plain ack
 	 * (see handle_netlink_reply_exit).  */
-#define MAX_NETLINK_ROUTE_FDS 8
-	int netlink_route_fds[MAX_NETLINK_ROUTE_FDS];
-	int netlink_route_fds_count;
 	bool pending_real_netlink_socket;
 	bool netlink_ack_pending;
 	int netlink_ack_fd;
@@ -426,6 +438,7 @@ extern Tracee *get_execve_tracee(Tracee *leader);
 extern void resolve_pending_child(Tracee *parent);
 extern void adopt_held_children(void);
 extern Tracee *new_dummy_tracee(TALLOC_CTX *context);
+extern NetlinkFdTable *copy_netlink_fds(TALLOC_CTX *context, const NetlinkFdTable *table, bool with_replies);
 extern void terminate_tracee(Tracee *tracee);
 extern void free_terminated_tracees();
 extern int swap_config(Tracee *tracee1, Tracee *tracee2);
