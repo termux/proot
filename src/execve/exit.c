@@ -113,8 +113,7 @@ static int bind_proc_pid_auxv(const Tracee *ptracee)
 	 * auxiliary vectors of the previous execve(2).  */
 	binding = get_binding(ptracee, GUEST, guest_path);
 	if (binding != NULL && compare_paths(binding->guest.path, guest_path) == PATHS_ARE_EQUAL) {
-		remove_binding_from_all_lists(ptracee, binding);
-		TALLOC_FREE(binding);
+		free_binding(ptracee, binding);
 	}
 
 	host_path = create_temp_file(ptracee->ctx, "auxv");

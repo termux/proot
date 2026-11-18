@@ -287,6 +287,71 @@ void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding)
 }
 
 /**
+ * Keep @binding allocated until @holder releases it with
+ * release_binding(), even if it's freed meanwhile (see
+ * free_binding()).  This function returns -errno if an error
+ * occurred, otherwise 0.
+ */
+int hold_binding(const void *holder, Binding *binding)
+{
+	return talloc_reference(holder, binding) != NULL ? 0 : -ENOMEM;
+}
+
+/**
+ * Release the hold @holder has on @binding (see hold_binding()).
+ * The binding is freed if it's in no list anymore and nothing else
+ * holds it.
+ */
+void release_binding(const void *holder, Binding *binding)
+{
+	bool owned;
+
+	/* Still in use: the lists hold it.  */
+	if (   IS_LINKED(binding, link.pending)
+	    || IS_LINKED(binding, link.guest)
+	    || IS_LINKED(binding, link.host)) {
+		(void) talloc_unlink(holder, binding);
+		return;
+	}
+
+	/* @holder may own the binding now: removing a binding from a
+	 * list that owns it hands it over to a holder, if any (see
+	 * free_binding()).  Unlinking it from @holder then frees it,
+	 * or hands it over to another holder.  */
+	owned = talloc_parent(binding) == holder;
+	(void) talloc_unlink(holder, binding);
+
+	/* Otherwise it still belongs to the context it was created in
+	 * (a file-system name-space, a list of bindings, ...).  */
+	if (!owned && talloc_reference_count(binding) == 0)
+		talloc_free(binding);
+}
+
+/**
+ * Remove @binding from all the @tracee's lists of bindings and free
+ * it, unless something holds it (see hold_binding()): as nothing can
+ * reach it anymore, it would stay allocated as long as the context
+ * it was created in otherwise.  It's freed by removing it from the
+ * lists already if one of these owns it.
+ */
+void free_binding(const Tracee *tracee, Binding *binding)
+{
+	void *anchor;
+
+	/* Keep it allocated meanwhile, whichever case.  */
+	anchor = talloc_new(NULL);
+	if (anchor == NULL || hold_binding(anchor, binding) < 0) {
+		remove_binding_from_all_lists(tracee, binding);
+		talloc_free(anchor);
+		return;
+	}
+
+	remove_binding_from_all_lists(tracee, binding);
+	release_binding(anchor, binding);
+	talloc_free(anchor);
+}
+
+/**
  * Insert @binding into the list of @bindings, in a sorted manner so
  * as to make the substitution of nested bindings determistic, ex.:
  *
@@ -342,7 +407,7 @@ static void insort_binding(const Tracee *tracee, Side side, Binding *binding)
 
 			/* Replace this iterator with the new binding.  */
 			CIRCLEQ_INSERT_AFTER_(tracee, iterator, binding, side);
-			remove_binding_from_all_lists(tracee, iterator);
+			free_binding(tracee, iterator);
 			return;
 
 		case PATH1_IS_PREFIX:
@@ -842,7 +907,7 @@ int copy_bindings(Tracee *tracee, const FileSystemNameSpace *from)
 	 * or on error.  Removing a copy from the lists drops the
 	 * reference this list holds, not the ownership, so the copy
 	 * stays allocated until freed explicitly, as any binding does
-	 * (see bind_proc_pid_auxv()).  */
+	 * (see free_binding()).  */
 	for (binding = CIRCLEQ_FIRST(host);
 	     binding != (void *) host;
 	     binding = CIRCLEQ_NEXT(binding, link.host)) {

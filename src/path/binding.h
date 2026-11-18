@@ -55,5 +55,8 @@ extern Binding *get_binding(const Tracee *tracee, Side side, const char path[PAT
 extern const char *get_root(const Tracee* tracee);
 extern int substitute_binding(const Tracee* tracee, Side side, char path[PATH_MAX]);
 extern void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding);
+extern int hold_binding(const void *holder, Binding *binding);
+extern void release_binding(const void *holder, Binding *binding);
+extern void free_binding(const Tracee *tracee, Binding *binding);
 
 #endif /* BINDING_H */

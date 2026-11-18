@@ -370,7 +370,9 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 
 	/* Snapshot the current bindings before mutating the lists: the loop
 	 * below both inserts (rebased / re-exposed) and removes bindings, so
-	 * walking the live list would be unsafe. */
+	 * walking the live list would be unsafe.  The snapshot holds them
+	 * too: inserting a binding frees the one it replaces (same guest
+	 * path), which may be further in the snapshot. */
 	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
 	     iter != (void *) tracee->fs->bindings.guest;
 	     iter = CIRCLEQ_NEXT(iter, link.guest))
@@ -382,13 +384,20 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	i = 0;
 	for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
 	     iter != (void *) tracee->fs->bindings.guest && i < count;
-	     iter = CIRCLEQ_NEXT(iter, link.guest))
+	     iter = CIRCLEQ_NEXT(iter, link.guest)) {
+		if (hold_binding(snapshot, iter) < 0) {
+			while (i > 0)
+				release_binding(snapshot, snapshot[--i]);
+			talloc_free(snapshot);
+			return;
+		}
 		snapshot[i++] = iter;
+	}
 
 	/* Switch the root over to new_root and expose the previous root at
 	 * put_old, so the tracee can still reach it (bubblewrap accesses
 	 * everything via "/oldroot" right after the pivot). */
-	remove_binding_from_all_lists(tracee, root_binding);
+	free_binding(tracee, root_binding);
 	(void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
 	if (have_put_old)
 		(void) insort_binding3(tracee, tracee->fs, old_root_host, put_old_after);
@@ -417,7 +426,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 					       b->guest.path + new_root_len);
 			/* Drop the stale pre-pivot binding so it can't shadow
 			 * the rebased one (e.g. host->guest detranslation). */
-			remove_binding_from_all_lists(tracee, b);
+			free_binding(tracee, b);
 			continue;
 		}
 
@@ -442,6 +451,9 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 		}
 	}
 
+	/* The bindings dropped meanwhile are freed now.  */
+	for (i = 0; i < count; i++)
+		release_binding(snapshot, snapshot[i]);
 	talloc_free(snapshot);
 }
 
@@ -449,9 +461,9 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
  * Emulate umount(@target_user) by removing the matching binding (if
  * any) so that a subsequent access to @target_user no longer goes
  * through the now-unmounted location.  This is the inverse of
- * emulate_mount().  Bindings put in place at PRoot startup
- * (recommended -R bindings, the rootfs itself) are NOT removed: we
- * only drop runtime bindings whose guest path exactly matches.
+ * emulate_mount().  Only a binding whose guest path is exactly
+ * @target_user is dropped, be it put in place at PRoot startup or by
+ * emulate_mount(), and never the root one.
  */
 static void emulate_umount(Tracee *tracee, const char *target_user)
 {
@@ -475,7 +487,7 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 	if (strcmp(binding->guest.path, guest_path) != 0)
 		return;
 
-	remove_binding_from_all_lists(tracee, binding);
+	free_binding(tracee, binding);
 }
 
 /**
