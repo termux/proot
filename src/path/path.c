@@ -333,6 +333,33 @@ void chop_finality(char *path)
 }
 
 /**
+ * Canonicalize @user_path as a guest path, relative to the @tracee's
+ * cwd when @user_path is relative.  Stores the result in @guest_path
+ * with any trailing "/" or "/." stripped, so it can be used as a
+ * binding key.  Returns 0 on success, -errno otherwise.
+ */
+int guest_canonicalize(Tracee *tracee, const char *user_path,
+		       char guest_path[PATH_MAX])
+{
+	int status;
+
+	if (user_path[0] == '/')
+		strcpy(guest_path, "/");
+	else {
+		status = getcwd2(tracee, guest_path);
+		if (status < 0)
+			return status;
+	}
+
+	status = canonicalize(tracee, user_path, true, guest_path, 0);
+	if (status < 0)
+		return status;
+
+	chop_finality(guest_path);
+	return 0;
+}
+
+/**
  * Put in @path the result of readlink(/proc/@pid/fd/@fd).  This
  * function returns -errno if an error occured, othrwise 0.
  */

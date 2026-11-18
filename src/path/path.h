@@ -75,6 +75,8 @@ extern int which(Tracee *tracee, const char *paths, char guest_path[PATH_MAX], c
 extern int realpath2(Tracee *tracee, char host_path[PATH_MAX], const char *path, bool deref_final);
 extern int getcwd2(Tracee *tracee, char guest_path[PATH_MAX]);
 extern void chop_finality(char *path);
+extern int guest_canonicalize(Tracee *tracee, const char *user_path,
+			      char guest_path[PATH_MAX]);
 
 extern int translate_path(Tracee *tracee, char host_path[PATH_MAX],
 			int dir_fd, const char *guest_path, bool deref_final);

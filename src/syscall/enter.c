@@ -255,33 +255,6 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 }
 
 /**
- * Canonicalize @user_path as a guest path, relative to the @tracee's
- * cwd when @user_path is relative.  Stores the result in @guest_path
- * with any trailing "/" or "/." stripped, so it can be used as a
- * binding key.  Returns 0 on success, -errno otherwise.
- */
-static int guest_canonicalize(Tracee *tracee, const char *user_path,
-			      char guest_path[PATH_MAX])
-{
-	int status;
-
-	if (user_path[0] == '/')
-		strcpy(guest_path, "/");
-	else {
-		status = getcwd2(tracee, guest_path);
-		if (status < 0)
-			return status;
-	}
-
-	status = canonicalize(tracee, user_path, true, guest_path, 0);
-	if (status < 0)
-		return status;
-
-	chop_finality(guest_path);
-	return 0;
-}
-
-/**
  * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
  * PRoot binding from a host directory to the canonicalized target.
  * Bind mounts use the translated source; "proc"/"sysfs" use the

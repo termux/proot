@@ -1,5 +1,7 @@
 #include <errno.h>       /* E*, */
 #include <sys/stat.h>    /* stat, */
+#include <stdlib.h>      /* realpath(3), */
+#include <string.h>      /* strcpy(3), */
 
 #include "tracee/reg.h"
 #include "tracee/mem.h"
@@ -34,7 +36,20 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 		if ((int) result != -EPERM)
 			return 0;
+
+		/* The path the tracee passed, not the translated one.  */
+		input = peek_reg(tracee, ORIGINAL, SYSARG_1);
 	}
+
+	/* Get chroot target guest path.  */
+	status = read_path(tracee, path_guest, input);
+	if (status < 0)
+		return status;
+
+	/* The kernel rejects an empty path, which is checked only here
+	 * when the syscall couldn't even be made (SIGSYS).  */
+	if (path_guest[0] == '\0')
+		return -ENOENT;
 
 	/* Get chroot target path translated to host.  */
 	if (!from_sigsys) {
@@ -42,16 +57,14 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 
 		status = read_path(tracee, path, input);
 	} else {
-		status = read_path(tracee, path_guest, input);
-		if (status < 0)
-			return status;
 		status = translate_path(tracee, path, AT_FDCWD, path_guest, true);
 	}
 
 	if (status < 0)
 		return status;
 
-	realpath(path, path_host_absolute);
+	if (realpath(path, path_host_absolute) == NULL)
+		return -errno;
 
 	/* Handle "new rootfs == current rootfs" case.  */
 	status = compare_paths(get_root(tracee), path_host_absolute);
@@ -70,13 +83,13 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 	if (!S_ISDIR(statbuf.st_mode))
 		return -ENOTDIR;
 
-	/* Fetch guest path if we didn't already.  */
-	if (!from_sigsys) {
-		input = peek_reg(tracee, ORIGINAL, SYSARG_1);
-		status = read_path(tracee, path, input);
-		if (status < 0)
-			return -errno;
-	}
+	/* Canonicalize the guest path, as for the guest paths of the
+	 * bindings, so that it compares with them (whether it's relative,
+	 * holds "..", or goes through a symbolic link).  */
+	status = guest_canonicalize(tracee, path_guest, path);
+	if (status < 0)
+		return status;
+	strcpy(path_guest, path);
 
 	/* Check if chroot target has bind mounts inside.
 	 * (Those are not supported currently).  */
