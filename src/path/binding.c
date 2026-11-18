@@ -415,36 +415,72 @@ Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 }
 
 /**
- * Free all bindings from @bindings.
+ * Free all bindings from @bindings, the list of the given @side.
  *
- * Note: this is a Talloc destructor.
+ * The list is unlinked by itself, not looked up in the file-system
+ * name-space of a tracee as CIRCLEQ_REMOVE_() does: when it is freed,
+ * the name-space may be detached from its tracee already (see
+ * chroot.c).  TRACEE() would abort then, since Talloc can't tell the
+ * parent of a context being freed.
  */
-static int remove_bindings(Bindings *bindings)
+static void remove_bindings(Bindings *bindings, Side side)
 {
 	Binding *binding;
-	Tracee *tracee;
 
 	/* Unlink all bindings from the @link list.  */
 #define CIRCLEQ_REMOVE_ALL(name) do {				\
 	binding = CIRCLEQ_FIRST(bindings);			\
 	while (binding != (void *) bindings) {			\
 		Binding *next = CIRCLEQ_NEXT(binding, link.name);\
-		CIRCLEQ_REMOVE_(tracee, binding, name);		\
+		CIRCLEQ_REMOVE(bindings, binding, link.name);	\
+		binding->link.name.cqe_next = NULL;		\
+		binding->link.name.cqe_prev = NULL;		\
+		talloc_unlink(bindings, binding);		\
 		binding = next;					\
 	}							\
 } while (0)
 
-	/* Search which link is used by this list.  */
-	tracee = TRACEE(bindings);
-	if (bindings == tracee->fs->bindings.pending)
+	switch (side) {
+	case PENDING:
 		CIRCLEQ_REMOVE_ALL(pending);
-	else if (bindings == tracee->fs->bindings.guest)
+		break;
+
+	case GUEST:
 		CIRCLEQ_REMOVE_ALL(guest);
-	else if (bindings == tracee->fs->bindings.host)
+		break;
+
+	case HOST:
 		CIRCLEQ_REMOVE_ALL(host);
+		break;
+
+	default:
+		assert(0);
+	}
+
+#undef CIRCLEQ_REMOVE_ALL
 
 	bzero(bindings, sizeof(Bindings));
+}
 
+/**
+ * Talloc destructors of the lists of bindings, one per side since
+ * each side chains the bindings through its own link.
+ */
+static int remove_pending_bindings(Bindings *bindings)
+{
+	remove_bindings(bindings, PENDING);
+	return 0;
+}
+
+static int remove_guest_bindings(Bindings *bindings)
+{
+	remove_bindings(bindings, GUEST);
+	return 0;
+}
+
+static int remove_host_bindings(Bindings *bindings)
+{
+	remove_bindings(bindings, HOST);
 	return 0;
 }
 
@@ -467,7 +503,7 @@ Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool m
 		if (tracee->fs->bindings.pending == NULL)
 			return NULL;
 		CIRCLEQ_INIT(tracee->fs->bindings.pending);
-		talloc_set_destructor(tracee->fs->bindings.pending, remove_bindings);
+		talloc_set_destructor(tracee->fs->bindings.pending, remove_pending_bindings);
 	}
 
 	/* Allocate an empty binding.  */
@@ -732,8 +768,8 @@ int initialize_bindings(Tracee *tracee)
 	CIRCLEQ_INIT(tracee->fs->bindings.guest);
 	CIRCLEQ_INIT(tracee->fs->bindings.host);
 
-	talloc_set_destructor(tracee->fs->bindings.guest, remove_bindings);
-	talloc_set_destructor(tracee->fs->bindings.host, remove_bindings);
+	talloc_set_destructor(tracee->fs->bindings.guest, remove_guest_bindings);
+	talloc_set_destructor(tracee->fs->bindings.host, remove_host_bindings);
 
 	/* The binding to "/" has to be installed before other
 	 * bindings since this former is required to canonicalize
