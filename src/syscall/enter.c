@@ -570,6 +570,39 @@ void apply_emulated_pivot_root(Tracee *tracee)
 }
 
 /**
+ * Emulate unshare(2) with the flags in the @tracee's registers.  PRoot
+ * can't create name-spaces, so the syscall itself is voided, but what
+ * it emulates of them is unshared: a new mount name-space starts with
+ * a copy of the bindings, since sandbox helpers do mount(2) right
+ * after unshare(CLONE_NEWNS) and this must not change what the other
+ * tracees see; a new network name-space gets rtnetlink answers of its
+ * own (see is_netns_netlink_fd()).  Safe to call from both the normal
+ * sysenter path and the SIGSYS handler.  This function returns -errno
+ * if an error occurred, otherwise 0.
+ */
+int apply_emulated_unshare(Tracee *tracee)
+{
+	word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
+	int status;
+
+	/* As for the kernel, a new mount or user name-space implies
+	 * a file-system name-space (working directory) of its own.  */
+	if ((flags & (CLONE_NEWNS | CLONE_NEWUSER)) != 0)
+		flags |= CLONE_FS;
+
+	if ((flags & CLONE_FS) != 0) {
+		status = unshare_fs(tracee, (flags & CLONE_NEWNS) != 0);
+		if (status < 0)
+			return status;
+	}
+
+	if ((flags & CLONE_NEWNET) != 0)
+		tracee->fake_netns = true;
+
+	return 0;
+}
+
+/**
  * Helpers for emulating AF_NETLINK / NETLINK_ROUTE traffic.  Some
  * environments deny the tracee a real netlink socket (Android's
  * SELinux policy on untrusted_app domains, seccomp filters inherited
@@ -2501,15 +2534,13 @@ int translate_syscall_enter(Tracee *tracee)
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
 
-	/* Pretend namespace syscalls succeed without doing anything;
-	 * PRoot can't really create namespaces, and sandbox helpers
-	 * like bubblewrap only check the return value.  Remember an
-	 * unshared network namespace though: the tracee now expects to
-	 * be able to configure "its" interfaces (see enter.c netlink
-	 * helpers).  */
+	/* Pretend namespace syscalls succeed; PRoot can't really
+	 * create namespaces.  What it emulates of those unshare(2)
+	 * asks for is unshared though, see apply_emulated_unshare().  */
 	case PR_unshare:
-		if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
-			tracee->fake_netns = true;
+		status = apply_emulated_unshare(tracee);
+		if (status < 0)
+			break;
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		status = 0;

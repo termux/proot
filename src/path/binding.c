@@ -419,9 +419,10 @@ Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
  *
  * The list is unlinked by itself, not looked up in the file-system
  * name-space of a tracee as CIRCLEQ_REMOVE_() does: when it is freed,
- * the name-space may be detached from its tracee already (see
- * chroot.c).  TRACEE() would abort then, since Talloc can't tell the
- * parent of a context being freed.
+ * the name-space may not use it anymore (see copy_bindings()), or may
+ * be detached from its tracee already (see chroot.c).  TRACEE() would
+ * abort then, since Talloc can't tell the parent of a context being
+ * freed.
  */
 static void remove_bindings(Bindings *bindings, Side side)
 {
@@ -800,4 +801,70 @@ int initialize_bindings(Tracee *tracee)
 		print_bindings(tracee);
 
 	return 0;
+}
+
+/**
+ * Make @tracee->fs use its own copy of the bindings of the file-system
+ * name-space @from, as a new mount name-space starts with a copy of the
+ * mounts of the one it comes from: the bindings added or removed later
+ * in either of them (see emulate_mount()) don't show in the other.
+ * @from can be @tracee->fs itself.  The lists of bindings @tracee->fs
+ * used so far are released.  This function returns -errno if an error
+ * occurred (@tracee->fs is unchanged then), otherwise 0.
+ */
+int copy_bindings(Tracee *tracee, const FileSystemNameSpace *from)
+{
+	FileSystemNameSpace *fs = tracee->fs;
+	Bindings *previous_guest = fs->bindings.guest;
+	Bindings *previous_host  = fs->bindings.host;
+	Bindings *host = from->bindings.host;
+	const Binding *binding;
+
+	fs->bindings.guest = talloc_zero(fs, Bindings);
+	fs->bindings.host  = talloc_zero(fs, Bindings);
+	if (fs->bindings.guest == NULL || fs->bindings.host == NULL)
+		goto error;
+
+	CIRCLEQ_INIT(fs->bindings.guest);
+	CIRCLEQ_INIT(fs->bindings.host);
+
+	talloc_set_destructor(fs->bindings.guest, remove_guest_bindings);
+	talloc_set_destructor(fs->bindings.host, remove_host_bindings);
+
+	/* Copy the bindings in the order of the "host" list.  Of the
+	 * bindings of the same host path, insort_binding() keeps the
+	 * first inserted first, so get_binding() picks the same one as
+	 * in @from to detranslate a path.  The "guest" list doesn't hold
+	 * such duplicates: its order follows from the paths alone.
+	 *
+	 * The copies belong to the new "guest" list, so they are freed
+	 * along with the lists, once no name-space uses them anymore,
+	 * or on error.  Removing a copy from the lists drops the
+	 * reference this list holds, not the ownership, so the copy
+	 * stays allocated until freed explicitly, as any binding does
+	 * (see bind_proc_pid_auxv()).  */
+	for (binding = CIRCLEQ_FIRST(host);
+	     binding != (void *) host;
+	     binding = CIRCLEQ_NEXT(binding, link.host)) {
+		if (insort_binding3(tracee, fs->bindings.guest, binding->host.path,
+				    binding->guest.path) == NULL)
+			goto error;
+	}
+
+	/* They are freed unless another name-space still uses them.  */
+	if (previous_guest != NULL)
+		(void) talloc_unlink(fs, previous_guest);
+	if (previous_host != NULL)
+		(void) talloc_unlink(fs, previous_host);
+
+	return 0;
+
+error:
+	TALLOC_FREE(fs->bindings.guest);
+	TALLOC_FREE(fs->bindings.host);
+
+	fs->bindings.guest = previous_guest;
+	fs->bindings.host  = previous_host;
+
+	return -ENOMEM;
 }

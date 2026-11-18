@@ -107,6 +107,10 @@ check-test-f6b33793.c: test-f6b33793
 	$(call check_c,$<,$(PROOT) ./$<)
 	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) ./$<)
 
+check-test-7e1d4c2a.c: test-7e1d4c2a
+	$(call check_c,$<,$(PROOT) ./$<)
+	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) ./$<)
+
 check_c = $(Q)if [ -e $< ]; then			\
 		$(2) $(silently); $(call check,$(1))	\
 	else						\
@@ -231,6 +235,9 @@ test-c47aeb7d: test-c47aeb7d.c
 	$(Q)$(CC) $< -pthread -o $@ $(silently) || true
 
 test-f6b33793: test-f6b33793.c
+	$(Q)$(CC) $< -pthread -o $@ $(silently) || true
+
+test-7e1d4c2a: test-7e1d4c2a.c
 	$(Q)$(CC) $< -pthread -o $@ $(silently) || true
 
 ######################################################################

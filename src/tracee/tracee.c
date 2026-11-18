@@ -891,22 +891,9 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 			 * silently stripped).  Give the child its own
 			 * copy of the binding tree so emulated mount(2)
 			 * calls don't propagate back to the parent.  */
-			Binding *iter;
-
-			child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
-			child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
-			if (   child->fs->bindings.guest == NULL
-			    || child->fs->bindings.host  == NULL)
-				return -ENOMEM;
-			CIRCLEQ_INIT(child->fs->bindings.guest);
-			CIRCLEQ_INIT(child->fs->bindings.host);
-
-			for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
-			     iter != (void *) parent->fs->bindings.guest;
-			     iter = CIRCLEQ_NEXT(iter, link.guest))
-				(void) insort_binding3(child, child->fs,
-						       iter->host.path,
-						       iter->guest.path);
+			int status = copy_bindings(child, parent->fs);
+			if (status < 0)
+				return status;
 		}
 		else {
 			/* Bindings are shared across file-system name-spaces since a
@@ -996,6 +983,71 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	}
 
 	VERBOSE(child, 1, "vpid %" PRIu64 ": pid %d", child->vpid, child->pid);
+
+	return 0;
+}
+
+/**
+ * Stop sharing the file-system name-space of @tracee with the tracees
+ * it shares it with since a clone(CLONE_FS), like unshare(CLONE_FS)
+ * does: the current working directory is copied.  With @new_mount_ns,
+ * as for unshare(CLONE_NEWNS), which implies CLONE_FS, the bindings
+ * are copied too, so the emulated mount(2) calls @tracee makes from
+ * now on don't affect the tracees it shared them with, nor the other
+ * way round (see attach_child()).  This function returns -errno if an
+ * error occurred, otherwise 0.
+ */
+int unshare_fs(Tracee *tracee, bool new_mount_ns)
+{
+	FileSystemNameSpace *previous = tracee->fs;
+	FileSystemNameSpace *fs;
+	int status;
+
+	/* No other tracee uses this name-space, so it's @tracee's own
+	 * already: only its bindings may need a copy, made in place.  */
+	if (talloc_reference_count(previous) == 0) {
+		if (!new_mount_ns)
+			return 0;
+
+		/* Its bindings are its own already.  */
+		if (   talloc_reference_count(previous->bindings.guest) == 0
+		    && talloc_reference_count(previous->bindings.host) == 0)
+			return 0;
+
+		return copy_bindings(tracee, previous);
+	}
+
+	fs = talloc_zero(tracee, FileSystemNameSpace);
+	if (fs == NULL)
+		return -ENOMEM;
+
+	fs->cwd = talloc_strdup(fs, previous->cwd);
+	if (fs->cwd == NULL) {
+		talloc_free(fs);
+		return -ENOMEM;
+	}
+	talloc_set_name_const(fs->cwd, "$cwd");
+
+	tracee->fs = fs;
+
+	if (new_mount_ns)
+		status = copy_bindings(tracee, previous);
+	else {
+		/* Same mounts, as after a fork(2).  */
+		fs->bindings.guest = talloc_reference(fs, previous->bindings.guest);
+		fs->bindings.host  = talloc_reference(fs, previous->bindings.host);
+		status = (fs->bindings.guest == NULL || fs->bindings.host == NULL)
+			? -ENOMEM : 0;
+	}
+
+	if (status < 0) {
+		tracee->fs = previous;
+		talloc_free(fs);
+		return status;
+	}
+
+	/* The other tracees keep using it.  */
+	(void) talloc_unlink(tracee, previous);
 
 	return 0;
 }
