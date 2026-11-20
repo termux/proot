@@ -119,6 +119,10 @@ check-test-6b2f0d58.c: test-6b2f0d58
 	$(call check_c,$<,$(PROOT) -b /proc ./$<)
 	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -b /proc ./$<)
 
+check-test-73e09cd8.c: test-73e09cd8
+	$(call check_c,$<,$(PROOT) -0 -b /proc ./$<)
+	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc ./$<)
+
 check_c = $(Q)if [ -e $< ]; then			\
 		$(2) $(silently); $(call check,$(1))	\
 	else						\
@@ -252,6 +256,9 @@ test-4c9e2b17: test-4c9e2b17.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 test-6b2f0d58: test-6b2f0d58.c
+	$(Q)$(CC) $< -o $@ $(silently) || true
+
+test-73e09cd8: test-73e09cd8.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 ######################################################################

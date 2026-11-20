@@ -77,7 +77,6 @@
 #include "path/path.h"
 #include "path/canon.h"
 #include "path/binding.h"
-#include "path/temp.h"
 #include "arch.h"
 
 /* Older kernel headers may lack these. */
@@ -257,10 +256,11 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 /**
  * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
  * PRoot binding from a host directory to the canonicalized target.
- * Bind mounts use the translated source; "proc"/"sysfs" use the
- * matching host file-system; "tmpfs"/"devpts"/"devtmpfs" get a fresh
- * empty directory.  Any other case is silently ignored: the caller
- * will still see the syscall succeed (we always void it).
+ * Bind mounts use the translated source; "proc"/"sysfs"/"devtmpfs"/
+ * "devpts" use the matching host file-system; "tmpfs" gets a fresh
+ * empty directory (see insort_tmpfs_binding()).  Any other case is
+ * silently ignored: the caller will still see the syscall succeed (we
+ * always void it).
  */
 static void emulate_mount(Tracee *tracee, const char *src_user,
 			  const char *target_user, const char *fstype,
@@ -268,7 +268,7 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 {
 	char host_path[PATH_MAX];
 	char guest_path[PATH_MAX];
-	const char *tmpdir;
+	bool tmpfs = false;
 
 	if ((flags & MS_REMOUNT) != 0)
 		return;
@@ -285,20 +285,20 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 		strcpy(host_path, "/dev");
 	else if (strcmp(fstype, "devpts") == 0)
 		strcpy(host_path, "/dev/pts");
-	else if (strcmp(fstype, "tmpfs") == 0) {
-		tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
-		if (tmpdir == NULL)
-			return;
-		strncpy(host_path, tmpdir, PATH_MAX - 1);
-		host_path[PATH_MAX - 1] = '\0';
-	}
+	else if (strcmp(fstype, "tmpfs") == 0)
+		tmpfs = true;
 	else
 		return;
 
-	chop_finality(host_path);
-
 	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
 		return;
+
+	if (tmpfs) {
+		(void) insort_tmpfs_binding(tracee, tracee->fs, guest_path);
+		return;
+	}
+
+	chop_finality(host_path);
 
 	(void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
 }

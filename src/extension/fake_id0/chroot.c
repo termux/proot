@@ -108,16 +108,26 @@ int handle_chroot_exit_end(Tracee *tracee, Config *config, bool from_sigsys) {
 
 	/* Change tracee root binding if supported.  */
 	if (!seen_bind_under_new_root) {
+		FileSystemNameSpace *previous;
+
 		/* Save current dir.  */
 		status = translate_path(tracee, path, AT_FDCWD, tracee->fs->cwd, true);
 		if (status < 0)
 			return status;
 
-		/* Replace tracee bindings */
-		talloc_unlink(tracee, tracee->fs);
+		/* Replace tracee bindings.  The previous ones are released
+		 * last: the new root may be a tmpfs only these hold (see
+		 * insort_tmpfs_binding()), and they are kept on error.  */
+		previous = tracee->fs;
 		tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
-		binding = new_binding(tracee, path_host_absolute, "/", true);
-		initialize_bindings(tracee);
+		if (   tracee->fs == NULL
+		    || new_binding(tracee, path_host_absolute, "/", true) == NULL
+		    || initialize_bindings(tracee) < 0) {
+			TALLOC_FREE(tracee->fs);
+			tracee->fs = previous;
+			return -ENOMEM;
+		}
+		talloc_unlink(tracee, previous);
 
 		/* Restore current dir.  */
 		status = detranslate_path(tracee, path, NULL);

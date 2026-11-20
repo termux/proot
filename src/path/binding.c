@@ -33,6 +33,7 @@
 #include "path/binding.h"
 #include "path/path.h"
 #include "path/canon.h"
+#include "path/temp.h"
 #include "cli/note.h"
 
 #include "compat.h"
@@ -441,12 +442,63 @@ static void insort_binding(const Tracee *tracee, Side side, Binding *binding)
 }
 
 /**
+ * The directory standing for a tmpfs the guest mounted (see
+ * insort_tmpfs_binding()).
+ */
+typedef struct tmpfs {
+	const char *path;
+	size_t length;
+	LIST_ENTRY(tmpfs) link;
+} Tmpfs;
+
+/* The tmpfs in use, whichever their tracees and name-spaces.  */
+static LIST_HEAD(tmpfs_list, tmpfs) tmpfs_list;
+
+/**
+ * Forget @tmpfs.  Its directory is removed right after, as its path
+ * is freed (see create_temp_directory()).
+ *
+ * Note: this is a talloc destructor.
+ */
+static int forget_tmpfs(Tmpfs *tmpfs)
+{
+	LIST_REMOVE(tmpfs, link);
+	return 0;
+}
+
+/**
+ * Make @binding hold the tmpfs its host path lies in, if any.  A tmpfs
+ * belongs to one of the bindings that hold it: when this one is freed,
+ * Talloc hands the tmpfs over to another one, and it frees the tmpfs
+ * along with the last one, once no binding leads to its directory.
+ */
+static void hold_tmpfs(Binding *binding)
+{
+	Tmpfs *tmpfs;
+
+	LIST_FOREACH(tmpfs, &tmpfs_list, link) {
+		Comparison comparison;
+
+		comparison = compare_paths2(tmpfs->path, tmpfs->length,
+					    binding->host.path, binding->host.length);
+		if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) {
+			(void) talloc_reference(binding, tmpfs);
+			return;
+		}
+	}
+}
+
+/**
  * c.f. function above.
  */
 static void insort_binding2(const Tracee *tracee, Binding *binding)
 {
 	binding->need_substitution =
 		compare_paths(binding->host.path, binding->guest.path) != PATHS_ARE_EQUAL;
+
+	/* Before the binding this one replaces, if any, is freed: this
+	 * latter may be the last holder of the same tmpfs.  */
+	hold_tmpfs(binding);
 
 	insort_binding(tracee, GUEST, binding);
 	insort_binding(tracee, HOST, binding);
@@ -475,6 +527,46 @@ Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 	binding->guest.length = strlen(binding->guest.path);
 
 	insort_binding2(tracee, binding);
+
+	return binding;
+}
+
+/**
+ * Create and insert a new binding from a new empty directory to
+ * @guest_path, as the guest mounted a tmpfs there.  The directory is
+ * removed once no binding to a path in it remains (see hold_tmpfs()),
+ * as when the guest unmounts it, rather than with the file-system
+ * name-space it was mounted in: such bindings may outlive this latter,
+ * in other mount name-spaces or once the tracee entered the tmpfs with
+ * pivot_root(2) or chroot(2).  The Talloc parent of this new binding
+ * is @context.  This function returns NULL if an error occurred,
+ * otherwise a pointer to the newly created binding.
+ */
+Binding *insort_tmpfs_binding(const Tracee *tracee, const TALLOC_CTX *context,
+			      const char guest_path[PATH_MAX])
+{
+	Binding *binding;
+	Tmpfs *tmpfs;
+
+	tmpfs = talloc_zero(tracee->ctx, Tmpfs);
+	if (tmpfs == NULL)
+		return NULL;
+
+	tmpfs->path = create_temp_directory(tmpfs, "proot-tmpfs-");
+	if (tmpfs->path == NULL || strlen(tmpfs->path) >= PATH_MAX) {
+		talloc_free(tmpfs);
+		return NULL;
+	}
+	tmpfs->length = strlen(tmpfs->path);
+
+	LIST_INSERT_HEAD(&tmpfs_list, tmpfs, link);
+	talloc_set_destructor(tmpfs, forget_tmpfs);
+
+	binding = insort_binding3(tracee, context, tmpfs->path, guest_path);
+
+	/* The new binding holds the tmpfs, so it owns it from now on;
+	 * otherwise the tmpfs is freed.  */
+	(void) talloc_unlink(tracee->ctx, tmpfs);
 
 	return binding;
 }
