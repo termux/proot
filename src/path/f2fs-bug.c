@@ -2,10 +2,10 @@
 #include <assert.h>        /* assert(3), */
 #include <string.h>        /* str*(3), */
 #include <linux/limits.h>  /* PATH_MAX, */
-#include <unistd.h>        /* access(2), rmdir(2), */
+#include <unistd.h>        /* access(2), rmdir(2), pipe(2), fork(2), */
 #include <fcntl.h>         /* O_WRONLY, open(2) */
 #include <sys/wait.h>      /* waitpid(2), */
-#include <errno.h>         /* errno, EEXIST,  */
+#include <errno.h>         /* errno, EEXIST, EINTR, */
 #include <libgen.h>        /* dirname(3), basename(3),  */
 #include <dirent.h>        /* readdir(3), opendir(3), */
 
@@ -68,39 +68,60 @@ static bool probe_f2fs_bug(const Tracee *tracee) {
 		goto end_delete_temp_files;
 	}
 
-	/* Create third file from child process */
+	/* Create third file from child process.  It sends the errno of
+	 * open(2) through a pipe, its exit status may come from a tool:
+	 * Valgrind's --error-exitcode, for instance, when it reports the
+	 * heap the child inherited as leaked.  */
+	int pipe_fds[2];
+	if (pipe(pipe_fds) < 0) {
+		note(tracee, WARNING, SYSTEM, "pipe() failed for f2fs bug probe");
+		goto end_delete_temp_files;
+	}
+
 	int wstatus = 0;
 	pid_t pid = fork();
 	if (pid == 0) {
-		errno = 0;
+		int error = 0;
+
 		fd = open(file3, O_WRONLY|O_CREAT, 0600);
-		if (fd < 0) {
-			if (errno == EEXIST) {
-				VERBOSE(tracee, 1, "f2fs bug detected");
-				_exit(1);
-			} else {
-				note(tracee, WARNING, SYSTEM, "f2fs bug probe failed to open third file with different errno than expected (errno=%d)", errno);
-				_exit(2);
-			}
-		}
-		close(fd);
-		_exit(0);
-	} else if (pid != -1) {
-		waitpid(pid, &wstatus, 0);
-	} else {
+		if (fd < 0)
+			error = errno;
+		else
+			close(fd);
+
+		_exit(write(pipe_fds[1], &error, sizeof(error)) == sizeof(error) ? 0 : 1);
+	}
+
+	close(pipe_fds[1]);
+	if (pid == -1) {
+		close(pipe_fds[0]);
 		note(tracee, WARNING, SYSTEM, "fork() failed for f2fs bug probe");
 		goto end_delete_temp_files;
 	}
 
-	/* Set result basing on child exit status */
-	if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0) {
+	int error = 0;
+	ssize_t size;
+	do
+		size = read(pipe_fds[0], &error, sizeof(error));
+	while (size < 0 && errno == EINTR);
+	close(pipe_fds[0]);
+
+	while (waitpid(pid, &wstatus, 0) < 0 && errno == EINTR)
+		;
+
+	/* Set result basing on the errno the child got */
+	if (size != sizeof(error)) {
+		note(tracee, WARNING, SYSTEM, "got unexpected status from f2fs bug probe process (wstatus=0x%X)", wstatus);
+	} else if (error == 0) {
 		VERBOSE(tracee, 6, "f2fs bug not present on device");
-	} else if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 1) {
+	} else if (error == EEXIST) {
 		/* Bug detected */
+		VERBOSE(tracee, 1, "f2fs bug detected");
 		VERBOSE(tracee, 1, "enabling f2fs bug workaround");
 		result = true;
 	} else {
-		note(tracee, WARNING, SYSTEM, "got unexpected status from f2fs bug probe process (wstatus=0x%X)", wstatus);
+		errno = error;
+		note(tracee, WARNING, SYSTEM, "f2fs bug probe failed to open third file with different errno than expected (errno=%d)", error);
 	}
 
 end_delete_temp_files:
