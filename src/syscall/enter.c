@@ -505,7 +505,9 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
  * tracee's root binding to point at @new_root_user (translated to
  * host) and re-exposing the previous root at @put_old_user, so that
  * sandbox helpers like bubblewrap can keep accessing the prior
- * file-system through the agreed "oldroot" path.
+ * file-system through the agreed "oldroot" path.  The binding of the
+ * new root itself, if any, moves to "/", as the working directory of
+ * @tracee does when it lies in the new root.
  */
 static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 			       const char *put_old_user)
@@ -520,6 +522,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	size_t put_old_len = 0;
 	char put_old_after[PATH_MAX];
 	bool have_put_old = false;
+	Comparison comparison;
 	size_t count = 0;
 	size_t i;
 	Binding *iter;
@@ -539,6 +542,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 		strcpy(put_old_guest, new_root_guest);
 	if (canonicalize(tracee, put_old_user, true, put_old_guest, 0) < 0)
 		return;
+	chop_finality(put_old_guest);
 
 	root_binding = get_binding(tracee, GUEST, "/");
 	if (root_binding == NULL)
@@ -550,8 +554,8 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 
 	/* Work out where the previous root becomes reachable: put_old as a
 	 * path under the *new* root, e.g. "/oldroot".  The pivot_root(".",
-	 * ".") trick used to detach the old root leaves new_root == put_old,
-	 * in which case there is nowhere to expose it. */
+	 * ".") trick used to detach the old root leaves new_root == put_old:
+	 * the kernel stacks the old root over the new one then, see below. */
 	if (   new_root_len > 0
 	    && strncmp(put_old_guest, new_root_guest, new_root_len) == 0
 	    && (   put_old_guest[new_root_len] == '/'
@@ -598,6 +602,42 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 	(void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
 	if (have_put_old)
 		(void) insort_binding3(tracee, tracee->fs, old_root_host, put_old_after);
+	else if (   compare_paths(put_old_guest, new_root_guest) == PATHS_ARE_EQUAL
+		 && compare_paths(new_root_host, old_root_host) != PATHS_ARE_EQUAL) {
+		/* The old root is stacked over the new one: the guest
+		 * can't reach it by path anymore, but through the
+		 * descriptors it opened there before, as bubblewrap, runc
+		 * and LXC do to unmount it then:
+		 *
+		 *     oldroot = open("/", O_DIRECTORY);
+		 *     chdir(new_root);
+		 *     pivot_root(".", ".");
+		 *     fchdir(oldroot);
+		 *     umount2(".", MNT_DETACH);
+		 *     chdir("/");
+		 *
+		 * The kernel tells the paths in the old root from "/"
+		 * then.  It stays until the guest unmounts "/" (see
+		 * emulate_umount()).  Pivoting into the current root
+		 * leaves it as is, the kernel refuses that (EBUSY).  */
+		free_host_only_bindings(tracee);
+		(void) insort_host_only_binding(tracee, tracee->fs, old_root_host, "/");
+	}
+
+	/* The working directory moves along with the new root.  */
+	comparison = compare_paths(new_root_guest, tracee->fs->cwd);
+	if (   new_root_len > 1
+	    && (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX)) {
+		const char *rebased = tracee->fs->cwd + new_root_len;
+		char *cwd;
+
+		cwd = talloc_strdup(tracee->fs, rebased[0] != '\0' ? rebased : "/");
+		if (cwd != NULL) {
+			talloc_set_name_const(cwd, "$cwd");
+			TALLOC_FREE(tracee->fs->cwd);
+			tracee->fs->cwd = cwd;
+		}
+	}
 
 	for (i = 0; i < count; i++) {
 		Binding *b = snapshot[i];
@@ -607,6 +647,15 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 			continue;
 
 		blen = strlen(b->guest.path);
+
+		/* The binding of the new root itself is now the root
+		 * binding: as the kernel moves the new root mount to "/",
+		 * nothing is mounted at its former path anymore, nor at
+		 * put_old.  */
+		if (blen == new_root_len && strcmp(b->guest.path, new_root_guest) == 0) {
+			free_binding(tracee, b);
+			continue;
+		}
 
 		/* Bindings that live under the new root move *with* the pivot:
 		 * "/newroot/usr" becomes "/usr".  Without this, the tracee's
@@ -670,9 +719,12 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
 
-	/* Never drop the root binding.  */
-	if (strcmp(guest_path, "/") == 0)
+	/* Never drop the root binding, but the old root pivot_root(".",
+	 * ".") stacked over it (see emulate_pivot_root()).  */
+	if (strcmp(guest_path, "/") == 0) {
+		free_host_only_bindings(tracee);
 		return;
+	}
 
 	binding = get_binding(tracee, GUEST, guest_path);
 	if (binding == NULL)

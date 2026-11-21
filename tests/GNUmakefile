@@ -129,6 +129,11 @@ check-test-423b0f9d.c: $(ROOTFS)/bin/test-423b0f9d test-423b0f9d setup
 	$(call check_c,test-423b0f9d,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -r $(ROOTFS) /bin/test-423b0f9d)
 	$(call check_c,test-423b0f9d,$(PROOT) -b /proc ./test-423b0f9d)
 
+check-test-a28246f8.c: $(ROOTFS)/bin/test-a28246f8 test-a28246f8 setup
+	$(call check_c,test-a28246f8,$(PROOT) -b /proc -r $(ROOTFS) /bin/test-a28246f8)
+	$(call check_c,test-a28246f8,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -r $(ROOTFS) /bin/test-a28246f8)
+	$(call check_c,test-a28246f8,$(PROOT) -b /proc ./test-a28246f8)
+
 # A binding at a name ending with a dot.  The chroot(2) check needs
 # -0 and is left out for the root user: -0 emulates chroot(2) only
 # when the kernel denies it.
@@ -275,6 +280,9 @@ test-73e09cd8: test-73e09cd8.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 test-423b0f9d: test-423b0f9d.c
+	$(Q)$(CC) $< -o $@ $(silently) || true
+
+test-a28246f8: test-a28246f8.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 ######################################################################

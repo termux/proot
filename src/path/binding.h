@@ -47,6 +47,9 @@ typedef CIRCLEQ_HEAD(bindings, binding) Bindings;
 
 extern Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 				const char host_path[PATH_MAX], const char guest_path[PATH_MAX]);
+extern Binding *insort_host_only_binding(const Tracee *tracee, const TALLOC_CTX *context,
+					 const char *host_path, const char *guest_path);
+extern void free_host_only_bindings(const Tracee *tracee);
 extern Binding *insort_tmpfs_binding(const Tracee *tracee, const TALLOC_CTX *context,
 				     const char guest_path[PATH_MAX]);
 extern Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);

@@ -532,6 +532,58 @@ Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 }
 
 /**
+ * Same as insort_binding3(), but the new binding goes into the "host"
+ * list only: the guest can't reach @host_path through @guest_path, yet
+ * a host path there is detranslated with it.  It stands for a mount
+ * another one is stacked over, as the previous root after
+ * pivot_root(".", ".") (see emulate_pivot_root()): the descriptors
+ * that refer to it are still valid, and the kernel tells their paths
+ * from the mount point.  As other bindings, it holds the tmpfs its
+ * host path lies in, if any.
+ */
+Binding *insort_host_only_binding(const Tracee *tracee, const TALLOC_CTX *context,
+				  const char *host_path, const char *guest_path)
+{
+	Binding *binding;
+
+	binding = talloc_zero(context, Binding);
+	if (binding == NULL)
+		return NULL;
+
+	strcpy(binding->host.path, host_path);
+	strcpy(binding->guest.path, guest_path);
+
+	binding->host.length = strlen(binding->host.path);
+	binding->guest.length = strlen(binding->guest.path);
+
+	binding->need_substitution =
+		compare_paths(binding->host.path, binding->guest.path) != PATHS_ARE_EQUAL;
+
+	hold_tmpfs(binding);
+	insort_binding(tracee, HOST, binding);
+
+	return binding;
+}
+
+/**
+ * Free the bindings of @tracee that are in the "host" list only (see
+ * insort_host_only_binding()).
+ */
+void free_host_only_bindings(const Tracee *tracee)
+{
+	Binding *binding;
+	Binding *next;
+
+	for (binding = CIRCLEQ_FIRST(HEAD(tracee, HOST));
+	     binding != (void *) HEAD(tracee, HOST);
+	     binding = next) {
+		next = NEXT(binding, HOST);
+		if (!IS_LINKED(binding, link.guest))
+			free_binding(tracee, binding);
+	}
+}
+
+/**
  * Create and insert a new binding from a new empty directory to
  * @guest_path, as the guest mounted a tmpfs there.  The directory is
  * removed once no binding to a path in it remains (see hold_tmpfs()),
@@ -1003,8 +1055,17 @@ int copy_bindings(Tracee *tracee, const FileSystemNameSpace *from)
 	for (binding = CIRCLEQ_FIRST(host);
 	     binding != (void *) host;
 	     binding = CIRCLEQ_NEXT(binding, link.host)) {
-		if (insort_binding3(tracee, fs->bindings.guest, binding->host.path,
-				    binding->guest.path) == NULL)
+		Binding *copy;
+
+		/* The copy of a binding in the "host" list only stays
+		 * there only (see insort_host_only_binding()).  */
+		if (IS_LINKED(binding, link.guest))
+			copy = insort_binding3(tracee, fs->bindings.guest, binding->host.path,
+					       binding->guest.path);
+		else
+			copy = insort_host_only_binding(tracee, fs->bindings.guest,
+							binding->host.path, binding->guest.path);
+		if (copy == NULL)
 			goto error;
 	}
 
