@@ -312,25 +312,18 @@ int getcwd2(Tracee *tracee, char guest_path[PATH_MAX])
 }
 
 /**
- * Remove the trailing "/" or "/.".
+ * Remove the trailing "/" or "/." canonicalize() keeps to tell a
+ * directory is expected, "/" and "/." becoming "/".  A name that
+ * merely ends with a dot, as "foo.", is left as is.
  */
 void chop_finality(char *path)
 {
 	size_t length = strlen(path);
 
-	if (path[length - 1] == '.') {
-		assert(length >= 2);
-		/* Special case for "/." */
-		if (length == 2)
-			path[length - 1] = '\0';
-		else
-			path[length - 2] = '\0';
-	}
-	else if (path[length - 1] == '/') {
-		/* Special case for "/" */
-		if (length > 1)
-			path[length - 1] = '\0';
-	}
+	if (length >= 2 && path[length - 2] == '/' && path[length - 1] == '.')
+		path[length > 2 ? length - 2 : 1] = '\0';
+	else if (length > 1 && path[length - 1] == '/')
+		path[length - 1] = '\0';
 }
 
 /**
@@ -638,14 +631,8 @@ int translate_path_guest(Tracee *tracee, char result[PATH_MAX], char guest_path[
 	/* Without the final "/" or "/." canonicalize() keeps to tell a
 	 * directory is expected.  */
 	if (guest_path != NULL) {
-		size_t length;
-
 		strcpy(guest_path, result);
-		length = strlen(guest_path);
-		if (length >= 2 && strcmp(guest_path + length - 2, "/.") == 0)
-			guest_path[length > 2 ? length - 2 : 1] = '\0';
-		else if (length > 1 && guest_path[length - 1] == '/')
-			guest_path[length - 1] = '\0';
+		chop_finality(guest_path);
 	}
 
 	/* Final binding substitution to convert "result" into a host
