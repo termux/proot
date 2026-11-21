@@ -485,6 +485,10 @@ void translate_execve_exit(Tracee *tracee)
 	 * here on belong to the guest, not to PRoot's own pre-execve setup. */
 	tracee->seen_execve = true;
 
+	/* Its descriptors opened with O_CLOEXEC were closed without
+	 * close(2), see remember_fd_path().  */
+	forget_fd_path(tracee->pid, -1);
+
 	/* Execve happened; commit the new "/proc/self/exe".  */
 	if (tracee->new_exe != NULL) {
 		(void) talloc_unlink(tracee, tracee->exe);

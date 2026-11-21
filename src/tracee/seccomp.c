@@ -189,7 +189,9 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		 * the path when the syscall is restarted.  The how.resolve
 		 * flags (RESOLVE_BENEATH, ...) are dropped: they are not
 		 * compatible with PRoot rewriting paths to absolute host
-		 * paths, and PRoot already confines resolution to the rootfs.  */
+		 * paths, and PRoot already confines resolution to the rootfs.
+		 * RESOLVE_IN_ROOT changes which file is opened though, so it
+		 * is applied right here (see resolve_openat2_in_root()).  */
 		struct proot_open_how how = {};
 		word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
 		if (how_size > sizeof(how))
@@ -199,9 +201,20 @@ static int handle_seccomp_event_common(Tracee *tracee)
 			set_result_after_seccomp(tracee, ret);
 			break;
 		}
+
+		if ((how.resolve & RESOLVE_IN_ROOT) != 0) {
+			set_original_regs_after_seccomp(tracee);
+			ret = resolve_openat2_in_root(tracee, how.flags, how.resolve);
+			if (ret < 0) {
+				set_result_after_seccomp(tracee, ret);
+				break;
+			}
+		}
+
 		set_sysnum(tracee, PR_openat);
 		poke_reg(tracee, SYSARG_3, how.flags);
 		poke_reg(tracee, SYSARG_4, how.mode);
+		tracee->opening_with_openat2 = true;
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}

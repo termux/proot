@@ -21,6 +21,7 @@
  */
 
 #include <string.h>    /* string(3), */
+#include <stdlib.h>    /* free(3), */
 #include <stdarg.h>    /* va_*(3), */
 #include <assert.h>    /* assert(3), */
 #include <fcntl.h>     /* AT_*,  */
@@ -387,6 +388,185 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 }
 
 /**
+ * Guest paths descriptors were opened through.  The kernel reports the
+ * file a descriptor refers to by its host path only, and several guest
+ * paths lead there when bindings overlap: once a sandbox helper did
+ * pivot_root(2), then bind mounted "/" in the new root, "/oldroot" and
+ * "/newroot" lead to the same host directory.  Detranslation picks one
+ * of them (see detranslate_path()).  That doesn't matter for the file
+ * itself, but it does for a directory used as the base of a relative
+ * path (openat(2)) or as the target of a mount(2) through
+ * "/proc/self/fd/<FD>", as bubblewrap does: what is below "/oldroot/dev"
+ * isn't what is below "/newroot/dev".
+ *
+ * Only the descriptors opened with O_PATH, or by openat2(2), are
+ * remembered, since this requires the exit stage of the syscall (see
+ * translate_syscall_exit()).  An entry is forgotten when its
+ * descriptor is closed, or when its process calls execve(2), but
+ * there's no bookkeeping for dup(2) or fork(2): it is only used for
+ * the very descriptor of the very process that opened it, as long as
+ * it refers to the same host path and its guest path still leads
+ * there.
+ */
+#define FD_PATHS_SIZE 64
+
+static struct {
+	pid_t pid;
+	int fd;
+	char *guest;      /* The path the tracee opened, canonicalized.  */
+	char *translated; /* Where the bindings lead this latter.  */
+	char *host;       /* The host path the kernel reports.  */
+} fd_paths[FD_PATHS_SIZE];
+static size_t fd_paths_next;
+
+/**
+ * Remember that the descriptor @fd of the process @pid was opened
+ * through @guest_path, a canonicalized guest path, with the bindings
+ * of @tracee.
+ */
+void remember_fd_path(const Tracee *tracee, pid_t pid, int fd, const char *guest_path)
+{
+	char translated_path[PATH_MAX];
+	char real_path[PATH_MAX];
+	char *guest = NULL;
+	char *translated = NULL;
+	char *host = NULL;
+	size_t index;
+	size_t slot;
+
+	/* Reuse the entry of this very descriptor, if any: it's stale.  */
+	slot = FD_PATHS_SIZE;
+	for (index = 0; index < FD_PATHS_SIZE; index++) {
+		if (   fd_paths[index].guest != NULL
+		    && fd_paths[index].pid == pid
+		    && fd_paths[index].fd == fd) {
+			slot = index;
+			break;
+		}
+	}
+
+	if (slot == FD_PATHS_SIZE) {
+		slot = fd_paths_next;
+		fd_paths_next = (fd_paths_next + 1) % FD_PATHS_SIZE;
+	}
+
+	/* Note: entries live as long as PRoot does, they are not
+	 * talloc'ed from any tracee -- descriptors outlive the process
+	 * that opened them.  */
+	strcpy(translated_path, guest_path);
+	if (   substitute_binding(tracee, GUEST, translated_path) >= 0
+	    && readlink_proc_pid_fd(pid, fd, real_path) == 0
+	    && real_path[0] == '/') {
+		guest      = strdup(guest_path);
+		translated = strdup(translated_path);
+		host       = strdup(real_path);
+	}
+
+	free(fd_paths[slot].guest);
+	free(fd_paths[slot].translated);
+	free(fd_paths[slot].host);
+
+	if (guest == NULL || translated == NULL || host == NULL) {
+		free(guest);
+		free(translated);
+		free(host);
+		guest = translated = host = NULL;
+	}
+
+	fd_paths[slot].pid        = pid;
+	fd_paths[slot].fd         = fd;
+	fd_paths[slot].guest      = guest;
+	fd_paths[slot].translated = translated;
+	fd_paths[slot].host       = host;
+}
+
+/**
+ * Forget the guest path the descriptor @fd of the process @pid was
+ * opened through, as it's closed, or the ones of all its descriptors
+ * if @fd is negative.
+ */
+void forget_fd_path(pid_t pid, int fd)
+{
+	size_t index;
+
+	for (index = 0; index < FD_PATHS_SIZE; index++) {
+		if (   fd_paths[index].guest == NULL
+		    || fd_paths[index].pid != pid
+		    || (fd >= 0 && fd_paths[index].fd != fd))
+			continue;
+
+		free(fd_paths[index].guest);
+		free(fd_paths[index].translated);
+		free(fd_paths[index].host);
+		fd_paths[index].guest = fd_paths[index].translated = fd_paths[index].host = NULL;
+	}
+}
+
+/**
+ * Replace @path, the host path the descriptor @fd of the process @pid
+ * refers to, with the guest path this descriptor was opened through,
+ * if it is known and still leads there with the bindings of @tracee
+ * (see remember_fd_path()).  This function returns whether @path was
+ * replaced.
+ */
+static bool recall_fd_path(const Tracee *tracee, pid_t pid, int fd, char path[PATH_MAX])
+{
+	char translated[PATH_MAX];
+	size_t index;
+
+	for (index = 0; index < FD_PATHS_SIZE; index++) {
+		if (   fd_paths[index].guest == NULL
+		    || fd_paths[index].pid != pid
+		    || fd_paths[index].fd != fd)
+			continue;
+
+		if (strcmp(fd_paths[index].host, path) != 0)
+			return false;
+
+		strcpy(translated, fd_paths[index].guest);
+		if (   substitute_binding(tracee, GUEST, translated) < 0
+		    || strcmp(translated, fd_paths[index].translated) != 0)
+			return false;
+
+		strcpy(path, fd_paths[index].guest);
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Copy in @guest_path the guest path of the file the descriptor @fd
+ * of @tracee refers to.  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+int get_fd_guest_path(Tracee *tracee, int fd, char guest_path[PATH_MAX])
+{
+	int status;
+
+	/* /proc/@tracee->pid/fd/@fd -> guest_path.  */
+	status = readlink_proc_pid_fd(tracee->pid, fd, guest_path);
+	if (status < 0)
+		return status;
+
+	/* Named file descriptors may reference special objects like
+	 * pipes, sockets, inodes, ...  Such objects do not belong to
+	 * the file-system.  */
+	if (guest_path[0] != '/')
+		return -ENOTDIR;
+
+	if (recall_fd_path(tracee, tracee->pid, fd, guest_path))
+		return 0;
+
+	/* Remove the leading "root" part of the base (required!). */
+	status = detranslate_path(tracee, guest_path, NULL);
+	if (status < 0)
+		return status;
+
+	return 0;
+}
+
+/**
  * Copy in @result the equivalent of "@tracee->root + canon(@dir_fd +
  * @user_path)".  If @user_path is not absolute then it is relative to
  * the directory referred by the descriptor @dir_fd (AT_FDCWD is for
@@ -397,8 +577,23 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		const char *user_path, bool deref_final)
 {
-	char guest_path[PATH_MAX];
+	return translate_path_guest(tracee, result, NULL, dir_fd, user_path, deref_final);
+}
+
+/**
+ * Same as translate_path(), but also copy in @guest_path, unless it is
+ * NULL, the canonicalized guest path that was translated into @result
+ * (without final "/" nor "/."), or an empty string if an extension
+ * translated @user_path by itself.
+ */
+int translate_path_guest(Tracee *tracee, char result[PATH_MAX], char guest_path[PATH_MAX],
+			int dir_fd, const char *user_path, bool deref_final)
+{
+	char joined_path[PATH_MAX];
 	int status;
+
+	if (guest_path != NULL)
+		guest_path[0] = '\0';
 
 	/* Use "/" as the base if it is an absolute guest path. */
 	if (user_path[0] == '/') {
@@ -407,20 +602,7 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	/* It is relative to a directory referred by a descriptor, see
 	 * openat(2) for details. */
 	else if (dir_fd != AT_FDCWD) {
-		/* /proc/@tracee->pid/fd/@dir_fd -> result.  */
-		status = readlink_proc_pid_fd(tracee->pid, dir_fd, result);
-		if (status < 0)
-			return status;
-
-		/* Named file descriptors may reference special
-		 * objects like pipes, sockets, inodes, ...  Such
-		 * objects do not belong to the file-system.  */
-		if (result[0] != '/')
-			return -ENOTDIR;
-
-		/* Remove the leading "root" part of the base
-		 * (required!). */
-		status = detranslate_path(tracee, result, NULL);
+		status = get_fd_guest_path(tracee, dir_fd, result);
 		if (status < 0)
 			return status;
 	}
@@ -443,15 +625,28 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	/* So far "result" was used as a base path, it's time to join
 	 * it to the user path.  */
 	assert(result[0] == '/');
-	status = join_paths(2, guest_path, result, user_path);
+	status = join_paths(2, joined_path, result, user_path);
 	if (status < 0)
 		return status;
 	strcpy(result, "/");
 
 	/* Canonicalize regarding the new root. */
-	status = canonicalize(tracee, guest_path, deref_final, result, 0);
+	status = canonicalize(tracee, joined_path, deref_final, result, 0);
 	if (status < 0)
 		return status;
+
+	/* Without the final "/" or "/." canonicalize() keeps to tell a
+	 * directory is expected.  */
+	if (guest_path != NULL) {
+		size_t length;
+
+		strcpy(guest_path, result);
+		length = strlen(guest_path);
+		if (length >= 2 && strcmp(guest_path + length - 2, "/.") == 0)
+			guest_path[length > 2 ? length - 2 : 1] = '\0';
+		else if (length > 1 && guest_path[length - 1] == '/')
+			guest_path[length - 1] = '\0';
+	}
 
 	/* Final binding substitution to convert "result" into a host
 	 * path, since canonicalize() works from the guest
@@ -509,6 +704,17 @@ int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[
 			 * dynamically by the kernel.  PRoot has to
 			 * emulate some of them.  */
 			char proc_path[PATH_MAX];
+			int fd_pid;
+			int fd_number;
+			char extra;
+
+			/* A descriptor may have been opened through
+			 * another guest path than the one picked below,
+			 * see remember_fd_path().  */
+			if (   sscanf(t_referrer, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) == 2
+			    && recall_fd_path(tracee, fd_pid, fd_number, path))
+				return strlen(path) + 1;
+
 			strcpy(proc_path, path);
 			new_length = readlink_proc2(tracee, proc_path, t_referrer);
 			if (new_length < 0)

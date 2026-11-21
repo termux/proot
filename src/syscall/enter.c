@@ -254,11 +254,199 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 }
 
 /**
+ * Dereference @guest_path, a canonicalized guest path, if it names a
+ * descriptor, that is "/proc/<PID>/fd/<FD>": canonicalize() keeps such
+ * a link as is when it's the final component (see readlink_proc()),
+ * but mount(2) acts on the file it refers to, as does a descriptor
+ * opened through it.  The guest path of this file is then copied in
+ * @guest_path, and its host path in @host_path unless this latter is
+ * NULL.  Since version 0.12, bubblewrap mounts through these links
+ * rather than through paths.  This function returns -errno if an error
+ * occured, 1 if @guest_path was a descriptor, otherwise 0.
+ */
+static int deref_fd_link(Tracee *tracee, char guest_path[PATH_MAX], char host_path[PATH_MAX])
+{
+	char link_path[PATH_MAX];
+	char referee[PATH_MAX];
+	ssize_t length;
+	int fd_pid;
+	int fd_number;
+	char extra;
+	int status;
+
+	if (sscanf(guest_path, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) != 2)
+		return 0;
+
+	strcpy(link_path, guest_path);
+	status = substitute_binding(tracee, GUEST, link_path);
+	if (status < 0)
+		return status;
+
+	length = readlink(link_path, referee, sizeof(referee) - 1);
+	if (length < 0)
+		return -errno;
+	referee[length] = '\0';
+
+	/* Pipes, sockets, ... don't belong to the file-system.  */
+	if (referee[0] != '/')
+		return -ENOTDIR;
+
+	if (host_path != NULL)
+		strcpy(host_path, referee);
+
+	/* The descriptor may have been opened through another guest
+	 * path than the one detranslation picks, see
+	 * remember_fd_path().  */
+	status = detranslate_path(tracee, referee, link_path);
+	if (status < 0)
+		return status;
+	strcpy(guest_path, referee);
+
+	return 1;
+}
+
+/**
+ * Whether the final component of the path that open(2)-like syscalls
+ * open with @flags is dereferenced when it's a symbolic link.
+ */
+static bool open_derefs_final(word_t flags)
+{
+	return (   (flags & O_NOFOLLOW) == 0
+		&& ((flags & O_EXCL) == 0 || (flags & O_CREAT) == 0));
+}
+
+/**
+ * Translate @path for the open(2)-like syscall the @tracee is entering
+ * with the open flags @flags, as translate_path2() does.  When
+ * @remember is true, the descriptor it returns is remembered along
+ * with the guest path it was opened through, at the exit stage (see
+ * remember_fd_path()).  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+static int translate_open_path(Tracee *tracee, int dir_fd, char path[PATH_MAX],
+			       Reg reg, word_t flags, bool remember)
+{
+	char host_path[PATH_MAX];
+	char guest_path[PATH_MAX];
+	int status;
+
+	TALLOC_FREE(tracee->opened_guest_path);
+
+	if (!remember)
+		return translate_path2(tracee, dir_fd, path, reg,
+				       open_derefs_final(flags) ? REGULAR : SYMLINK);
+
+	/* Special case where the argument was NULL. */
+	if (path[0] == '\0')
+		return 0;
+
+	status = translate_path_guest(tracee, host_path, guest_path, dir_fd, path,
+				      open_derefs_final(flags));
+	if (status < 0)
+		return status;
+
+	status = set_sysarg_path(tracee, host_path, reg);
+	if (status < 0)
+		return status;
+
+	/* Not remembering a descriptor is harmless.  */
+	if (guest_path[0] == '\0')
+		return 0;
+
+	/* Opened through "/proc/self/fd/<FD>", it refers to the same
+	 * file as the descriptor <FD>.  */
+	if (deref_fd_link(tracee, guest_path, NULL) < 0)
+		return 0;
+
+	tracee->opened_guest_path = talloc_strdup(tracee, guest_path);
+	if (tracee->opened_guest_path == NULL)
+		return 0;
+
+	/* The descriptor is only known at the exit stage.  */
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+	return 0;
+}
+
+/**
+ * Resolve the path of the openat2(2) the @tracee is making, with the
+ * open flags @flags, as RESOLVE_IN_ROOT in @resolve asks: in the
+ * directory its descriptor argument refers to, as if it were the root
+ * directory.  The kernel can't scope the resolution itself since PRoot
+ * translates paths into absolute host paths, so the path argument is
+ * replaced with the absolute guest path it resolves to, which is then
+ * translated like any other.  Safe to call from both the normal
+ * sysenter path and the SIGSYS handler.  This function returns -errno
+ * if an error occured, otherwise 0.
+ */
+int resolve_openat2_in_root(Tracee *tracee, word_t flags, word_t resolve)
+{
+	char user_path[PATH_MAX];
+	char guest_path[PATH_MAX];
+	char root[PATH_MAX];
+	int dir_fd;
+	int status;
+
+	if ((resolve & RESOLVE_IN_ROOT) == 0)
+		return 0;
+
+	status = get_sysarg_path(tracee, user_path, SYSARG_2);
+	if (status < 0)
+		return status;
+
+	/* Let the kernel reject an empty path.  */
+	if (user_path[0] == '\0')
+		return 0;
+
+	dir_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+	if (dir_fd == AT_FDCWD)
+		status = getcwd2(tracee, root);
+	else
+		status = get_fd_guest_path(tracee, dir_fd, root);
+	if (status < 0)
+		return status;
+
+	status = canonicalize_in_root(tracee, root, user_path, open_derefs_final(flags),
+				      guest_path);
+
+	/* As the kernel, RESOLVE_NO_MAGICLINKS is checked first.  */
+	if (status == -EXDEV && (resolve & RESOLVE_NO_MAGICLINKS) != 0)
+		status = -ELOOP;
+	if (status < 0)
+		return status;
+
+	return set_sysarg_path(tracee, guest_path, SYSARG_2);
+}
+
+/**
+ * Copy in @guest_path the canonicalization of @user_path, the target
+ * of mount(2)-like syscalls, dereferenced if it names a descriptor (see
+ * deref_fd_link()).  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+static int canonicalize_mount_target(Tracee *tracee, const char *user_path,
+				     char guest_path[PATH_MAX])
+{
+	int status;
+
+	status = guest_canonicalize(tracee, user_path, guest_path);
+	if (status < 0)
+		return status;
+
+	status = deref_fd_link(tracee, guest_path, NULL);
+	if (status < 0)
+		return status;
+
+	return 0;
+}
+
+/**
  * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
  * PRoot binding from a host directory to the canonicalized target.
  * Bind mounts use the translated source; "proc"/"sysfs"/"devtmpfs"/
  * "devpts" use the matching host file-system; "tmpfs" gets a fresh
- * empty directory (see insort_tmpfs_binding()).  Any other case is
+ * empty directory (see insort_tmpfs_binding()).  The source and the
+ * target may be descriptors, see deref_fd_link().  Any other case is
  * silently ignored: the caller will still see the syscall succeed (we
  * always void it).
  */
@@ -269,12 +457,21 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 	char host_path[PATH_MAX];
 	char guest_path[PATH_MAX];
 	bool tmpfs = false;
+	int status;
 
 	if ((flags & MS_REMOUNT) != 0)
 		return;
 
 	if ((flags & MS_BIND) != 0) {
-		if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
+		if (guest_canonicalize(tracee, src_user, guest_path) < 0)
+			return;
+
+		status = deref_fd_link(tracee, guest_path, host_path);
+		if (status < 0)
+			return;
+
+		if (   status == 0
+		    && translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
 			return;
 	}
 	else if (strcmp(fstype, "proc") == 0)
@@ -290,7 +487,7 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 	else
 		return;
 
-	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
 
 	if (tmpfs) {
@@ -470,7 +667,7 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 	char guest_path[PATH_MAX];
 	Binding *binding;
 
-	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
 
 	/* Never drop the root binding.  */
@@ -2674,11 +2871,12 @@ int translate_syscall_enter(Tracee *tracee)
 			tracee->restart_how = PTRACE_SYSCALL;
 		}
 
-		if (   ((flags & O_NOFOLLOW) != 0)
-		    || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
-			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
-		else
-			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
+		status = get_sysarg_path(tracee, path, SYSARG_1);
+		if (status < 0)
+			break;
+
+		status = translate_open_path(tracee, AT_FDCWD, path, SYSARG_1, flags,
+					     (flags & O_PATH) != 0);
 		if (status >= 0)
 			maybe_redirect_userns_file(tracee, SYSARG_1, flags);
 		break;
@@ -2796,7 +2994,9 @@ int translate_syscall_enter(Tracee *tracee)
 		 * open_how struct rather than in a register, so move them into
 		 * SYSARG_3.  The how.resolve flags (RESOLVE_BENEATH, ...) are
 		 * dropped: they reject the absolute host paths PRoot produces,
-		 * and PRoot already keeps path resolution inside the rootfs.  */
+		 * and PRoot already keeps path resolution inside the rootfs.
+		 * RESOLVE_IN_ROOT changes which file is opened though, so it
+		 * is applied right here.  */
 		struct proot_open_how how = {};
 		word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
 		if (how_size > sizeof(how))
@@ -2807,12 +3007,25 @@ int translate_syscall_enter(Tracee *tracee)
 		set_sysnum(tracee, PR_openat);
 		poke_reg(tracee, SYSARG_3, how.flags);
 		poke_reg(tracee, SYSARG_4, how.mode);
+
+		status = resolve_openat2_in_root(tracee, how.flags, how.resolve);
+		if (status < 0)
+			break;
+
+		/* Sandbox helpers resolve paths in their new root with
+		 * openat2(2), see remember_fd_path().  */
+		tracee->opening_with_openat2 = true;
 	}
 		/* Fall through.  */
 
-	case PR_openat:
+	case PR_openat: {
+		bool remember;
+
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		flags = peek_reg(tracee, CURRENT, SYSARG_3);
+
+		remember = (flags & O_PATH) != 0 || tracee->opening_with_openat2;
+		tracee->opening_with_openat2 = false;
 
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
@@ -2823,14 +3036,11 @@ int translate_syscall_enter(Tracee *tracee)
 			tracee->restart_how = PTRACE_SYSCALL;
 		}
 
-		if (   ((flags & O_NOFOLLOW) != 0)
-			|| ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
-			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
-		else
-			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+		status = translate_open_path(tracee, dirfd, path, SYSARG_2, flags, remember);
 		if (status >= 0)
 			maybe_redirect_userns_file(tracee, SYSARG_2, flags);
 		break;
+	}
 
 	case PR_readlinkat:
 	case PR_unlinkat:
@@ -3058,6 +3268,8 @@ int translate_syscall_enter(Tracee *tracee)
 		/* Stop tracking auxv_fd once the tracee closes it. */
 		if (tracee->auxv_fd >= 0 && closed_fd == tracee->auxv_fd)
 			tracee->auxv_fd = -1;
+
+		forget_fd_path(tracee->pid, closed_fd);
 
 		/* Drop the fd from the netlink tracking sets, otherwise
 		 * its number could be reused for an unrelated file and

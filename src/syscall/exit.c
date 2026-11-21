@@ -566,6 +566,14 @@ void translate_syscall_exit(Tracee *tracee)
 		char path_buf[sizeof("/proc/self/auxv")];
 		Reg path_reg = (syscall_number == PR_open) ? SYSARG_1 : SYSARG_2;
 
+		/* See translate_open_path().  */
+		if (tracee->opened_guest_path != NULL) {
+			if ((int) syscall_result >= 0)
+				remember_fd_path(tracee, tracee->pid, (int) syscall_result,
+						 tracee->opened_guest_path);
+			TALLOC_FREE(tracee->opened_guest_path);
+		}
+
 		if ((int) syscall_result < 0)
 			goto end;
 		if (tracee->execfn_addr == 0)

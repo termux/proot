@@ -310,6 +310,16 @@ typedef struct tracee {
 	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
 	int auxv_fd;
 
+	/* Guest path the open(2)-like syscall being made opens, for the
+	 * descriptor it returns to be remembered at the exit stage, see
+	 * remember_fd_path().  NULL when there's nothing to remember.  */
+	char *opened_guest_path;
+
+	/* True while the openat(2) this tracee is entering is the one
+	 * PRoot made of an openat2(2), at its sysenter stage or once the
+	 * outer seccomp policy rejected it (see handle_seccomp_event()).  */
+	bool opening_with_openat2;
+
 #ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;
 	bool pokedata_workaround_cancelled_syscall;

@@ -123,6 +123,12 @@ check-test-73e09cd8.c: test-73e09cd8
 	$(call check_c,$<,$(PROOT) -0 -b /proc ./$<)
 	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc ./$<)
 
+# In a guest rootfs, as proot-distro does, and in the host one.
+check-test-423b0f9d.c: $(ROOTFS)/bin/test-423b0f9d test-423b0f9d setup
+	$(call check_c,test-423b0f9d,$(PROOT) -b /proc -r $(ROOTFS) /bin/test-423b0f9d)
+	$(call check_c,test-423b0f9d,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -r $(ROOTFS) /bin/test-423b0f9d)
+	$(call check_c,test-423b0f9d,$(PROOT) -b /proc ./test-423b0f9d)
+
 check_c = $(Q)if [ -e $< ]; then			\
 		$(2) $(silently); $(call check,$(1))	\
 	else						\
@@ -259,6 +265,9 @@ test-6b2f0d58: test-6b2f0d58.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 test-73e09cd8: test-73e09cd8.c
+	$(Q)$(CC) $< -o $@ $(silently) || true
+
+test-423b0f9d: test-423b0f9d.c
 	$(Q)$(CC) $< -o $@ $(silently) || true
 
 ######################################################################

@@ -272,4 +272,11 @@ struct proot_open_how {
 	unsigned long long resolve;
 };
 
+#ifndef RESOLVE_NO_MAGICLINKS
+#    define RESOLVE_NO_MAGICLINKS	0x02
+#endif
+#ifndef RESOLVE_IN_ROOT
+#    define RESOLVE_IN_ROOT		0x10
+#endif
+
 #endif /* COMPAT_H */

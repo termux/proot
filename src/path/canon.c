@@ -187,17 +187,13 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 }
 
 /**
- * Copy in @guest_path the canonicalization (see `man 3 realpath`) of
- * @user_path regarding to @tracee->root.  The path to canonicalize
- * could be either absolute or relative to @guest_path. When the last
- * component of @user_path is a link, it is dereferenced only if
- * @deref_final is true -- it is useful for syscalls like lstat(2).
- * The parameter @recursion_level should be set to 0 unless you know
- * what you are doing. This function returns -errno if an error
- * occured, otherwise it returns 0.
+ * Same as canonicalize(), but when @root isn't NULL, the resolution is
+ * scoped to @root -- a canonicalized guest path -- as for openat2(2)
+ * with RESOLVE_IN_ROOT, see canonicalize_in_root().
  */
-int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
-		 char guest_path[PATH_MAX], unsigned int recursion_level)
+static int canonicalize_in(Tracee *tracee, const char *root, const char *user_path,
+			   bool deref_final, char guest_path[PATH_MAX],
+			   unsigned int recursion_level)
 {
 	char scratch_path[PATH_MAX];
 	Finality finality;
@@ -224,7 +220,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			return -EINVAL;
 	}
 	else
-		strcpy(guest_path, "/");
+		strcpy(guest_path, root != NULL ? root : "/");
 
 	/* Canonicalize recursely 'user_path' into 'guest_path'.  */
 	cursor = user_path;
@@ -246,7 +242,10 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		}
 
 		if (strcmp(component, "..") == 0) {
-			pop_component(guest_path);
+			/* As "/..", ".." from the root is the root.  */
+			if (   root == NULL
+			    || compare_paths(root, guest_path) != PATHS_ARE_EQUAL)
+				pop_component(guest_path);
 			if (IS_FINAL(finality))
 				finality = FINAL_SLASH;
 			continue;
@@ -312,6 +311,22 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 				 * emulate some of them.  */
 				status = readlink_proc(tracee, scratch_path,
 						       proc_base, component, comparison);
+
+				/* The links of a process, like
+				 * "/proc/<PID>/fd/<FD>", are "magic": the
+				 * kernel doesn't follow them in a scoped
+				 * resolution.  "/proc/self" isn't, its
+				 * content is "<PID>", relative to the
+				 * directory it lies in, not to @root.  */
+				if (root != NULL && comparison == PATH1_IS_PREFIX
+				    && (status == CANONICALIZE || status == DONT_CANONICALIZE))
+					return -EXDEV;
+				if (root != NULL && status == CANONICALIZE) {
+					const char *pid = strrchr(scratch_path, '/');
+					if (pid != NULL)
+						memmove(scratch_path, pid + 1, strlen(pid + 1) + 1);
+				}
+
 				switch (status) {
 				case CANONICALIZE:
 					/* The symlink is already dereferenced,
@@ -363,7 +378,8 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
+		status = canonicalize_in(tracee, root, scratch_path, true, guest_path,
+					 recursion_level + (++symlinks_followed));
 		if (status < 0)
 			return status;
 
@@ -407,4 +423,41 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	}
 
 	return 0;
+}
+
+/**
+ * Copy in @guest_path the canonicalization (see `man 3 realpath`) of
+ * @user_path regarding to @tracee->root.  The path to canonicalize
+ * could be either absolute or relative to @guest_path. When the last
+ * component of @user_path is a link, it is dereferenced only if
+ * @deref_final is true -- it is useful for syscalls like lstat(2).
+ * The parameter @recursion_level should be set to 0 unless you know
+ * what you are doing. This function returns -errno if an error
+ * occured, otherwise it returns 0.
+ */
+int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
+		 char guest_path[PATH_MAX], unsigned int recursion_level)
+{
+	return canonicalize_in(tracee, NULL, user_path, deref_final, guest_path,
+			       recursion_level);
+}
+
+/**
+ * Copy in @guest_path the canonicalization of @user_path as if @root,
+ * a canonicalized guest path, were the root directory, like openat(2)
+ * does with RESOLVE_IN_ROOT: @user_path is relative to @root even if
+ * it's absolute, as are the absolute symbolic links met, and ".." from
+ * @root is @root.  The magic links of the processes in "/proc" aren't
+ * followed (-EXDEV).  See canonicalize() for the meaning of
+ * @deref_final.  This function returns -errno if an error occured,
+ * otherwise it returns 0.
+ */
+int canonicalize_in_root(Tracee *tracee, const char root[PATH_MAX], const char *user_path,
+			 bool deref_final, char guest_path[PATH_MAX])
+{
+	if (strnlen(root, PATH_MAX) >= PATH_MAX)
+		return -ENAMETOOLONG;
+
+	strcpy(guest_path, root);
+	return canonicalize_in(tracee, root, user_path, deref_final, guest_path, 0);
 }

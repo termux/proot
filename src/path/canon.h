@@ -30,5 +30,7 @@
 
 extern int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			char guest_path[PATH_MAX], unsigned int nb_recursion);
+extern int canonicalize_in_root(Tracee *tracee, const char root[PATH_MAX], const char *user_path,
+				bool deref_final, char guest_path[PATH_MAX]);
 
 #endif /* CANON_H */
