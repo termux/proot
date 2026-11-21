@@ -840,6 +840,16 @@ void translate_syscall_exit(Tracee *tracee)
 		handle_netlink_reply_exit(tracee, syscall_number);
 		goto end;
 
+	case PR_chroot:
+		/* The kernel made chroot("/") instead, to tell whether
+		 * the tracee may make chroot(2), see the enter stage.  */
+		if ((int) syscall_result != 0 && (int) syscall_result != -EPERM)
+			goto end;
+
+		status = apply_emulated_chroot(tracee, peek_reg(tracee, ORIGINAL, SYSARG_1),
+					       (int) syscall_result == 0);
+		break;
+
 	default:
 		goto end;
 	}

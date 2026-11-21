@@ -64,6 +64,7 @@ extern void apply_emulated_mount(Tracee *tracee);
 extern void apply_emulated_pivot_root(Tracee *tracee);
 extern void apply_emulated_umount(Tracee *tracee);
 extern int  apply_emulated_unshare(Tracee *tracee);
+extern int  apply_emulated_chroot(Tracee *tracee, word_t address, bool permitted);
 extern int  resolve_openat2_in_root(Tracee *tracee, word_t flags, word_t resolve);
 
 #endif /* SYSCALL_H */

@@ -111,9 +111,12 @@ check-test-7e1d4c2a.c: test-7e1d4c2a
 	$(call check_c,$<,$(PROOT) ./$<)
 	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) ./$<)
 
+# Without -0, chroot(2) is permitted to root only.
 check-test-4c9e2b17.c: test-4c9e2b17
-	$(call check_c,$<,$(PROOT) -0 -b /proc ./$<)
-	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc ./$<)
+	$(call check_c,$<,$(PROOT) -0 -b /proc ./$< -0)
+	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc ./$< -0)
+	$(call check_c,$<,$(PROOT) -b /proc ./$<)
+	$(call check_c,$<,env PROOT_NO_SECCOMP=1 $(PROOT) -b /proc ./$<)
 
 check-test-6b2f0d58.c: test-6b2f0d58
 	$(call check_c,$<,$(PROOT) -b /proc ./$<)
@@ -134,12 +137,10 @@ check-test-a28246f8.c: $(ROOTFS)/bin/test-a28246f8 test-a28246f8 setup
 	$(call check_c,test-a28246f8,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -r $(ROOTFS) /bin/test-a28246f8)
 	$(call check_c,test-a28246f8,$(PROOT) -b /proc ./test-a28246f8)
 
-# A binding at a name ending with a dot.  The chroot(2) check needs
-# -0 and is left out for the root user: -0 emulates chroot(2) only
-# when the kernel denies it.
+# A binding at a name ending with a dot.  The chroot(2) check needs -0.
 check-test-6ed19497.c: $(ROOTFS)/bin/test-6ed19497 setup
 	$(call check_c,test-6ed19497,$(PROOT) -b /proc -b $(ROOTFS)/bin:/bin. -r $(ROOTFS) /bin/test-6ed19497)
-	$(call check_c,test-6ed19497,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -b $(ROOTFS)/bin:/bin. -r $(ROOTFS) /bin/test-6ed19497 $(if $(filter 0,$(shell id -u)),,-0))
+	$(call check_c,test-6ed19497,env PROOT_NO_SECCOMP=1 $(PROOT) -0 -b /proc -b $(ROOTFS)/bin:/bin. -r $(ROOTFS) /bin/test-6ed19497 -0)
 
 check_c = $(Q)if [ -e $< ]; then			\
 		$(2) $(silently); $(call check,$(1))	\

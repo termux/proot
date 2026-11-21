@@ -259,6 +259,14 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, 0);
 		break;
 
+	/* The policy refuses chroot(2) to the tracee, as the kernel
+	 * does to an unprivileged process: once the path is checked,
+	 * it fails with EPERM.  With -0, fake_id0 handles it first.  */
+	case PR_chroot:
+		set_result_after_seccomp(tracee,
+			apply_emulated_chroot(tracee, peek_reg(tracee, CURRENT, SYSARG_1), false));
+		break;
+
 	case PR_getpgrp:
 		/* Query value with getpgid and set it as result.  */
 		set_result_after_seccomp(tracee, getpgid(tracee->pid));

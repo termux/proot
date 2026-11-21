@@ -63,7 +63,6 @@ OBJECTS += \
 	extension/ashmem_memfd/ashmem_memfd.o \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
-	extension/fake_id0/chroot.o \
 	extension/fake_id0/getsockopt.o \
 	extension/fake_id0/sendmsg.o \
 	extension/fake_id0/socket.o \

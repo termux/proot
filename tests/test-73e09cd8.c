@@ -119,23 +119,6 @@ static void wait_child(pid_t pid)
 	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
-/* PRoot emulates chroot(2) only when the kernel refuses it.  */
-static int really_root(void)
-{
-	char line[256];
-	int uid = -1;
-	FILE *file;
-
-	file = fopen("/proc/self/status", "r");
-	if (file == NULL)
-		return 0;
-	while (fgets(line, sizeof(line), file) != NULL)
-		if (sscanf(line, "Uid: %d", &uid) == 1)
-			break;
-	fclose(file);
-	return uid == 0;
-}
-
 static void mounter_exits(void)
 {
 	pid_t pid;
@@ -318,8 +301,7 @@ int main(void)
 	unmounted();
 	mounted_over();
 	other_name_space();
-	if (!really_root())
-		chroot_into();
+	chroot_into();
 	pivot_into();
 
 	CHECK(rmdir(at("a")) == 0);

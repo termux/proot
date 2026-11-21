@@ -1,11 +1,20 @@
-/* With -0, chroot(2) is emulated by replacing the bindings with the
- * new root, unless one of them lies under it.  When the kernel
- * reported the failure (no outer seccomp policy), that check compared
- * the bindings with an uninitialized guest path, which aborted PRoot
- * as soon as there was a binding other than the root, like "-b /proc"
- * here.  It also compared them with the path as given, so a relative
- * path, or one with ".." or a symbolic link, missed the bindings under
- * the new root.  */
+/* PRoot emulates chroot(2) by replacing the bindings with the new
+ * root and the bindings below it.
+ *
+ * - With -0, when the kernel reported the failure (no outer seccomp
+ *   policy), the bindings were compared with an uninitialized guest
+ *   path, which aborted PRoot as soon as there was a binding other
+ *   than the root, like "-b /proc" here.  They were also compared
+ *   with the path as given, so a relative path, or one with ".." or a
+ *   symbolic link, missed the bindings below the new root.
+ *
+ * - A binding below the new root wasn't supported: such a chroot(2)
+ *   failed, with EPERM when the kernel refused it first, with ENOSYS
+ *   when an outer seccomp policy did (SIGSYS).
+ *
+ * - When the kernel permitted it (PRoot run by root), the kernel made
+ *   chroot(2) itself: the host paths PRoot passes it were looked up
+ *   from the new root then, none of them was found anymore.  */
 
 #define _GNU_SOURCE
 #include <sched.h>
@@ -18,12 +27,15 @@
 #include <unistd.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <linux/capability.h>
 
 #define SIZE (PATH_MAX / 2)
 
 static char base[SIZE];
 static int failed;
+static int with_fake_id0;
 
 #define CHECK(condition) do {						\
 	if (!(condition)) {						\
@@ -42,23 +54,6 @@ static const char *at(const char *name)
 	i = (i + 1) % 4;
 	snprintf(path[i], sizeof(path[i]), "%s/%s", base, name);
 	return path[i];
-}
-
-/* PRoot emulates chroot(2) only when the kernel refuses it.  */
-static int really_root(void)
-{
-	char line[256];
-	int uid = -1;
-	FILE *file;
-
-	file = fopen("/proc/self/status", "r");
-	if (file == NULL)
-		return 0;
-	while (fgets(line, sizeof(line), file) != NULL)
-		if (sscanf(line, "Uid: %d", &uid) == 1)
-			break;
-	fclose(file);
-	return uid == 0;
 }
 
 /* Run @scenario in a child: chroot(2) changes the root of the
@@ -86,6 +81,10 @@ static void absolute(void)
 	CHECK(chroot(at("root")) == 0);
 	CHECK(access("/inside", F_OK) == 0);
 	CHECK(getcwd(cwd, sizeof(cwd)) != NULL && strcmp(cwd, "/sub") == 0);
+
+	/* The binding of "/proc" isn't below the new root.  */
+	errno = 0;
+	CHECK(access("/proc", F_OK) < 0 && errno == ENOENT);
 
 	/* Nested.  */
 	CHECK(chroot("/sub") == 0);
@@ -116,29 +115,56 @@ static void bound_root(void)
 	CHECK(access("/inside", F_OK) == 0);
 }
 
-/* A binding under the new root isn't supported: such a chroot(2)
- * fails, rather than losing the binding.  It fails with EPERM when
- * the kernel refused it first, with ENOSYS when an outer seccomp
- * policy did (SIGSYS).  */
-static void unsupported(const char *path)
+/* A binding below the new root moves along with it.  */
+static const char *new_root;
+
+static void below_root(void)
 {
+	char cwd[PATH_MAX];
+	int fd;
+
+	CHECK(chroot(new_root) == 0);
+	CHECK(access("/inside", F_OK) == 0);
 	errno = 0;
-	CHECK(chroot(path) < 0 && (errno == EPERM || errno == ENOSYS));
-	CHECK(access(at("root/sub/deeper"), F_OK) < 0);
+	CHECK(access("/sub/deeper", F_OK) < 0 && errno == ENOENT);
+
+	/* Through the binding, into the directory it leads to.  */
+	CHECK(chdir("/sub") == 0);
+	fd = creat("bound", 0600);
+	CHECK(fd >= 0 && close(fd) == 0);
+	CHECK(getcwd(cwd, sizeof(cwd)) != NULL && strcmp(cwd, "/sub") == 0);
 }
 
-static void binding_under_root(void)
+static void binding_below_root(void)
 {
+	char cwd[PATH_MAX];
+
 	CHECK(unshare(CLONE_NEWNS) == 0);
 	CHECK(mount(at("empty"), at("root/sub"), NULL, MS_BIND, NULL) == 0);
 	CHECK(chdir(base) == 0);
 
-	unsupported(at("root"));
-	unsupported("root");
-	unsupported("./root/../root/");
-	unsupported(at("link"));
+	new_root = at("root");
+	in_child(below_root);
+	CHECK(unlink(at("empty/bound")) == 0);
+	new_root = "root";
+	in_child(below_root);
+	CHECK(unlink(at("empty/bound")) == 0);
+	new_root = "./root/../root/";
+	in_child(below_root);
+	CHECK(unlink(at("empty/bound")) == 0);
+	new_root = at("link");
+	in_child(below_root);
+	CHECK(unlink(at("empty/bound")) == 0);
 	CHECK(chdir(at("root")) == 0);
-	unsupported(".");
+	new_root = ".";
+	in_child(below_root);
+	CHECK(unlink(at("empty/bound")) == 0);
+
+	/* The working directory lies in the binding.  */
+	CHECK(chdir(at("root/sub")) == 0);
+	CHECK(chroot(at("root")) == 0);
+	CHECK(getcwd(cwd, sizeof(cwd)) != NULL && strcmp(cwd, "/sub") == 0);
+	CHECK(access("deeper", F_OK) < 0);
 }
 
 static void errors(void)
@@ -151,13 +177,56 @@ static void errors(void)
 	CHECK(chroot(at("file")) < 0 && errno == ENOTDIR);
 }
 
-int main(void)
+/* The user PRoot runs as: /proc doesn't tell the emulated one.  */
+static int really_root(void)
+{
+	char line[256];
+	int uid = -1;
+	FILE *file;
+
+	file = fopen("/proc/self/status", "r");
+	if (file == NULL)
+		return 0;
+	while (fgets(line, sizeof(line), file) != NULL)
+		if (sscanf(line, "Uid: %d", &uid) == 1)
+			break;
+	fclose(file);
+	return uid == 0;
+}
+
+/* Without the privilege, chroot(2) fails with EPERM, once the path
+ * is checked.  With -0, setuid(2) is emulated.  Otherwise, as root,
+ * only CAP_SYS_CHROOT is dropped: setuid(2) would make the process
+ * non-dumpable, PRoot couldn't read its memory anymore without
+ * CAP_SYS_PTRACE (Docker).  */
+static void unprivileged(void)
+{
+	if (with_fake_id0)
+		CHECK(setuid(65534) == 0);
+	else if (geteuid() == 0) {
+		struct __user_cap_header_struct header = { _LINUX_CAPABILITY_VERSION_3, 0 };
+		struct __user_cap_data_struct data[2];
+
+		CHECK(syscall(SYS_capget, &header, data) == 0);
+		data[CAP_SYS_CHROOT / 32].effective &= ~(1U << (CAP_SYS_CHROOT % 32));
+		CHECK(syscall(SYS_capset, &header, data) == 0);
+	}
+
+	errno = 0;
+	CHECK(chroot(at("root")) < 0 && errno == EPERM);
+	errors();
+
+	/* Root may search any directory.  */
+	errno = 0;
+	CHECK(chroot(at("closed")) < 0 && errno == (really_root() ? EPERM : EACCES));
+}
+
+int main(int argc, char *argv[])
 {
 	const char *tmpdir = getenv("TMPDIR");
 	int fd;
 
-	if (really_root())
-		exit(125);
+	with_fake_id0 = argc > 1 && strcmp(argv[1], "-0") == 0;
 
 	snprintf(base, sizeof(base), "%s/test-4c9e2b17-XXXXXX", tmpdir ? tmpdir : "/tmp");
 	if (mkdtemp(base) == NULL) {
@@ -167,6 +236,7 @@ int main(void)
 
 	if (   mkdir(at("root"), 0700) < 0 || mkdir(at("root/sub"), 0700) < 0
 	    || mkdir(at("empty"), 0700) < 0 || mkdir(at("alias"), 0700) < 0
+	    || mkdir(at("closed"), 0600) < 0
 	    || (fd = creat(at("root/inside"), 0600)) < 0 || close(fd) < 0
 	    || (fd = creat(at("root/sub/deeper"), 0600)) < 0 || close(fd) < 0
 	    || (fd = creat(at("file"), 0600)) < 0 || close(fd) < 0
@@ -175,19 +245,24 @@ int main(void)
 		exit(EXIT_FAILURE);
 	}
 
-	in_child(absolute);
-	in_child(relative);
-	in_child(symlink_);
-	/* PRoot emulates these syscalls, it never fails them with
-	 * EPERM.  A seccomp filter of the environment does (the default
-	 * profile of Docker), which PRoot can't override but by tracing
-	 * every syscall (PROOT_NO_SECCOMP).  */
-	if (   !(unshare(0) < 0 && errno == EPERM)
-	    && !(mount(NULL, "/", NULL, MS_REMOUNT, NULL) < 0 && errno == EPERM)) {
-		in_child(bound_root);
-		in_child(binding_under_root);
+	/* chroot(2) needs -0, or PRoot run by root.  */
+	if (geteuid() == 0) {
+		in_child(absolute);
+		in_child(relative);
+		in_child(symlink_);
+		/* PRoot emulates these syscalls, it never fails them
+		 * with EPERM.  A seccomp filter of the environment does
+		 * (the default profile of Docker), which PRoot can't
+		 * override but by tracing every syscall
+		 * (PROOT_NO_SECCOMP).  */
+		if (   !(unshare(0) < 0 && errno == EPERM)
+		    && !(mount(NULL, "/", NULL, MS_REMOUNT, NULL) < 0 && errno == EPERM)) {
+			in_child(bound_root);
+			in_child(binding_below_root);
+		}
+		in_child(errors);
 	}
-	in_child(errors);
+	in_child(unprivileged);
 
 	CHECK(unlink(at("link")) == 0);
 	CHECK(unlink(at("file")) == 0);
@@ -197,6 +272,7 @@ int main(void)
 	CHECK(rmdir(at("root")) == 0);
 	CHECK(rmdir(at("empty")) == 0);
 	CHECK(rmdir(at("alias")) == 0);
+	CHECK(rmdir(at("closed")) == 0);
 	CHECK(rmdir(base) == 0);
 
 	exit(failed ? EXIT_FAILURE : EXIT_SUCCESS);

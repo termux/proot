@@ -52,7 +52,6 @@
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
-#include "extension/fake_id0/chroot.h"
 #include "extension/fake_id0/getsockopt.h"
 #include "extension/fake_id0/sendmsg.h"
 #include "extension/fake_id0/socket.h"
@@ -1185,9 +1184,6 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return handle_stat_exit_end(tracee, config, sysnum);
 #endif /* ifdef USERLAND */
 
-	case PR_chroot: 
-		return handle_chroot_exit_end(tracee, config, false);
-
 	case PR_getsockopt:
 		return handle_getsockopt_exit_end(tracee);
 
@@ -1275,7 +1271,8 @@ static int handle_sigsys(Tracee *tracee, Config *config)
 		SETRESXID(g, CURRENT);
 
 	case PR_chroot:
-		return handle_chroot_exit_end(tracee, config, true);
+		return apply_emulated_chroot(tracee, peek_reg(tracee, CURRENT, SYSARG_1),
+					     config->euid == 0 /* TODO: || HAS_CAP(SYS_CHROOT) */);
 
 	default:
 		return 0;
@@ -1287,6 +1284,17 @@ static int handle_sysexit_start(Tracee *tracee, Config *config) {
 	word_t sysnum = get_sysnum(tracee, ORIGINAL);
 	struct stat mode;
 	int status;
+
+	/* The kernel told whether the tracee may make chroot(2) with its
+	 * actual credentials (see translate_syscall_enter()), the
+	 * emulated ones decide instead.  */
+	if (sysnum == PR_chroot) {
+		if (tracee->status >= 0 && ((int) result == 0 || (int) result == -EPERM))
+			poke_reg(tracee, SYSARG_RESULT,
+				 config->euid == 0 /* TODO: || HAS_CAP(SYS_CHROOT) */
+				 ? 0 : (word_t) -EPERM);
+		return 0;
+	}
 
 	if ((int) result < 0 || tracee->status < 0 || sysnum != PR_execve)
 		return 0;

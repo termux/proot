@@ -28,6 +28,8 @@
 #include <unistd.h>      /* close(2), */
 #include <limits.h>      /* PATH_MAX, */
 #include <string.h>      /* strcpy */
+#include <stdlib.h>      /* realpath(3), */
+#include <sys/stat.h>    /* stat(2), */
 #include <stdbool.h>     /* bool */
 #include <stdint.h>      /* uint32_t */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
@@ -801,6 +803,112 @@ void apply_emulated_pivot_root(Tracee *tracee)
 		return;
 
 	emulate_pivot_root(tracee, new_root_user, put_old_user);
+}
+
+/**
+ * Emulate chroot(2) of the path at @address in the memory of @tracee.
+ * The kernel never makes it: PRoot passes host paths to the kernel,
+ * these would be looked up from the new root then.  The new root
+ * becomes the root binding of a file-system name-space of @tracee's
+ * own, as chroot(2) changes the root of the calling process only.  The
+ * bindings below the new root stay, at their paths from there, the
+ * other ones can't be reached anymore.  When @tracee isn't @permitted
+ * to make chroot(2), the path is checked only, as the kernel does
+ * first, and this function fails with EPERM.  Safe to call from the
+ * exit stage and from the SIGSYS handler.  This function returns
+ * -errno if an error occurred, otherwise 0.
+ */
+int apply_emulated_chroot(Tracee *tracee, word_t address, bool permitted)
+{
+	char new_root_guest[PATH_MAX];
+	char new_root_host[PATH_MAX];
+	char path[PATH_MAX];
+	FileSystemNameSpace *previous;
+	const Binding *binding;
+	struct stat statbuf;
+	size_t length;
+	int status;
+
+	status = read_path(tracee, path, address);
+	if (status < 0)
+		return status;
+
+	/* The kernel rejects an empty path.  */
+	if (path[0] == '\0')
+		return -ENOENT;
+
+	/* Canonicalize the guest path, as the guest paths of the
+	 * bindings are, so that it compares with them (whether it's
+	 * relative, holds "..", or goes through a symbolic link).  */
+	status = guest_canonicalize(tracee, path, new_root_guest);
+	if (status < 0)
+		return status;
+
+	status = translate_path(tracee, path, AT_FDCWD, new_root_guest, true);
+	if (status < 0)
+		return status;
+
+	if (realpath(path, new_root_host) == NULL)
+		return -errno;
+
+	if (stat(new_root_host, &statbuf) < 0)
+		return -errno;
+
+	if (!S_ISDIR(statbuf.st_mode))
+		return -ENOTDIR;
+
+	/* The kernel checks the permission to search the new root
+	 * before the privilege.  */
+	if (!permitted)
+		return access(new_root_host, X_OK) < 0 ? -errno : -EPERM;
+
+	/* Nothing changes when the new root is the current one.  */
+	if (compare_paths(get_root(tracee), new_root_host) == PATHS_ARE_EQUAL)
+		return 0;
+
+	/* The working directory, as a host path.  */
+	status = translate_path(tracee, path, AT_FDCWD, tracee->fs->cwd, true);
+	if (status < 0)
+		return status;
+
+	/* The previous bindings are released last: the new root, or a
+	 * binding below it, may lie in a tmpfs only these hold (see
+	 * insort_tmpfs_binding()), and they are kept on error.  */
+	previous = tracee->fs;
+	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
+	if (   tracee->fs == NULL
+	    || new_binding(tracee, new_root_host, "/", true) == NULL
+	    || initialize_bindings(tracee) < 0)
+		goto error;
+
+	/* A binding below the new root moves along with it:
+	 * "/new_root/proc" becomes "/proc".  */
+	length = strlen(new_root_guest);
+	for (binding = CIRCLEQ_FIRST(previous->bindings.guest);
+	     binding != (void *) previous->bindings.guest;
+	     binding = CIRCLEQ_NEXT(binding, link.guest)) {
+		if (compare_paths(new_root_guest, binding->guest.path) != PATH1_IS_PREFIX)
+			continue;
+
+		if (insort_binding3(tracee, tracee->fs->bindings.guest, binding->host.path,
+				    binding->guest.path + (length == 1 ? 0 : length)) == NULL)
+			goto error;
+	}
+
+	/* The working directory stays, it's "/" once out of reach.  */
+	status = detranslate_path(tracee, path, NULL);
+	tracee->fs->cwd = talloc_strdup(tracee->fs, status < 0 ? "/" : path);
+	if (tracee->fs->cwd == NULL)
+		goto error;
+	talloc_set_name_const(tracee->fs->cwd, "$cwd");
+
+	talloc_unlink(tracee, previous);
+	return 0;
+
+error:
+	TALLOC_FREE(tracee->fs);
+	tracee->fs = previous;
+	return -ENOMEM;
 }
 
 /**
@@ -2746,7 +2854,6 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_chmod:
 	case PR_chown:
 	case PR_chown32:
-	case PR_chroot:
 	case PR_getxattr:
 	case PR_listxattr:
 	case PR_mknod:
@@ -2766,6 +2873,15 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_utime:
 	case PR_utimes:
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
+		break;
+
+	/* The kernel never changes the root of a tracee: PRoot emulates
+	 * chroot(2) at the exit stage (see apply_emulated_chroot()).  The
+	 * kernel only tells whether the tracee may make it, with
+	 * chroot("/"), which changes nothing: the root of a tracee is the
+	 * one of PRoot.  */
+	case PR_chroot:
+		status = set_sysarg_data(tracee, "/", sizeof("/"), SYSARG_1);
 		break;
 
 	/* Pretend namespace syscalls succeed; PRoot can't really
