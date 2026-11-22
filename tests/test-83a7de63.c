@@ -1,6 +1,9 @@
 /* The working directory as bubblewrap sees it when started from below
  * "/tmp": it mounts its base tmpfs on "/tmp", then asks for the working
- * directory, to go back there from the sandbox if it can.  The kernel
+ * directory, to go back there from the sandbox if it can, with
+ * get_current_dir_name(3) -- which bionic doesn't have, that is
+ * getcwd(2) once $PWD no longer leads to the working directory, as
+ * under the mount.  The kernel
  * keeps the directory a mount covers as the working directory, and
  * getcwd(2) keeps reporting its path.  PRoot reported none, and as it
  * made chdir(NULL) succeed, bubblewrap went on with a NULL path and
@@ -60,16 +63,10 @@ static int cwd_is(const char *expected)
 /* What bubblewrap does from @base/w/cwd with "--bind / /".  */
 static void sandbox(void)
 {
-	char *cwd;
-
 	CHECK(chdir(at("w/cwd")) == 0);
 	CHECK(unshare(CLONE_NEWNS) == 0);
 	CHECK(mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) == 0);
 	CHECK(mount("tmpfs", at("w"), "tmpfs", MS_NODEV | MS_NOSUID, NULL) == 0);
-
-	cwd = get_current_dir_name();
-	CHECK(cwd != NULL && strcmp(cwd, at("w/cwd")) == 0);
-	free(cwd);
 	CHECK(cwd_is(at("w/cwd")));
 
 	/* Its path leads under the mount now.  */
