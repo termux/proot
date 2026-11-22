@@ -140,8 +140,9 @@ typedef struct tracee {
 	 * share it too; see syscall/netlink_fds.c, and enter.c /
 	 * exit.c for the intercepts.
 	 *
-	 * The pending_* flags carry the socket(2) PRoot is handling
-	 * from its enter stage to its exit stage.  A real socket lives
+	 * The pending_* flags carry the socket(2) PRoot is handling,
+	 * or the bind(2) / connect(2) of a fake socket, from its enter
+	 * stage to its exit stage.  A real socket lives
 	 * in the host's network namespace, where a tracee has no
 	 * CAP_NET_ADMIN, so the requests a fake_netns tracee sends to
 	 * configure "its" namespace over it come back as
@@ -150,6 +151,7 @@ typedef struct tracee {
 	struct netlink_fds *netlink_fds;
 	bool pending_fake_netlink_socket;
 	bool pending_real_netlink_socket;
+	bool pending_netlink_connect;
 
 	/* Support for ptrace emulation (tracer side).  */
 	struct {

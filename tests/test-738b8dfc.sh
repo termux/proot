@@ -38,7 +38,7 @@ if [ ${STATUS} -eq 125 ]; then
     exit 125
 fi
 
-for SCENARIO in threads copies forks exec thread-exec; do
+for SCENARIO in threads copies forks writes exec thread-exec; do
     for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
         set +e
         OUTPUT=$(env ${NO_SECCOMP} LD_PRELOAD="${DIR}/netlink_deny.so" \

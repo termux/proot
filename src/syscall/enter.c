@@ -1030,13 +1030,15 @@ int apply_emulated_unshare(Tracee *tracee)
  * from a Termux-like launcher, hardened containers, ...); in that
  * case we silently substitute an AF_UNIX/SOCK_DGRAM socket and
  * intercept the netlink-shaped syscalls a tracee might issue on it
- * (bind, sendto / sendmsg, recvfrom / recvmsg, getsockname,
+ * (bind / connect, sendto / sendmsg, recvfrom / recvmsg, getsockname,
  * getpeername), synthesising responses that match what the request
  * asked for: NLMSG_ERROR(err=0) for non-dump requests (bubblewrap's
  * loopback_setup RTM_NEWADDR / RTM_NEWLINK) and an empty NLMSG_DONE
  * for NLM_F_DUMP queries (apt / glibc getifaddrs RTM_GETADDR,
  * iproute2 RTM_GETLINK), so callers see a well-formed empty result
- * instead of a zero-byte recvmsg they treat as fatal.
+ * instead of a zero-byte recvmsg they treat as fatal.  Requests
+ * written with write(2) & co. reach a socket of PRoot the substitute
+ * is connected to, see connect_fake_netlink_socket().
  *
  * The substitution only happens when the host kernel actually
  * refuses AF_NETLINK (or refuses to carry the messages the tracee
@@ -1810,11 +1812,9 @@ static size_t relay_route_dump(const uint8_t *req, size_t req_len,
  * socket in nlmsg_pid, which iproute2 / bubblewrap match against before
  * accepting.
  */
-static void build_fake_netlink_reply(Tracee *tracee, NetlinkSocket *sock,
-				     word_t buf_addr, word_t buf_len)
+static void answer_fake_netlink_request(NetlinkSocket *sock,
+					const uint8_t *req, size_t req_len)
 {
-	uint8_t req[256] __attribute__((aligned(8)));
-	size_t  req_len;
 	struct nlmsghdr hdr;
 	uint8_t *out;
 	size_t   max = MAX_FAKE_NETLINK_REPLY;
@@ -1839,10 +1839,7 @@ static void build_fake_netlink_reply(Tracee *tracee, NetlinkSocket *sock,
 	}
 	out = sock->reply;
 
-	if (buf_addr == 0 || buf_len < sizeof(hdr))
-		goto reply;
-	req_len = buf_len < sizeof(req) ? buf_len : sizeof(req);
-	if (read_data(tracee, req, buf_addr, req_len) < 0)
+	if (req_len < sizeof(hdr))
 		goto reply;
 
 	memcpy(&hdr, req, sizeof(hdr));
@@ -1923,6 +1920,100 @@ reply:
 		off = nl_build_error(out, off, max, seq, pid, -EINVAL);
 
 	sock->reply_len = off;
+}
+
+/**
+ * Read the first bytes of the request the tracee sends from @buf_addr
+ * (@buf_len bytes), as far as the reply depends on them, and answer it,
+ * see answer_fake_netlink_request().
+ */
+static void build_fake_netlink_reply(Tracee *tracee, NetlinkSocket *sock,
+				     word_t buf_addr, word_t buf_len)
+{
+	uint8_t req[256] __attribute__((aligned(8)));
+	size_t  req_len = 0;
+
+	if (buf_addr != 0 && buf_len >= sizeof(struct nlmsghdr)) {
+		req_len = buf_len < sizeof(req) ? buf_len : sizeof(req);
+		if (read_data(tracee, req, buf_addr, req_len) < 0)
+			req_len = 0;
+	}
+
+	answer_fake_netlink_request(sock, req, req_len);
+}
+
+/**
+ * Answer the requests the tracees wrote on the fake @sock with write(2)
+ * & co., which went to its peer (see connect_fake_netlink_socket()).
+ * Each answer replaces the reply pending, as for a request sent with
+ * sendto(2), so the latest request is the one answered.  The kernel
+ * would answer the datagrams shorter than a message with nothing.
+ */
+static void read_fake_netlink_requests(NetlinkSocket *sock)
+{
+	uint8_t req[256] __attribute__((aligned(8)));
+	ssize_t size;
+
+	while ((size = read_netlink_peer(sock, req, sizeof(req))) >= 0) {
+		if ((size_t) size >= sizeof(struct nlmsghdr))
+			answer_fake_netlink_request(sock, req, (size_t) size);
+	}
+}
+
+/**
+ * Emulate bind(2) or connect(2) on the fake @sock of @tracee.  The
+ * netlink address means nothing to its substitute, so the syscall can
+ * just succeed, but what the tracee writes on the socket with write(2)
+ * & co. -- requests that never go through sendto(2) / sendmsg(2), as
+ * busybox sends them -- must reach PRoot.  The first of these syscalls
+ * connects the substitute to a socket of PRoot instead, its peer: see
+ * finish_fake_netlink_connect() for the exit stage.  Bubblewrap, glibc,
+ * iproute2, busybox and Go bind their netlink sockets first thing.
+ */
+static void connect_fake_netlink_socket(Tracee *tracee, NetlinkSocket *sock)
+{
+	struct sockaddr_un address;
+	socklen_t length;
+
+	if (   sock->peer < 0
+	    && open_netlink_peer(sock, &address, &length) == 0) {
+		if (set_sysarg_data(tracee, &address, length, SYSARG_2) == 0) {
+			poke_reg(tracee, SYSARG_3, length);
+			set_sysnum(tracee, PR_connect);
+			tracee->pending_netlink_connect = true;
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+			return;
+		}
+		close_netlink_peer(sock);
+	}
+
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	set_sysnum(tracee, PR_void);
+}
+
+/**
+ * Exit stage of the connect(2) connect_fake_netlink_socket() made of
+ * the bind(2) or connect(2) of @tracee.  Whatever its result, the
+ * syscall of the tracee succeeds, as it would with a netlink socket;
+ * only its writes don't reach PRoot when the connection failed.
+ */
+void finish_fake_netlink_connect(Tracee *tracee)
+{
+	int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	NetlinkSocket *sock;
+
+	tracee->pending_netlink_connect = false;
+
+	if (result < 0) {
+		VERBOSE(tracee, 1, "netlink: can't connect the substitute socket to PRoot: %s",
+			strerror(-result));
+		sock = netlink_socket(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+		if (sock != NULL && sock->fake)
+			close_netlink_peer(sock);
+	}
+
+	poke_reg(tracee, SYSARG_RESULT, 0);
 }
 
 /**
@@ -2446,16 +2537,16 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_bind:
 	case PR_connect: {
+		NetlinkSocket *sock;
 		word_t address;
 		word_t size;
 
 		/* If we already redirected this fd to AF_UNIX as part
-		 * of the AF_NETLINK emulation, fail the bind silently
-		 * (the kernel would otherwise refuse our sockaddr_nl). */
-		if (syscall_number == PR_bind
-		    && fake_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1)) != NULL) {
-			poke_reg(tracee, SYSARG_RESULT, 0);
-			set_sysnum(tracee, PR_void);
+		 * of the AF_NETLINK emulation, the kernel would refuse
+		 * our sockaddr_nl.  */
+		sock = fake_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1));
+		if (sock != NULL) {
+			connect_fake_netlink_socket(tracee, sock);
 			status = 0;
 			break;
 		}
@@ -2666,6 +2757,9 @@ int translate_syscall_enter(Tracee *tracee)
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		NetlinkSocket *sock = get_netlink_socket(tracee, fd);
 
+		if (sock != NULL && sock->fake)
+			read_fake_netlink_requests(sock);
+
 		if (sock != NULL && sock->fake) {
 			word_t buf       = peek_reg(tracee, CURRENT, SYSARG_2);
 			word_t len       = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -2724,6 +2818,9 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_recvmsg: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		NetlinkSocket *sock = get_netlink_socket(tracee, fd);
+
+		if (sock != NULL && sock->fake)
+			read_fake_netlink_requests(sock);
 
 		if (sock != NULL && sock->fake) {
 			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);

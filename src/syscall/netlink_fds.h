@@ -27,6 +27,8 @@
 #include <stddef.h>    /* size_t, */
 #include <stdint.h>    /* uint*_t, */
 #include <sys/types.h> /* ssize_t, */
+#include <sys/socket.h> /* socklen_t, */
+#include <sys/un.h>    /* struct sockaddr_un, */
 
 #include "tracee/tracee.h"
 
@@ -68,6 +70,12 @@ typedef struct netlink_socket {
 	size_t reply_len;
 	size_t reply_off;
 
+	/* Socket of PRoot the substitute of a fake socket is connected
+	 * to, -1 if none: what the tracees write(2) on their socket --
+	 * the requests of busybox, for instance -- arrives there, and
+	 * is read before any recvmsg / recvfrom is answered.  */
+	int peer;
+
 	/* For a real socket: a request that reconfigures a network
 	 * namespace the sender only believes it owns went out on it,
 	 * and the error the kernel replies with, to the sequence number
@@ -86,5 +94,10 @@ extern NetlinkSocket *netlink_socket(const Tracee *tracee, int fd);
 extern NetlinkSocket *get_netlink_socket(Tracee *tracee, int fd);
 extern NetlinkSocket *add_netlink_socket(Tracee *tracee, int fd, bool fake);
 extern void forget_netlink_fd(Tracee *tracee, int fd);
+
+extern int open_netlink_peer(NetlinkSocket *netlink, struct sockaddr_un *address,
+			     socklen_t *length);
+extern void close_netlink_peer(NetlinkSocket *socket);
+extern ssize_t read_netlink_peer(NetlinkSocket *socket, void *buffer, size_t size);
 
 #endif /* NETLINK_FDS_H */

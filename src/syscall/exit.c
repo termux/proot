@@ -814,6 +814,14 @@ void translate_syscall_exit(Tracee *tracee)
 		}
 		goto end;
 
+	case PR_bind:
+	case PR_connect:
+		/* The substitute of a fake netlink socket was connected
+		 * to PRoot instead.  */
+		if (tracee->pending_netlink_connect)
+			finish_fake_netlink_connect(tracee);
+		goto end;
+
 	case PR_recvfrom:
 	case PR_recvmsg:
 		/* Turn the kernel's refusal to reconfigure a network

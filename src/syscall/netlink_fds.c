@@ -51,7 +51,11 @@
 
 #include <errno.h>     /* E*, errno, */
 #include <stdio.h>     /* snprintf(3), sscanf(3), */
-#include <unistd.h>    /* readlink(2), */
+#include <stddef.h>    /* offsetof(3), */
+#include <string.h>    /* memset(3), memcpy(3), */
+#include <unistd.h>    /* readlink(2), close(2), getpid(2), getuid(2), */
+#include <sys/socket.h> /* socket(2), bind(2), recvmsg(2), SCM_CREDENTIALS, */
+#include <sys/un.h>    /* struct sockaddr_un, */
 #include <talloc.h>    /* talloc_*, */
 
 #include "syscall/netlink_fds.h"
@@ -354,6 +358,112 @@ NetlinkSocket *get_netlink_socket(Tracee *tracee, int fd)
 }
 
 /**
+ * Close the peer of @socket, if any.  This function is the destructor
+ * of NetlinkSocket too: the peer lives as long as the socket.
+ */
+static int close_peer(NetlinkSocket *socket)
+{
+	if (socket->peer >= 0)
+		(void) close(socket->peer);
+	socket->peer = -1;
+
+	return 0;
+}
+
+void close_netlink_peer(NetlinkSocket *socket)
+{
+	(void) close_peer(socket);
+}
+
+/**
+ * Open the peer of the fake socket @netlink, see the field "peer" of
+ * NetlinkSocket, and put in @address and @length the address the
+ * substitute has to connect(2) to.  The address is in the abstract
+ * name-space, so no file is left behind.  This function returns
+ * -errno if an error occurred, otherwise 0.
+ */
+int open_netlink_peer(NetlinkSocket *netlink, struct sockaddr_un *address,
+		      socklen_t *length)
+{
+	static unsigned int count = 0;
+	const int on = 1;
+	int status;
+	int size;
+	int fd;
+
+	memset(address, 0, sizeof(*address));
+	address->sun_family = AF_UNIX;
+	size = snprintf(address->sun_path + 1, sizeof(address->sun_path) - 1,
+			"proot-%d-netlink-%u", getpid(), count++);
+	if (size < 0 || (size_t) size >= sizeof(address->sun_path) - 1)
+		return -ENAMETOOLONG;
+	*length = offsetof(struct sockaddr_un, sun_path) + 1 + size;
+
+	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return -errno;
+
+	/* The senders are checked, see read_netlink_peer().  */
+	if (   setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0
+	    || bind(fd, (struct sockaddr *) address, *length) < 0) {
+		status = -errno;
+		(void) close(fd);
+		return status;
+	}
+
+	close_peer(netlink);
+	netlink->peer = fd;
+
+	return 0;
+}
+
+/**
+ * Read in @buffer (@size bytes) the next datagram the tracees wrote on
+ * the fake @socket, as far as it fits.  This function returns -1 if
+ * there's none, otherwise its size.
+ */
+ssize_t read_netlink_peer(NetlinkSocket *socket, void *buffer, size_t size)
+{
+	char control[CMSG_SPACE(sizeof(struct ucred))];
+	struct iovec iov;
+	struct msghdr message;
+	struct cmsghdr *header;
+	struct ucred credentials;
+	ssize_t result;
+
+	if (socket->peer < 0)
+		return -1;
+
+	for (;;) {
+		iov.iov_base = buffer;
+		iov.iov_len  = size;
+		memset(&message, 0, sizeof(message));
+		message.msg_iov        = &iov;
+		message.msg_iovlen     = 1;
+		message.msg_control    = control;
+		message.msg_controllen = sizeof(control);
+
+		result = recvmsg(socket->peer, &message, MSG_DONTWAIT);
+		if (result < 0)
+			return -1;
+
+		/* Any process of the network name-space may send to an
+		 * abstract address, only the user PRoot runs as speaks
+		 * for the tracees.  */
+		header = CMSG_FIRSTHDR(&message);
+		if (   header == NULL
+		    || header->cmsg_level != SOL_SOCKET
+		    || header->cmsg_type != SCM_CREDENTIALS
+		    || header->cmsg_len < CMSG_LEN(sizeof(credentials)))
+			continue;
+
+		memcpy(&credentials, CMSG_DATA(header), sizeof(credentials));
+		if (credentials.uid == getuid())
+			return result;
+	}
+}
+
+/**
  * Record that @tracee got the new NETLINK_ROUTE socket @fd, a @fake
  * one if PRoot substituted an AF_UNIX socket for it.  This function
  * returns NULL if an error occurred, otherwise the socket.
@@ -373,6 +483,8 @@ NetlinkSocket *add_netlink_socket(Tracee *tracee, int fd, bool fake)
 		return NULL;
 
 	socket->fake = fake;
+	socket->peer = -1;
+	talloc_set_destructor(socket, close_peer);
 
 	if (fd_inode(tracee->pid, fd, &socket->inode) < 0)
 		socket->inode = 0;

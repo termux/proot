@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -49,18 +50,29 @@ static int nl_open(int flags)
 	return fd;
 }
 
-static void nl_request(int fd, unsigned int seq)
+struct request {
+	struct nlmsghdr header;
+	struct ifaddrmsg message;
+};
+
+static struct request *request(unsigned int seq)
 {
-	struct { struct nlmsghdr header; struct ifaddrmsg message; } request;
-	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+	static struct request request;
 
 	memset(&request, 0, sizeof(request));
 	request.header.nlmsg_len   = sizeof(request);
 	request.header.nlmsg_type  = RTM_GETADDR;
 	request.header.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
 	request.header.nlmsg_seq   = seq;
+	return &request;
+}
 
-	if (sendto(fd, &request, sizeof(request), 0, (struct sockaddr *) &kernel, sizeof(kernel)) < 0)
+static void nl_request(int fd, unsigned int seq)
+{
+	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+
+	if (sendto(fd, request(seq), sizeof(struct request), 0,
+		   (struct sockaddr *) &kernel, sizeof(kernel)) < 0)
 		FAIL("sendto(%d): %s", fd, strerror(errno));
 }
 
@@ -321,6 +333,46 @@ static void forks(void)
 		FAIL("no reply in the parent");
 }
 
+/* Requests sent without the netlink syscalls, as busybox does.  */
+static void writes(void)
+{
+	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+	struct iovec iov[2];
+	int fd = nl_open(0);
+
+	if (write(fd, request(1), sizeof(struct request)) != sizeof(struct request))
+		FAIL("write(%d): %s", fd, strerror(errno));
+	if (nl_reply(fd, 1) < 0)
+		FAIL("no reply to write(2)");
+
+	iov[0].iov_base = request(2);
+	iov[0].iov_len  = sizeof(struct nlmsghdr);
+	iov[1].iov_base = (char *) request(2) + sizeof(struct nlmsghdr);
+	iov[1].iov_len  = sizeof(struct request) - sizeof(struct nlmsghdr);
+	if (writev(fd, iov, 2) != sizeof(struct request))
+		FAIL("writev(%d): %s", fd, strerror(errno));
+	if (nl_reply(fd, 2) < 0)
+		FAIL("no reply to writev(2)");
+
+	/* Connected after it was bound, still answered.  */
+	if (connect(fd, (struct sockaddr *) &kernel, sizeof(kernel)) < 0)
+		FAIL("connect(%d) after bind(2): %s", fd, strerror(errno));
+	round_trip(fd, fd, 3);
+	if (write(fd, request(4), sizeof(struct request)) != sizeof(struct request))
+		FAIL("write(%d): %s", fd, strerror(errno));
+	if (nl_reply(fd, 4) < 0)
+		FAIL("no reply to write(2) after connect(2)");
+
+	/* Connected to the kernel rather than bound.  */
+	fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+	if (fd < 0 || connect(fd, (struct sockaddr *) &kernel, sizeof(kernel)) < 0)
+		FAIL("connect(%d): %s", fd, strerror(errno));
+	if (write(fd, request(5), sizeof(struct request)) != sizeof(struct request))
+		FAIL("write(%d): %s", fd, strerror(errno));
+	if (nl_reply(fd, 5) < 0)
+		FAIL("no reply to write(2) on a socket never bound");
+}
+
 static char *exec_argv[5];
 
 static void exec_check(void)
@@ -364,6 +416,8 @@ int main(int argc, char *argv[])
 		copies();
 	else if (strcmp(mode, "forks") == 0)
 		forks();
+	else if (strcmp(mode, "writes") == 0)
+		writes();
 	else if (strcmp(mode, "exec") == 0)
 		execs(false);
 	else if (strcmp(mode, "thread-exec") == 0)
@@ -373,7 +427,7 @@ int main(int argc, char *argv[])
 		check_udp_at(atoi(argv[3]));
 	}
 	else {
-		fprintf(stderr, "usage: %s threads|copies|forks|exec|thread-exec\n", argv[0]);
+		fprintf(stderr, "usage: %s threads|copies|forks|writes|exec|thread-exec\n", argv[0]);
 		return 2;
 	}
 
