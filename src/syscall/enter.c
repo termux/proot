@@ -1031,7 +1031,8 @@ int apply_emulated_unshare(Tracee *tracee)
  * case we silently substitute an AF_UNIX/SOCK_DGRAM socket and
  * intercept the netlink-shaped syscalls a tracee might issue on it
  * (bind / connect, sendto / sendmsg, recvfrom / recvmsg, getsockname,
- * getpeername), synthesising responses that match what the request
+ * getpeername), directly or through socketcall(2) as 32-bit x86
+ * programs do, synthesising responses that match what the request
  * asked for: NLMSG_ERROR(err=0) for non-dump requests (bubblewrap's
  * loopback_setup RTM_NEWADDR / RTM_NEWLINK) and an empty NLMSG_DONE
  * for NLM_F_DUMP queries (apt / glibc getifaddrs RTM_GETADDR,
@@ -1961,7 +1962,99 @@ static void read_fake_netlink_requests(NetlinkSocket *sock)
 }
 
 /**
- * Emulate bind(2) or connect(2) on the fake @sock of @tracee.  The
+ * Tell whether the socket(@domain, *@type, @protocol) @tracee is about
+ * to make is a NETLINK_ROUTE socket PRoot has to substitute, then
+ * *@type is the type of the AF_UNIX socket to make instead.  Either
+ * way the NETLINK_ROUTE sockets are recorded at the exit stage, see
+ * record_netlink_socket(): even a real one needs the ack emulation when
+ * the tracee thinks it configures a namespace of its own.
+ */
+static bool substitute_netlink_socket(Tracee *tracee, word_t domain, word_t *type,
+				      word_t protocol)
+{
+	if (domain != AF_NETLINK || protocol != NETLINK_ROUTE)
+		return false;
+
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+
+	if (!host_blocks_af_netlink(tracee)) {
+		tracee->pending_real_netlink_socket = true;
+		return false;
+	}
+
+	*type = SOCK_DGRAM | (*type & SOCK_CLOEXEC);
+	tracee->pending_fake_netlink_socket = true;
+	return true;
+}
+
+/**
+ * Exit stage of the socket(2) of @tracee, which returned @result: see
+ * substitute_netlink_socket().
+ */
+void record_netlink_socket(Tracee *tracee, int result)
+{
+	if (   !tracee->pending_fake_netlink_socket
+	    && !tracee->pending_real_netlink_socket)
+		return;
+
+	if (   result >= 0
+	    && add_netlink_socket(tracee, result, tracee->pending_fake_netlink_socket) == NULL)
+		note(tracee, WARNING, INTERNAL, "can't track netlink socket %d", result);
+
+	tracee->pending_fake_netlink_socket = false;
+	tracee->pending_real_netlink_socket = false;
+}
+
+/**
+ * Read the @nb_args first arguments of the socketcall(2) of @tracee,
+ * at @args_addr, into @args.  This function returns -errno if an error
+ * occurred, otherwise 0.
+ */
+static int peek_socketcall_args(Tracee *tracee, word_t args_addr, word_t *args,
+				size_t nb_args)
+{
+	size_t w = sizeof_word(tracee);
+	size_t i;
+
+	for (i = 0; i < nb_args; i++) {
+		args[i] = peek_word(tracee, args_addr + i * w);
+		if (errno != 0)
+			return -errno;
+	}
+
+	return 0;
+}
+
+/**
+ * Make the socketcall(2) of @tracee use the @nb_args arguments @args,
+ * pushed in its memory, instead of the array its caller passed, which
+ * stays as it is.  This function returns -errno if an error occurred,
+ * otherwise 0.
+ */
+static int push_socketcall_args(Tracee *tracee, const word_t *args, size_t nb_args)
+{
+	size_t w = sizeof_word(tracee);
+	word_t address;
+	size_t i;
+
+	address = alloc_mem(tracee, nb_args * w);
+	if (address == 0)
+		return -EFAULT;
+
+	for (i = 0; i < nb_args; i++) {
+		poke_word(tracee, address + i * w, args[i]);
+		if (errno != 0)
+			return -errno;
+	}
+
+	poke_reg(tracee, SYSARG_2, address);
+	return 0;
+}
+
+/**
+ * Emulate bind(2) or connect(2) on the fake @sock of @tracee, its
+ * descriptor @fd, made through socketcall(2) if @socketcall.  The
  * netlink address means nothing to its substitute, so the syscall can
  * just succeed, but what the tracee writes on the socket with write(2)
  * & co. -- requests that never go through sendto(2) / sendmsg(2), as
@@ -1970,35 +2063,55 @@ static void read_fake_netlink_requests(NetlinkSocket *sock)
  * finish_fake_netlink_connect() for the exit stage.  Bubblewrap, glibc,
  * iproute2, busybox and Go bind their netlink sockets first thing.
  */
-static void connect_fake_netlink_socket(Tracee *tracee, NetlinkSocket *sock)
+static void connect_fake_netlink_socket(Tracee *tracee, NetlinkSocket *sock,
+					int fd, bool socketcall)
 {
 	struct sockaddr_un address;
 	socklen_t length;
+	word_t address_ptr;
+	int status = -1;
 
-	if (   sock->peer < 0
-	    && open_netlink_peer(sock, &address, &length) == 0) {
-		if (set_sysarg_data(tracee, &address, length, SYSARG_2) == 0) {
+	if (sock->peer >= 0 || open_netlink_peer(sock, &address, &length) < 0)
+		goto done;
+
+	address_ptr = alloc_mem(tracee, length);
+	if (address_ptr != 0 && write_data(tracee, address_ptr, &address, length) == 0) {
+		if (socketcall) {
+			word_t args[3] = { (word_t) fd, address_ptr, length };
+
+			status = push_socketcall_args(tracee, args, 3);
+			if (status == 0)
+				poke_reg(tracee, SYSARG_1, SYS_CONNECT);
+		}
+		else {
+			poke_reg(tracee, SYSARG_2, address_ptr);
 			poke_reg(tracee, SYSARG_3, length);
 			set_sysnum(tracee, PR_connect);
-			tracee->pending_netlink_connect = true;
-			tracee->sysexit_pending = true;
-			tracee->restart_how = PTRACE_SYSCALL;
-			return;
+			status = 0;
 		}
-		close_netlink_peer(sock);
 	}
 
+	if (status == 0) {
+		tracee->pending_netlink_connect = true;
+		tracee->sysexit_pending = true;
+		tracee->restart_how = PTRACE_SYSCALL;
+		return;
+	}
+	close_netlink_peer(sock);
+
+done:
 	poke_reg(tracee, SYSARG_RESULT, 0);
 	set_sysnum(tracee, PR_void);
 }
 
 /**
  * Exit stage of the connect(2) connect_fake_netlink_socket() made of
- * the bind(2) or connect(2) of @tracee.  Whatever its result, the
- * syscall of the tracee succeeds, as it would with a netlink socket;
- * only its writes don't reach PRoot when the connection failed.
+ * the bind(2) or connect(2) of @tracee on its descriptor @fd.  Whatever
+ * its result, the syscall of the tracee succeeds, as it would with a
+ * netlink socket; only its writes don't reach PRoot when the connection
+ * failed.
  */
-void finish_fake_netlink_connect(Tracee *tracee)
+void finish_fake_netlink_connect(Tracee *tracee, int fd)
 {
 	int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
 	NetlinkSocket *sock;
@@ -2008,7 +2121,7 @@ void finish_fake_netlink_connect(Tracee *tracee)
 	if (result < 0) {
 		VERBOSE(tracee, 1, "netlink: can't connect the substitute socket to PRoot: %s",
 			strerror(-result));
-		sock = netlink_socket(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+		sock = netlink_socket(tracee, fd);
 		if (sock != NULL && sock->fake)
 			close_netlink_peer(sock);
 	}
@@ -2188,23 +2301,25 @@ static void note_netns_netlink_reply(Tracee *tracee, const NetlinkSocket *socket
 /**
  * Turn the NLMSG_ERROR the kernel sent in reply to such a request into
  * a successful ack, at the exit stage of the recvfrom(2) / recvmsg(2)
- * that read it (@syscall_number tells which).  Only the error field of
- * the message whose sequence number we noted is touched, and only when
- * it is the permission error the tracee was bound to get.
+ * that read it from the descriptor @fd with @flags: into @buffer
+ * (@size bytes) for the former, into the struct msghdr at @buffer for
+ * the latter (@msghdr).  Only the error field of the message whose
+ * sequence number we noted is touched, and only when it is the
+ * permission error the tracee was bound to get.
  */
-void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
+void handle_netlink_reply_exit(Tracee *tracee, int fd, bool msghdr,
+			       word_t buffer, word_t size, int flags)
 {
 	uint8_t reply[512] __attribute__((aligned(8)));
 	NetlinkSocket *socket;
 	struct nlmsghdr hdr;
-	word_t buf_addr = 0;
-	word_t buf_len = 0;
+	word_t buf_addr = buffer;
+	word_t buf_len = size;
 	size_t len, off;
-	int flags;
 	int result;
 	int error;
 
-	socket = netlink_socket(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+	socket = netlink_socket(tracee, fd);
 	if (socket == NULL || socket->fake || !socket->ack_pending)
 		return;
 
@@ -2212,17 +2327,8 @@ void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
 	if (result <= 0)
 		return;
 
-	if (syscall_number == PR_recvfrom) {
-		buf_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
-		buf_len  = peek_reg(tracee, ORIGINAL, SYSARG_3);
-		flags    = (int) peek_reg(tracee, ORIGINAL, SYSARG_4);
-	}
-	else {
-		if (!msghdr_first_iovec(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2),
-					&buf_addr, &buf_len))
-			return;
-		flags = (int) peek_reg(tracee, ORIGINAL, SYSARG_3);
-	}
+	if (msghdr && !msghdr_first_iovec(tracee, buffer, &buf_addr, &buf_len))
+		return;
 
 	/* MSG_TRUNC reports the untruncated length, so the buffer may
 	 * hold less than the result says; MSG_PEEK leaves the reply in
@@ -2262,6 +2368,157 @@ void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
 
 	if ((flags & MSG_PEEK) == 0)
 		socket->ack_pending = false;
+}
+
+/**
+ * Answer the recvfrom(@buf, @len, @flags, @addr_ptr, @size_ptr) that
+ * @tracee makes on the fake @sock, with the next datagram of the reply
+ * pending on it, if any.  This function returns false when there's
+ * none: then the call reaches the substitute socket, whose receive
+ * queue is always empty, so the kernel blocks or reports EAGAIN just
+ * like a netlink socket with nothing left to say.  Otherwise it puts
+ * the result of the call in @result and returns true.
+ */
+static bool emulate_fake_netlink_recvfrom(Tracee *tracee, NetlinkSocket *sock,
+					  word_t buf, word_t len, int flags,
+					  word_t addr_ptr, word_t size_ptr,
+					  word_t *result)
+{
+	const uint8_t *reply = NULL;
+	size_t datagram;
+	size_t copied = 0;
+
+	read_fake_netlink_requests(sock);
+
+	/* Rtnetlink never delivers a zero-length datagram, and
+	 * reporting one makes every caller that reads until
+	 * NLMSG_DONE spin forever.  */
+	datagram = pending_fake_netlink_datagram(sock, &reply);
+	if (datagram == 0)
+		return false;
+
+	if (buf != 0) {
+		copied = len < datagram ? len : datagram;
+		if (copied > 0 &&
+		    write_data(tracee, buf, reply, copied) < 0)
+			copied = 0;
+	}
+
+	/* MSG_PEEK leaves the datagram pending for the real
+	 * read that follows; MSG_TRUNC asks for the
+	 * untruncated length (the libnetlink size-probe
+	 * pattern).  */
+	if (!(flags & MSG_PEEK))
+		consume_fake_netlink_datagram(sock, datagram);
+	*result = (flags & MSG_TRUNC) ? datagram : copied;
+
+	/* Hand back a kernel sockaddr_nl (nl_pid == 0) source
+	 * rather than the AF_UNIX address of our substitute.  */
+	if (addr_ptr != 0 && size_ptr != 0)
+		(void) write_fake_netlink_sockname(tracee, addr_ptr,
+						   size_ptr, 0);
+	errno = 0;
+
+	return true;
+}
+
+/**
+ * Same as emulate_fake_netlink_recvfrom() for recvmsg(@msghdr_addr,
+ * @flags).
+ */
+static bool emulate_fake_netlink_recvmsg(Tracee *tracee, NetlinkSocket *sock,
+					 word_t msghdr_addr, int flags,
+					 word_t *result)
+{
+	size_t w = sizeof_word(tracee);
+	word_t msg_name = 0;
+	word_t iov_ptr = 0, iov_count = 0;
+	const uint8_t *reply = NULL;
+	size_t datagram;
+	size_t scattered = 0;
+
+	read_fake_netlink_requests(sock);
+
+	/* See emulate_fake_netlink_recvfrom(): an empty receive
+	 * queue is reported by the substitute socket itself, never
+	 * as a zero-length netlink message.  */
+	datagram = pending_fake_netlink_datagram(sock, &reply);
+	if (datagram == 0)
+		return false;
+
+	if (msghdr_addr != 0) {
+		msg_name  = peek_word(tracee, msghdr_addr);
+		if (errno != 0) { errno = 0; msg_name = 0; }
+		iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+		if (errno != 0) { errno = 0; iov_ptr   = 0; }
+		iov_count = peek_word(tracee, msghdr_addr + 3 * w);
+		if (errno != 0) { errno = 0; iov_count = 0; }
+	}
+
+	if (iov_ptr != 0 && iov_count > 0)
+		scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
+						       iov_count,
+						       reply, datagram);
+
+	/* MSG_PEEK leaves the datagram pending for the real
+	 * read that follows; MSG_TRUNC asks for the
+	 * untruncated length (iproute2's libnetlink size-probe
+	 * pattern).  */
+	if (!(flags & MSG_PEEK))
+		consume_fake_netlink_datagram(sock, datagram);
+	*result = (flags & MSG_TRUNC) ? datagram : scattered;
+
+	/* glibc's getifaddrs() and friends inspect the
+	 * source address: hand them a sockaddr_nl from the
+	 * kernel (nl_pid == 0) rather than the AF_UNIX
+	 * "address family 1" that a real recvmsg on our
+	 * substituted socket would produce.  */
+	if (msg_name != 0 && msghdr_addr != 0) {
+		struct sockaddr_nl snl;
+		uint32_t in_namelen = peek_uint32(tracee, msghdr_addr + w);
+		if (errno == 0 && in_namelen > 0) {
+			uint32_t copy = in_namelen < sizeof(snl)
+					? in_namelen
+					: sizeof(snl);
+			memset(&snl, 0, sizeof(snl));
+			snl.nl_family = AF_NETLINK;
+			(void) write_data(tracee, msg_name, &snl, copy);
+			poke_uint32(tracee, msghdr_addr + w,
+				    (uint32_t) sizeof(snl));
+		}
+		errno = 0;
+	}
+
+	/* msg_flags (offset 6 words in struct msghdr, both
+	 * ABIs): report MSG_TRUNC iff the caller's buffers
+	 * couldn't hold the whole reply, like the kernel.  */
+	if (msghdr_addr != 0) {
+		poke_uint32(tracee, msghdr_addr + 6 * w,
+			    scattered < datagram ? MSG_TRUNC : 0);
+		errno = 0;
+	}
+
+	return true;
+}
+
+/**
+ * Answer the sendmsg(@msghdr_addr) that @tracee makes on the fake
+ * @sock, and return the number of bytes it pretends to have sent.
+ */
+static word_t emulate_fake_netlink_sendmsg(Tracee *tracee, NetlinkSocket *sock,
+					   word_t msghdr_addr)
+{
+	word_t base = 0, len = 0;
+
+	if (!msghdr_first_iovec(tracee, msghdr_addr, &base, &len))
+		return 0;
+
+	build_fake_netlink_reply(tracee, sock, base, len);
+
+	/* Use the first iovec's length as the pretended bytes-sent.
+	 * Multi-iovec netlink requests are unheard of for the bwrap /
+	 * glibc / iproute2 callers we care about.  */
+	return len;
 }
 
 /**
@@ -2546,7 +2803,8 @@ int translate_syscall_enter(Tracee *tracee)
 		 * our sockaddr_nl.  */
 		sock = fake_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1));
 		if (sock != NULL) {
-			connect_fake_netlink_socket(tracee, sock);
+			connect_fake_netlink_socket(tracee, sock,
+						    peek_reg(tracee, CURRENT, SYSARG_1), false);
 			status = 0;
 			break;
 		}
@@ -2637,24 +2895,13 @@ int translate_syscall_enter(Tracee *tracee)
 	 * untouched so the tracee gets the real kernel error / behavior
 	 * for them.  */
 	case PR_socket: {
-		word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-		word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
-		if (domain == AF_NETLINK && protocol == NETLINK_ROUTE) {
-			if (host_blocks_af_netlink(tracee)) {
-				word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
-				poke_reg(tracee, SYSARG_1, AF_UNIX);
-				poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
-				poke_reg(tracee, SYSARG_3, 0);
-				tracee->pending_fake_netlink_socket = true;
-			}
-			else {
-				/* Real socket, but its requests still need
-				 * the ack emulation when the tracee thinks
-				 * it configures a namespace of its own.  */
-				tracee->pending_real_netlink_socket = true;
-			}
-			tracee->sysexit_pending = true;
-			tracee->restart_how = PTRACE_SYSCALL;
+		word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
+
+		if (substitute_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1),
+					      &type, peek_reg(tracee, CURRENT, SYSARG_3))) {
+			poke_reg(tracee, SYSARG_1, AF_UNIX);
+			poke_reg(tracee, SYSARG_2, type);
+			poke_reg(tracee, SYSARG_3, 0);
 		}
 		status = 0;
 		break;
@@ -2700,19 +2947,8 @@ int translate_syscall_enter(Tracee *tracee)
 		NetlinkSocket *sock = get_netlink_socket(tracee, fd);
 
 		if (sock != NULL && sock->fake) {
-			word_t total = 0;
-
-			if (msghdr_first_iovec(tracee, msghdr_addr, &base, &len)) {
-				build_fake_netlink_reply(tracee, sock, base, len);
-				/* Use the first iovec's length as the
-				 * pretended bytes-sent.  Multi-iovec
-				 * netlink requests are unheard of for
-				 * the bwrap / glibc / iproute2 callers
-				 * we care about.  */
-				total = len;
-			}
-
-			poke_reg(tracee, SYSARG_RESULT, total);
+			poke_reg(tracee, SYSARG_RESULT,
+				 emulate_fake_netlink_sendmsg(tracee, sock, msghdr_addr));
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
@@ -2756,56 +2992,17 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_recvfrom: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		NetlinkSocket *sock = get_netlink_socket(tracee, fd);
+		word_t result;
 
-		if (sock != NULL && sock->fake)
-			read_fake_netlink_requests(sock);
-
-		if (sock != NULL && sock->fake) {
-			word_t buf       = peek_reg(tracee, CURRENT, SYSARG_2);
-			word_t len       = peek_reg(tracee, CURRENT, SYSARG_3);
-			int    flags     = (int) peek_reg(tracee, CURRENT, SYSARG_4);
-			word_t addr_ptr  = peek_reg(tracee, CURRENT, SYSARG_5);
-			word_t size_ptr  = peek_reg(tracee, CURRENT, SYSARG_6);
-			const uint8_t *reply = NULL;
-			size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
-			size_t copied    = 0;
-			size_t result;
-
-			/* Nothing left to deliver on this fd: rtnetlink never
-			 * delivers a zero-length datagram, and reporting one
-			 * makes every caller that reads until NLMSG_DONE spin
-			 * forever.  Let the read reach our substitute socket
-			 * instead: its receive queue is always empty, so the
-			 * kernel blocks or reports EAGAIN just like a netlink
-			 * socket with nothing left to say.  */
-			if (datagram == 0) {
-				status = 0;
-				break;
-			}
-
-			if (buf != 0) {
-				copied = len < datagram ? len : datagram;
-				if (copied > 0 &&
-				    write_data(tracee, buf, reply, copied) < 0)
-					copied = 0;
-			}
-
-			/* MSG_PEEK leaves the datagram pending for the real
-			 * read that follows; MSG_TRUNC asks for the
-			 * untruncated length (the libnetlink size-probe
-			 * pattern).  */
-			if (!(flags & MSG_PEEK))
-				consume_fake_netlink_datagram(sock, datagram);
-			result = (flags & MSG_TRUNC) ? datagram : copied;
-
-			/* Hand back a kernel sockaddr_nl (nl_pid == 0) source
-			 * rather than the AF_UNIX address of our substitute.  */
-			if (addr_ptr != 0 && size_ptr != 0)
-				(void) write_fake_netlink_sockname(tracee, addr_ptr,
-								   size_ptr, 0);
-			errno = 0;
-
-			poke_reg(tracee, SYSARG_RESULT, (word_t) result);
+		if (   sock != NULL && sock->fake
+		    && emulate_fake_netlink_recvfrom(tracee, sock,
+						     peek_reg(tracee, CURRENT, SYSARG_2),
+						     peek_reg(tracee, CURRENT, SYSARG_3),
+						     (int) peek_reg(tracee, CURRENT, SYSARG_4),
+						     peek_reg(tracee, CURRENT, SYSARG_5),
+						     peek_reg(tracee, CURRENT, SYSARG_6),
+						     &result)) {
+			poke_reg(tracee, SYSARG_RESULT, result);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
@@ -2818,82 +3015,14 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_recvmsg: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
 		NetlinkSocket *sock = get_netlink_socket(tracee, fd);
+		word_t result;
 
-		if (sock != NULL && sock->fake)
-			read_fake_netlink_requests(sock);
-
-		if (sock != NULL && sock->fake) {
-			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
-			int    flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
-			size_t w = sizeof_word(tracee);
-			word_t msg_name = 0;
-			word_t iov_ptr = 0, iov_count = 0;
-			const uint8_t *reply = NULL;
-			size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
-			size_t scattered = 0;
-			size_t result;
-
-			/* See PR_recvfrom above: an empty receive queue is
-			 * reported by the substitute socket itself, never as a
-			 * zero-length netlink message.  */
-			if (datagram == 0) {
-				status = 0;
-				break;
-			}
-
-			if (msghdr_addr != 0) {
-				msg_name  = peek_word(tracee, msghdr_addr);
-				if (errno != 0) { errno = 0; msg_name = 0; }
-				iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
-				if (errno != 0) { errno = 0; iov_ptr   = 0; }
-				iov_count = peek_word(tracee, msghdr_addr + 3 * w);
-				if (errno != 0) { errno = 0; iov_count = 0; }
-			}
-
-			if (iov_ptr != 0 && iov_count > 0)
-				scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
-								       iov_count,
-								       reply, datagram);
-
-			/* MSG_PEEK leaves the datagram pending for the real
-			 * read that follows; MSG_TRUNC asks for the
-			 * untruncated length (iproute2's libnetlink size-probe
-			 * pattern).  */
-			if (!(flags & MSG_PEEK))
-				consume_fake_netlink_datagram(sock, datagram);
-			result = (flags & MSG_TRUNC) ? datagram : scattered;
-
-			/* glibc's getifaddrs() and friends inspect the
-			 * source address: hand them a sockaddr_nl from the
-			 * kernel (nl_pid == 0) rather than the AF_UNIX
-			 * "address family 1" that a real recvmsg on our
-			 * substituted socket would produce.  */
-			if (msg_name != 0 && msghdr_addr != 0) {
-				struct sockaddr_nl snl;
-				uint32_t in_namelen = peek_uint32(tracee, msghdr_addr + w);
-				if (errno == 0 && in_namelen > 0) {
-					uint32_t copy = in_namelen < sizeof(snl)
-							? in_namelen
-							: sizeof(snl);
-					memset(&snl, 0, sizeof(snl));
-					snl.nl_family = AF_NETLINK;
-					(void) write_data(tracee, msg_name, &snl, copy);
-					poke_uint32(tracee, msghdr_addr + w,
-						    (uint32_t) sizeof(snl));
-				}
-				errno = 0;
-			}
-
-			/* msg_flags (offset 6 words in struct msghdr, both
-			 * ABIs): report MSG_TRUNC iff the caller's buffers
-			 * couldn't hold the whole reply, like the kernel.  */
-			if (msghdr_addr != 0) {
-				poke_uint32(tracee, msghdr_addr + 6 * w,
-					    scattered < datagram ? MSG_TRUNC : 0);
-				errno = 0;
-			}
-
-			poke_reg(tracee, SYSARG_RESULT, (word_t) result);
+		if (   sock != NULL && sock->fake
+		    && emulate_fake_netlink_recvmsg(tracee, sock,
+						    peek_reg(tracee, CURRENT, SYSARG_2),
+						    (int) peek_reg(tracee, CURRENT, SYSARG_3),
+						    &result)) {
+			poke_reg(tracee, SYSARG_RESULT, result);
 			set_sysnum(tracee, PR_void);
 			status = 0;
 			break;
@@ -2913,11 +3042,74 @@ int translate_syscall_enter(Tracee *tracee)
 		args_addr = peek_reg(tracee, CURRENT, SYSARG_2);
 
 		switch (peek_reg(tracee, CURRENT, SYSARG_1)) {
+		case SYS_SOCKET: {
+			/* See case PR_socket.  */
+			word_t args[3];
+
+			status = 0;
+			if (peek_socketcall_args(tracee, args_addr, args, 3) < 0)
+				break;
+
+			if (substitute_netlink_socket(tracee, args[0], &args[1], args[2])) {
+				args[0] = AF_UNIX;
+				args[2] = 0;
+				status = push_socketcall_args(tracee, args, 3);
+			}
+			break;
+		}
+
 		case SYS_BIND:
-		case SYS_CONNECT:
+		case SYS_CONNECT: {
+			/* See case PR_bind.  */
+			NetlinkSocket *sock;
+			int fd = (int) PEEK_WORD(SYSARG_ADDR(1), 0);
+
+			sock = fake_netlink_socket(tracee, fd);
+			if (sock != NULL) {
+				connect_fake_netlink_socket(tracee, sock, fd, true);
+				status = 0;
+				break;
+			}
+
 			/* Handle these cases below.  */
 			status = 1;
 			break;
+		}
+
+		case SYS_RECV:
+		case SYS_RECVFROM:
+		case SYS_RECVMSG: {
+			/* See case PR_recvfrom.  */
+			word_t call = peek_reg(tracee, CURRENT, SYSARG_1);
+			NetlinkSocket *sock;
+			word_t args[6] = { 0 };
+			word_t result;
+			bool answered;
+
+			status = 0;
+			if (peek_socketcall_args(tracee, args_addr, args,
+						 call == SYS_RECVMSG ? 3 : call == SYS_RECV ? 4 : 6) < 0)
+				break;
+
+			sock = get_netlink_socket(tracee, (int) args[0]);
+			if (sock == NULL || !sock->fake) {
+				note_netns_netlink_reply(tracee, sock);
+				break;
+			}
+
+			if (call == SYS_RECVMSG)
+				answered = emulate_fake_netlink_recvmsg(tracee, sock, args[1],
+									(int) args[2], &result);
+			else
+				answered = emulate_fake_netlink_recvfrom(tracee, sock, args[1], args[2],
+									 (int) args[3], args[4],
+									 args[5], &result);
+			if (answered) {
+				poke_reg(tracee, SYSARG_RESULT, result);
+				set_sysnum(tracee, PR_void);
+			}
+			break;
+		}
 
 		case SYS_ACCEPT:
 		case SYS_ACCEPT4:
@@ -2931,6 +3123,24 @@ int translate_syscall_enter(Tracee *tracee)
 			/* Fall through.  */
 		case SYS_GETSOCKNAME:
 		case SYS_GETPEERNAME:
+			/* See case PR_getsockname.  */
+			if (!special) {
+				word_t args[3];
+				NetlinkSocket *sock = NULL;
+
+				if (peek_socketcall_args(tracee, args_addr, args, 3) == 0)
+					sock = fake_netlink_socket(tracee, (int) args[0]);
+				if (sock != NULL) {
+					int rc = write_fake_netlink_sockname(tracee, args[1], args[2],
+									     sock->port_id);
+
+					poke_reg(tracee, SYSARG_RESULT, (word_t) rc);
+					set_sysnum(tracee, PR_void);
+					status = 0;
+					break;
+				}
+			}
+
 			/* Remember: PEEK_WORD puts -errno in status and breaks
 			 * if an error occured.  */
 			size_addr =  PEEK_WORD(SYSARG_ADDR(3), 0);
@@ -2941,12 +3151,51 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 			break;
 
+		case SYS_SEND:
 		case SYS_SENDTO:
 		case SYS_SENDMSG:
-		case SYS_SENDMMSG:
+		case SYS_SENDMMSG: {
+			word_t call = peek_reg(tracee, CURRENT, SYSARG_1);
+
 			/* See case PR_sendto and the following ones.  */
-			status = translate_socketcall_send_enter(tracee,
-					peek_reg(tracee, CURRENT, SYSARG_1), &args_addr);
+			if (call != SYS_SENDMMSG) {
+				NetlinkSocket *sock;
+				word_t args[3] = { 0 };
+
+				status = peek_socketcall_args(tracee, args_addr, args,
+							      call == SYS_SENDMSG ? 2 : 3);
+				if (status < 0) {
+					/* Let the kernel report a bad address.  */
+					status = 0;
+					break;
+				}
+
+				sock = get_netlink_socket(tracee, (int) args[0]);
+				if (sock != NULL && sock->fake) {
+					word_t result = args[2];
+
+					if (call == SYS_SENDMSG)
+						result = emulate_fake_netlink_sendmsg(tracee, sock, args[1]);
+					else
+						build_fake_netlink_reply(tracee, sock, args[1], args[2]);
+
+					poke_reg(tracee, SYSARG_RESULT, result);
+					set_sysnum(tracee, PR_void);
+					status = 0;
+					break;
+				}
+
+				if (call != SYS_SENDMSG)
+					note_netns_netlink_request(tracee, sock, args[1], args[2]);
+				else if (is_netns_netlink_socket(tracee, sock)) {
+					word_t base, len;
+
+					if (msghdr_first_iovec(tracee, args[1], &base, &len))
+						note_netns_netlink_request(tracee, sock, base, len);
+				}
+			}
+
+			status = translate_socketcall_send_enter(tracee, call, &args_addr);
 			if (status <= 0)
 				break;
 
@@ -2955,6 +3204,7 @@ int translate_syscall_enter(Tracee *tracee)
 
 			status = 0;
 			break;
+		}
 
 		default:
 			status = 0;

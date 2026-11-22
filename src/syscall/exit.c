@@ -202,10 +202,45 @@ void translate_syscall_exit(Tracee *tracee)
 		word_t sock_addr;
 		word_t size_addr;
 		word_t max_size;
+		word_t call;
+
+		/* What PRoot answered itself, a fake netlink socket.  */
+		if (is_voided_syscall(tracee, MODIFIED))
+			goto end;
 
 		args_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		call = peek_reg(tracee, ORIGINAL, SYSARG_1);
 
-		switch (peek_reg(tracee, ORIGINAL, SYSARG_1)) {
+		switch (call) {
+		case SYS_SOCKET:
+			/* See case PR_socket.  */
+			record_netlink_socket(tracee, (int) syscall_result);
+			goto end;
+
+		case SYS_RECV:
+		case SYS_RECVFROM:
+		case SYS_RECVMSG: {
+			/* See case PR_recvfrom.  The arguments of the
+			 * caller are as they were.  */
+			size_t nb_args = (call == SYS_RECVMSG ? 3 : 4);
+			word_t args[4];
+			size_t i;
+
+			for (i = 0; i < nb_args; i++) {
+				args[i] = peek_word(tracee, SYSARG_ADDR(i + 1));
+				if (errno != 0)
+					goto end;
+			}
+
+			if (call == SYS_RECVMSG)
+				handle_netlink_reply_exit(tracee, (int) args[0], true,
+							  args[1], 0, (int) args[2]);
+			else
+				handle_netlink_reply_exit(tracee, (int) args[0], false,
+							  args[1], args[2], (int) args[3]);
+			goto end;
+		}
+
 		case SYS_ACCEPT:
 		case SYS_ACCEPT4:
 			/* Nothing special to do if no sockaddr was specified.  */
@@ -221,6 +256,16 @@ void translate_syscall_exit(Tracee *tracee)
 
 		case SYS_BIND:
 		case SYS_CONNECT:
+			/* The substitute of a fake netlink socket was
+			 * connected to PRoot instead, with arguments of
+			 * its own.  */
+			if (tracee->pending_netlink_connect) {
+				word_t fd = peek_word(tracee, SYSARG_ADDR(1));
+
+				finish_fake_netlink_connect(tracee, errno == 0 ? (int) fd : -1);
+				goto end;
+			}
+
 			/* Restore the initial parameters: this memory was
 			 * overwritten at the enter stage.  Remember: POKE_WORD
 			 * puts -errno in status and breaks if an error
@@ -797,21 +842,8 @@ void translate_syscall_exit(Tracee *tracee)
 
 	case PR_socket:
 		/* Record the fd we substituted for an AF_NETLINK request,
-		 * or the NETLINK_ROUTE socket the host granted as is:
-		 * requests sent on the latter still need the ack
-		 * emulation when the tracee thinks it owns a network
-		 * namespace.  */
-		if (   tracee->pending_fake_netlink_socket
-		    || tracee->pending_real_netlink_socket) {
-			int fd = (int) syscall_result;
-
-			if (   fd >= 0
-			    && add_netlink_socket(tracee, fd, tracee->pending_fake_netlink_socket) == NULL)
-				note(tracee, WARNING, INTERNAL, "can't track netlink socket %d", fd);
-
-			tracee->pending_fake_netlink_socket = false;
-			tracee->pending_real_netlink_socket = false;
-		}
+		 * or the NETLINK_ROUTE socket the host granted as is.  */
+		record_netlink_socket(tracee, (int) syscall_result);
 		goto end;
 
 	case PR_bind:
@@ -819,14 +851,22 @@ void translate_syscall_exit(Tracee *tracee)
 		/* The substitute of a fake netlink socket was connected
 		 * to PRoot instead.  */
 		if (tracee->pending_netlink_connect)
-			finish_fake_netlink_connect(tracee);
+			finish_fake_netlink_connect(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
 		goto end;
 
 	case PR_recvfrom:
 	case PR_recvmsg:
 		/* Turn the kernel's refusal to reconfigure a network
 		 * namespace the tracee doesn't really have into an ack.  */
-		handle_netlink_reply_exit(tracee, syscall_number);
+		if (syscall_number == PR_recvfrom)
+			handle_netlink_reply_exit(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1), false,
+						  peek_reg(tracee, ORIGINAL, SYSARG_2),
+						  peek_reg(tracee, ORIGINAL, SYSARG_3),
+						  (int) peek_reg(tracee, ORIGINAL, SYSARG_4));
+		else
+			handle_netlink_reply_exit(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1), true,
+						  peek_reg(tracee, ORIGINAL, SYSARG_2), 0,
+						  (int) peek_reg(tracee, ORIGINAL, SYSARG_3));
 		goto end;
 
 	case PR_chroot:

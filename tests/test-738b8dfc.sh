@@ -14,7 +14,10 @@ fi
 # the UDP socket reusing such a number answered as netlink.
 #
 # netlink_deny.so makes the host deny AF_NETLINK to PRoot, as Android
-# does, so the emulation is what the scenarios exercise.
+# does, so the emulation is what the scenarios exercise.  32-bit x86
+# programs make these syscalls through socketcall(2), which wasn't
+# emulated at all: the scenarios run as such programs too, where they
+# can be built.
 
 DIR=${TMPDIR:?}/$(mcookie)
 SCRIPT_DIR=$(dirname "$0")
@@ -38,18 +41,31 @@ if [ ${STATUS} -eq 125 ]; then
     exit 125
 fi
 
-for SCENARIO in threads copies forks writes exec thread-exec; do
-    for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
-        set +e
-        OUTPUT=$(env ${NO_SECCOMP} LD_PRELOAD="${DIR}/netlink_deny.so" \
-                     ${PROOT} -v 1 "${DIR}/netlink_fds" ${SCENARIO} 2>&1)
-        STATUS=$?
-        set -e
-        if [ ${STATUS} -ne 0 ] || ! echo "${OUTPUT}" | grep -q 'AF_NETLINK .* denied by host'; then
-            echo "${OUTPUT}"
-            rm -rf "${DIR}"
-            exit 1
-        fi
+# Only if the program runs: it prints its usage then.
+BINARIES="${DIR}/netlink_fds"
+set +e
+gcc -m32 -pthread "${SCRIPT_DIR}/netlink_fds.c" -o "${DIR}/netlink_fds-m32" >/dev/null 2>&1 \
+&& "${DIR}/netlink_fds-m32" >/dev/null 2>&1
+STATUS=$?
+set -e
+if [ ${STATUS} -eq 2 ]; then
+    BINARIES="${BINARIES} ${DIR}/netlink_fds-m32"
+fi
+
+for BINARY in ${BINARIES}; do
+    for SCENARIO in threads copies forks writes exec thread-exec; do
+        for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
+            set +e
+            OUTPUT=$(env ${NO_SECCOMP} LD_PRELOAD="${DIR}/netlink_deny.so" \
+                         ${PROOT} -v 1 "${BINARY}" ${SCENARIO} 2>&1)
+            STATUS=$?
+            set -e
+            if [ ${STATUS} -ne 0 ] || ! echo "${OUTPUT}" | grep -q 'AF_NETLINK .* denied by host'; then
+                echo "${OUTPUT}"
+                rm -rf "${DIR}"
+                exit 1
+            fi
+        done
     done
 done
 
