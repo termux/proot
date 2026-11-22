@@ -1983,7 +1983,10 @@ static bool substitute_netlink_socket(Tracee *tracee, word_t domain, word_t *typ
 		return false;
 	}
 
-	*type = SOCK_DGRAM | (*type & SOCK_CLOEXEC);
+	/* A non-blocking socket has to report EAGAIN once the reply
+	 * is read: event loops count on it, systemd's sd-netlink for
+	 * one.  */
+	*type = SOCK_DGRAM | (*type & (SOCK_CLOEXEC | SOCK_NONBLOCK));
 	tracee->pending_fake_netlink_socket = true;
 	return true;
 }

@@ -373,6 +373,23 @@ static void writes(void)
 		FAIL("no reply to write(2) on a socket never bound");
 }
 
+/* A non-blocking socket says when there's nothing left to read,
+ * rather than waiting for the timeout nl_open() sets.  */
+static void nonblocking(void)
+{
+	int fd = nl_open(SOCK_NONBLOCK);
+	char buffer[64];
+
+	if ((fcntl(fd, F_GETFL) & O_NONBLOCK) == 0)
+		FAIL("fd %d: no O_NONBLOCK", fd);
+
+	if (!nothing_pending(fd))
+		FAIL("something to read before any request");
+	round_trip(fd, fd, 1);
+	if (recv(fd, buffer, sizeof(buffer), 0) >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+		FAIL("recv(%d) after the reply: %s", fd, strerror(errno));
+}
+
 static char *exec_argv[5];
 
 static void exec_check(void)
@@ -418,6 +435,8 @@ int main(int argc, char *argv[])
 		forks();
 	else if (strcmp(mode, "writes") == 0)
 		writes();
+	else if (strcmp(mode, "nonblocking") == 0)
+		nonblocking();
 	else if (strcmp(mode, "exec") == 0)
 		execs(false);
 	else if (strcmp(mode, "thread-exec") == 0)
@@ -427,7 +446,8 @@ int main(int argc, char *argv[])
 		check_udp_at(atoi(argv[3]));
 	}
 	else {
-		fprintf(stderr, "usage: %s threads|copies|forks|writes|exec|thread-exec\n", argv[0]);
+		fprintf(stderr, "usage: %s threads|copies|forks|writes|nonblocking|exec|thread-exec\n",
+			argv[0]);
 		return 2;
 	}
 

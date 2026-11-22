@@ -11,7 +11,9 @@ fi
 # for ever.  Go programs hung that way, goroutines moving from thread to
 # thread (#425).  Neither were the copies of a descriptor known, nor the
 # descriptors execve(2) closed or dup2(2) replaced forgotten, which got
-# the UDP socket reusing such a number answered as netlink.
+# the UDP socket reusing such a number answered as netlink.  The
+# requests written with write(2) were refused, and a non-blocking socket
+# got a blocking substitute.
 #
 # netlink_deny.so makes the host deny AF_NETLINK to PRoot, as Android
 # does, so the emulation is what the scenarios exercise.  32-bit x86
@@ -53,7 +55,7 @@ if [ ${STATUS} -eq 2 ]; then
 fi
 
 for BINARY in ${BINARIES}; do
-    for SCENARIO in threads copies forks writes exec thread-exec; do
+    for SCENARIO in threads copies forks writes nonblocking exec thread-exec; do
         for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
             set +e
             OUTPUT=$(env ${NO_SECCOMP} LD_PRELOAD="${DIR}/netlink_deny.so" \
