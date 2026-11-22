@@ -28,6 +28,7 @@
 #include <linux/prctl.h> /* PR_GET_AUXV, */
 #include <string.h>      /* strlen(3), */
 #include <unistd.h>      /* readlink(2), */
+#include <sys/stat.h>    /* lstat(2), S_ISDIR, */
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -105,8 +106,17 @@ void translate_syscall_exit(Tracee *tracee)
 			break;
 		}
 
-		/* Ensure cwd still exists.  */
+		/* Ensure cwd still exists.  A mount may have covered it,
+		 * the kernel keeps reporting its path then, as long as
+		 * the directory itself exists.  */
 		status = translate_path(tracee, path, AT_FDCWD, ".", false);
+		if (status < 0 && tracee->fs->covered_cwd != NULL) {
+			struct stat statl;
+
+			if (   lstat(tracee->fs->covered_cwd, &statl) == 0
+			    && S_ISDIR(statl.st_mode))
+				status = 0;
+		}
 		if (status < 0)
 			break;
 

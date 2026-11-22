@@ -63,6 +63,13 @@ typedef struct {
 
 	/* Current working directory, à la /proc/self/pwd.  */
 	char *cwd;
+
+	/* Host path of the current working directory, when a mount
+	 * PRoot emulated covered it, NULL otherwise.  The kernel keeps
+	 * the directory a process is in when something is mounted over
+	 * it, getcwd(2) keeps reporting its path, although that path
+	 * leads elsewhere now: under the mount.  */
+	char *covered_cwd;
 } FileSystemNameSpace;
 
 /* Virtual heap, emulated with a regular memory mapping.  */

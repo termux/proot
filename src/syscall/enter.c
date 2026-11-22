@@ -487,6 +487,36 @@ static int canonicalize_mount_target(Tracee *tracee, const char *user_path,
 }
 
 /**
+ * Remember where the working directory of @tracee is on the host if
+ * the mount about to be emulated at @guest_path covers it, see
+ * "covered_cwd" in FileSystemNameSpace.  bubblewrap mounts a tmpfs
+ * on "/tmp", then asks for the working directory, to go back there
+ * from inside the sandbox if it can; started from below "/tmp", it
+ * got none.
+ */
+static void cover_cwd(Tracee *tracee, const char *guest_path)
+{
+	FileSystemNameSpace *fs = tracee->fs;
+	char host_path[PATH_MAX];
+	Comparison comparison;
+	struct stat statl;
+
+	if (fs->covered_cwd != NULL)
+		return;
+
+	comparison = compare_paths(guest_path, fs->cwd);
+	if (comparison != PATHS_ARE_EQUAL && comparison != PATH1_IS_PREFIX)
+		return;
+
+	if (   translate_path(tracee, host_path, AT_FDCWD, ".", false) < 0
+	    || lstat(host_path, &statl) < 0
+	    || !S_ISDIR(statl.st_mode))
+		return;
+
+	fs->covered_cwd = talloc_strdup(fs, host_path);
+}
+
+/**
  * Emulate mount(@src_user, @target_user, @fstype, @flags) by adding a
  * PRoot binding from a host directory to the canonicalized target.
  * Bind mounts use the translated source; "proc"/"sysfs"/"devtmpfs"/
@@ -535,6 +565,8 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 
 	if (canonicalize_mount_target(tracee, target_user, guest_path) < 0)
 		return;
+
+	cover_cwd(tracee, guest_path);
 
 	if (tmpfs) {
 		(void) insort_tmpfs_binding(tracee, tracee->fs, guest_path);
@@ -683,6 +715,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 		if (cwd != NULL) {
 			talloc_set_name_const(cwd, "$cwd");
 			TALLOC_FREE(tracee->fs->cwd);
+			TALLOC_FREE(tracee->fs->covered_cwd);
 			tracee->fs->cwd = cwd;
 		}
 	}
@@ -2333,9 +2366,22 @@ int translate_syscall_enter(Tracee *tracee)
 		/* The ending "." ensures an error will be reported if
 		 * path does not exist or if it is not a directory.  */
 		if (syscall_number == PR_chdir) {
+			/* get_sysarg_path() reads NULL as "", which
+			 * would be the working directory, and the kernel
+			 * never sees this syscall.  */
+			if (peek_reg(tracee, CURRENT, SYSARG_1) == 0) {
+				status = -EFAULT;
+				break;
+			}
+
 			status = get_sysarg_path(tracee, path, SYSARG_1);
 			if (status < 0)
 				break;
+
+			if (path[0] == '\0') {
+				status = -ENOENT;
+				break;
+			}
 
 			status = join_paths(2, oldpath, path, ".");
 			if (status < 0)
@@ -2387,6 +2433,7 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 		}
 		TALLOC_FREE(tracee->fs->cwd);
+		TALLOC_FREE(tracee->fs->covered_cwd);
 
 		tracee->fs->cwd = tmp;
 		talloc_set_name_const(tracee->fs->cwd, "$cwd");

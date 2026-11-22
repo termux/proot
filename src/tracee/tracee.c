@@ -897,6 +897,12 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 			return -ENOMEM;
 		talloc_set_name_const(child->fs->cwd, "$cwd");
 
+		if (parent->fs->covered_cwd != NULL) {
+			child->fs->covered_cwd = talloc_strdup(child->fs, parent->fs->covered_cwd);
+			if (child->fs->covered_cwd == NULL)
+				return -ENOMEM;
+		}
+
 		if (parent->clone_stripped_newns
 		    && parent->fs->bindings.guest != NULL) {
 			/* Caller asked for CLONE_NEWNS (which we
@@ -1041,6 +1047,14 @@ int unshare_fs(Tracee *tracee, bool new_mount_ns)
 		return -ENOMEM;
 	}
 	talloc_set_name_const(fs->cwd, "$cwd");
+
+	if (previous->covered_cwd != NULL) {
+		fs->covered_cwd = talloc_strdup(fs, previous->covered_cwd);
+		if (fs->covered_cwd == NULL) {
+			talloc_free(fs);
+			return -ENOMEM;
+		}
+	}
 
 	tracee->fs = fs;
 
