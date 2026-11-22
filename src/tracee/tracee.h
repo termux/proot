@@ -46,6 +46,7 @@ struct bindings;
 struct load_info;
 struct extensions;
 struct chained_syscalls;
+struct netlink_fds;
 
 /* Information related to a file-system name-space.  */
 typedef struct {
@@ -121,44 +122,27 @@ typedef struct tracee {
 
 	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
 	 * sandbox helpers like bubblewrap that try to bring up the
-	 * loopback interface inside their would-be net namespace.
-	 * fake_netlink_fds holds one entry per socket we silently
-	 * redirected from AF_NETLINK to AF_UNIX/SOCK_DGRAM; see
-	 * enter.c / exit.c for the intercepts.
+	 * loopback interface inside their would-be net namespace, and
+	 * for everything that lists the network interfaces where the
+	 * host denies AF_NETLINK.  netlink_fds tells which descriptors
+	 * are NETLINK_ROUTE sockets PRoot emulates something about:
+	 * the ones it silently redirected from AF_NETLINK to
+	 * AF_UNIX/SOCK_DGRAM, and the real ones the ack emulation
+	 * below watches.  It follows the descriptor table of the
+	 * kernel, so all the tracees that share one (CLONE_FILES)
+	 * share it too; see syscall/netlink_fds.c, and enter.c /
+	 * exit.c for the intercepts.
 	 *
-	 * "reply" is what PRoot synthesised at send time for that socket's
-	 * latest request, waiting for the matching recvmsg / recvfrom.  It
-	 * belongs to the socket rather than to the tracee because sockets
-	 * have receive queues of their own: iproute2 walks a route dump on
-	 * one of them while a second answers the interface lookups it makes
-	 * along the way.  The buffer is allocated on demand and handed back
-	 * one datagram at a time ("reply_off" is how far the tracee has
-	 * read), since that is how the kernel delivers a dump.  */
-#define MAX_FAKE_NETLINK_FDS 8
-#define MAX_FAKE_NETLINK_REPLY 8192
-	struct fake_netlink_socket {
-		int fd;
-		uint8_t *reply;
-		size_t reply_len;
-		size_t reply_off;
-	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
-	int fake_netlink_fds_count;
-	bool pending_fake_netlink_socket;
-
-	/* Fds of the *real* NETLINK_ROUTE sockets a tracee got when the
-	 * host didn't need the substitution above.  Such a socket lives
+	 * The pending_* flags carry the socket(2) PRoot is handling
+	 * from its enter stage to its exit stage.  A real socket lives
 	 * in the host's network namespace, where a tracee has no
 	 * CAP_NET_ADMIN, so the requests a fake_netns tracee sends to
-	 * configure "its" namespace come back as NLMSG_ERROR(-EPERM);
-	 * netlink_ack_* remembers which reply to turn into a plain ack
-	 * (see handle_netlink_reply_exit).  */
-#define MAX_NETLINK_ROUTE_FDS 8
-	int netlink_route_fds[MAX_NETLINK_ROUTE_FDS];
-	int netlink_route_fds_count;
+	 * configure "its" namespace over it come back as
+	 * NLMSG_ERROR(-EPERM), and are turned into a plain ack (see
+	 * handle_netlink_reply_exit).  */
+	struct netlink_fds *netlink_fds;
+	bool pending_fake_netlink_socket;
 	bool pending_real_netlink_socket;
-	bool netlink_ack_pending;
-	int netlink_ack_fd;
-	uint32_t netlink_ack_seq;
 
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
@@ -434,6 +418,7 @@ extern Tracee *get_stopped_ptracee(const Tracee *ptracer, pid_t pid,
 extern bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options);
 extern int new_child(Tracee *parent, word_t clone_flags);
 extern int unshare_fs(Tracee *tracee, bool new_mount_ns);
+extern int read_proc_status_ids(pid_t pid, pid_t *tgid, pid_t *ppid, pid_t *tracer);
 extern Tracee *get_execve_tracee(Tracee *leader);
 extern void resolve_pending_child(Tracee *parent);
 extern void adopt_held_children(void);

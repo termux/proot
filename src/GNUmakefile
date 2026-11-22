@@ -50,6 +50,7 @@ OBJECTS += \
 	syscall/heap.o		\
 	syscall/rlimit.o	\
 	syscall/pipe_shadow.o	\
+	syscall/netlink_fds.o	\
 	tracee/tracee.o		\
 	tracee/mem.o		\
 	tracee/reg.o		\

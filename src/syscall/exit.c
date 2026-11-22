@@ -36,6 +36,7 @@
 #include "syscall/chain.h"
 #include "syscall/heap.h"
 #include "syscall/rlimit.h"
+#include "syscall/netlink_fds.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -785,50 +786,20 @@ void translate_syscall_exit(Tracee *tracee)
 		goto end;
 
 	case PR_socket:
-		/* Record the fd we substituted for an AF_NETLINK request.  */
-		if (tracee->pending_fake_netlink_socket) {
-			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-			if (fd >= 0) {
-				int i;
-				if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
-					/* Avoid duplicates.  */
-					bool present = false;
-					for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
-						if (tracee->fake_netlink_fds[i].fd == fd) {
-							present = true;
-							break;
-						}
-					}
-					if (!present) {
-						struct fake_netlink_socket *sock =
-							&tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++];
-						memset(sock, 0, sizeof(*sock));
-						sock->fd = fd;
-					}
-				}
-			}
-			tracee->pending_fake_netlink_socket = false;
-		}
+		/* Record the fd we substituted for an AF_NETLINK request,
+		 * or the NETLINK_ROUTE socket the host granted as is:
+		 * requests sent on the latter still need the ack
+		 * emulation when the tracee thinks it owns a network
+		 * namespace.  */
+		if (   tracee->pending_fake_netlink_socket
+		    || tracee->pending_real_netlink_socket) {
+			int fd = (int) syscall_result;
 
-		/* Same for a NETLINK_ROUTE socket the host granted as is:
-		 * requests sent on it still need the ack emulation when
-		 * the tracee thinks it owns a network namespace.  */
-		if (tracee->pending_real_netlink_socket) {
-			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-			if (fd >= 0) {
-				int i;
-				if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
-					bool present = false;
-					for (i = 0; i < tracee->netlink_route_fds_count; i++) {
-						if (tracee->netlink_route_fds[i] == fd) {
-							present = true;
-							break;
-						}
-					}
-					if (!present)
-						tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
-				}
-			}
+			if (   fd >= 0
+			    && add_netlink_socket(tracee, fd, tracee->pending_fake_netlink_socket) == NULL)
+				note(tracee, WARNING, INTERNAL, "can't track netlink socket %d", fd);
+
+			tracee->pending_fake_netlink_socket = false;
 			tracee->pending_real_netlink_socket = false;
 		}
 		goto end;

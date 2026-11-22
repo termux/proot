@@ -41,6 +41,7 @@
 #include "tracee/mem.h"
 #include "path/binding.h"
 #include "syscall/sysnum.h"
+#include "syscall/netlink_fds.h"
 #include "tracee/event.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
@@ -194,11 +195,12 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 		goto no_mem;
 
 	/* By default new tracees have an empty file-system
-	 * name-space and heap.  */
+	 * name-space, heap and table of netlink sockets.  */
 	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 	tracee->heap = talloc_zero(tracee, Heap);
+	tracee->netlink_fds = new_netlink_fds(tracee);
 	tracee->auxv_fd = -1;
-	if (tracee->fs == NULL || tracee->heap == NULL)
+	if (tracee->fs == NULL || tracee->heap == NULL || tracee->netlink_fds == NULL)
 		goto no_mem;
 
 	return tracee;
@@ -471,7 +473,7 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid);
  * Read the Tgid, PPid and TracerPid fields of /proc/@pid/status.  This
  * function returns -1 if they can't all be read, otherwise 0.
  */
-static int read_proc_status_ids(pid_t pid, pid_t *tgid, pid_t *ppid, pid_t *tracer)
+int read_proc_status_ids(pid_t pid, pid_t *tgid, pid_t *ppid, pid_t *tracer)
 {
 	char path[64];
 	char line[128];
@@ -726,6 +728,7 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 {
 	int ptrace_options;
 	Tracee *child;
+	int status;
 
 	child = get_tracee(parent, pid, false);
 
@@ -900,7 +903,7 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 			 * silently stripped).  Give the child its own
 			 * copy of the binding tree so emulated mount(2)
 			 * calls don't propagate back to the parent.  */
-			int status = copy_bindings(child, parent->fs);
+			status = copy_bindings(child, parent->fs);
 			if (status < 0)
 				return status;
 		}
@@ -929,20 +932,22 @@ static int attach_child(Tracee *parent, word_t clone_flags, pid_t pid)
 	child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
 	parent->clone_stripped_newnet = false;
 
-	/* Open fds survive fork(2)/clone(2), so the child has to keep
-	 * recognising the netlink sockets its parent opened.  The reply
-	 * pending on either of them doesn't carry over: it belongs to
-	 * whoever sent the request.  */
-	for (int i = 0; i < parent->fake_netlink_fds_count; i++) {
-		child->fake_netlink_fds[i].fd = parent->fake_netlink_fds[i].fd;
-		child->fake_netlink_fds[i].reply = NULL;
-		child->fake_netlink_fds[i].reply_len = 0;
-		child->fake_netlink_fds[i].reply_off = 0;
-	}
-	child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
-	memcpy(child->netlink_route_fds, parent->netlink_route_fds,
-	       sizeof(child->netlink_route_fds));
-	child->netlink_route_fds_count = parent->netlink_route_fds_count;
+	/* If CLONE_FILES is set, the calling process and the child
+	 * process share the same file descriptor table.  Any file
+	 * descriptor created by the calling process or by the child
+	 * process is also valid in the other process.  [...]
+	 *
+	 * If CLONE_FILES is not set, the child process inherits a
+	 * copy of all file descriptors opened in the calling process
+	 * at the time of the clone call.
+	 *
+	 * -- clone(2) man-page
+	 *
+	 * Either way, the descriptors refer to the same sockets, whose
+	 * pending replies are readable from both processes.  */
+	status = inherit_netlink_fds(child, parent, (clone_flags & CLONE_FILES) != 0);
+	if (status < 0)
+		return status;
 
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */

@@ -37,6 +37,7 @@
 #include "tracee/abi.h"
 #include "tracee/mem.h"
 #include "syscall/sysnum.h"
+#include "syscall/netlink_fds.h"
 #include "execve/auxv.h"
 #include "path/binding.h"
 #include "path/temp.h"
@@ -488,6 +489,7 @@ void translate_execve_exit(Tracee *tracee)
 	/* Its descriptors opened with O_CLOEXEC were closed without
 	 * close(2), see remember_fd_path().  */
 	forget_fd_path(tracee->pid, -1);
+	unshare_netlink_fds_after_execve(tracee);
 
 	/* Execve happened; commit the new "/proc/self/exe".  */
 	if (tracee->new_exe != NULL) {
