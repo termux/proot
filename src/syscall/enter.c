@@ -255,6 +255,49 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 	return translate_path2(tracee, AT_FDCWD, old_path, reg, type);
 }
 
+/* Whether the guest made a bind mount, see translate_unlinked_path().  */
+static bool bind_mount_emulated = false;
+
+/**
+ * Translate the path @reg of unlink(2) or unlinkat(2), relative to
+ * @dir_fd, as translate_path2() does.  If @keep is true, the host and
+ * the guest paths of the file to remove may be copied in @host_path
+ * and @guest_path, for keep_bound_file(); @guest_path is left as is,
+ * or emptied, otherwise.  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+static int translate_unlinked_path(Tracee *tracee, int dir_fd, Reg reg, bool keep,
+				   char host_path[PATH_MAX], char guest_path[PATH_MAX])
+{
+	char user_path[PATH_MAX];
+	int status;
+
+	status = get_sysarg_path(tracee, user_path, reg);
+	if (status < 0)
+		return status;
+
+	/* Bind mounts are rare, unlinks are not: look for a binding
+	 * to the file only once the guest made one.  The bindings of
+	 * the command line are left out until then.  */
+	if (!keep || !bind_mount_emulated || user_path[0] == '\0')
+		return translate_path2(tracee, dir_fd, user_path, reg, SYMLINK);
+
+	status = translate_path_guest(tracee, host_path, guest_path, dir_fd, user_path, false);
+	if (status < 0)
+		goto error;
+
+	status = set_sysarg_path(tracee, host_path, reg);
+	if (status < 0)
+		goto error;
+
+	return 0;
+
+error:
+	host_path[0] = '\0';
+	guest_path[0] = '\0';
+	return status;
+}
+
 /**
  * Dereference @guest_path, a canonicalized guest path, if it names a
  * descriptor, that is "/proc/<PID>/fd/<FD>": canonicalize() keeps such
@@ -499,7 +542,9 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 
 	chop_finality(host_path);
 
-	(void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+	if (insort_binding3(tracee, tracee->fs, host_path, guest_path) != NULL
+	    && (flags & MS_BIND) != 0)
+		bind_mount_emulated = true;
 }
 
 /**
@@ -2273,8 +2318,14 @@ int translate_syscall_enter(Tracee *tracee)
 	char oldpath[PATH_MAX];
 	char newpath[PATH_MAX];
 
+	/* The file unlink(2) or unlinkat(2) removes, see keep_bound_file().  */
+	char unlinked_host[PATH_MAX];
+	char unlinked_guest[PATH_MAX];
+
 	word_t syscall_number;
 	bool special = false;
+
+	unlinked_guest[0] = '\0';
 
 	status = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);
 	if (status < 0)
@@ -3112,9 +3163,13 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_lstat:
 	case PR_lstat64:
 	case PR_oldlstat:
-	case PR_unlink:
 	case PR_rmdir:
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+		break;
+
+	case PR_unlink:
+		status = translate_unlinked_path(tracee, AT_FDCWD, SYSARG_1, true,
+						 unlinked_host, unlinked_guest);
 		break;
 
 	case PR_mkdir:
@@ -3211,7 +3266,6 @@ int translate_syscall_enter(Tracee *tracee)
 	}
 
 	case PR_readlinkat:
-	case PR_unlinkat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 
 		status = get_sysarg_path(tracee, path, SYSARG_2);
@@ -3219,6 +3273,16 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+		break;
+
+	case PR_unlinkat:
+		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+		flags = peek_reg(tracee, CURRENT, SYSARG_3);
+
+		/* A directory isn't kept, see keep_bound_file().  */
+		status = translate_unlinked_path(tracee, dirfd, SYSARG_2,
+						 (flags & AT_REMOVEDIR) == 0,
+						 unlinked_host, unlinked_guest);
 		break;
 
 	case PR_mkdirat:
@@ -3460,6 +3524,16 @@ end:
 	status2 = notify_extensions(tracee, SYSCALL_ENTER_END, status, 0);
 	if (status2 < 0)
 		status = status2;
+
+	/* Only once the extensions let the guest remove the file,
+	 * fake_id0 checks the permissions for instance.  */
+	if (   status >= 0
+	    && unlinked_guest[0] != '\0'
+	    && get_sysnum(tracee, CURRENT) == get_sysnum(tracee, ORIGINAL)
+	    && keep_bound_file(tracee, unlinked_host, unlinked_guest) > 0) {
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+	}
 
 	return status;
 }

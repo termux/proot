@@ -20,6 +20,7 @@
  * 02110-1301 USA.
  */
 
+#include <stdio.h>    /* rename(2), */
 #include <sys/stat.h> /* lstat(2), */
 #include <unistd.h>   /* getcwd(2), lstat(2), */
 #include <string.h>   /* string(3),  */
@@ -443,7 +444,8 @@ static void insort_binding(const Tracee *tracee, Side side, Binding *binding)
 
 /**
  * The directory standing for a tmpfs the guest mounted (see
- * insort_tmpfs_binding()).
+ * insort_tmpfs_binding()), or the file standing for one the guest
+ * removed while bindings lead to it (see keep_bound_file()).
  */
 typedef struct tmpfs {
 	const char *path;
@@ -467,6 +469,25 @@ static int forget_tmpfs(Tmpfs *tmpfs)
 }
 
 /**
+ * Return the tmpfs the host path @path (of @length characters) lies
+ * in, or NULL if there's none.
+ */
+static Tmpfs *get_tmpfs(const char *path, size_t length)
+{
+	Tmpfs *tmpfs;
+
+	LIST_FOREACH(tmpfs, &tmpfs_list, link) {
+		Comparison comparison;
+
+		comparison = compare_paths2(tmpfs->path, tmpfs->length, path, length);
+		if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX)
+			return tmpfs;
+	}
+
+	return NULL;
+}
+
+/**
  * Make @binding hold the tmpfs its host path lies in, if any.  A tmpfs
  * belongs to one of the bindings that hold it: when this one is freed,
  * Talloc hands the tmpfs over to another one, and it frees the tmpfs
@@ -476,16 +497,9 @@ static void hold_tmpfs(Binding *binding)
 {
 	Tmpfs *tmpfs;
 
-	LIST_FOREACH(tmpfs, &tmpfs_list, link) {
-		Comparison comparison;
-
-		comparison = compare_paths2(tmpfs->path, tmpfs->length,
-					    binding->host.path, binding->host.length);
-		if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) {
-			(void) talloc_reference(binding, tmpfs);
-			return;
-		}
-	}
+	tmpfs = get_tmpfs(binding->host.path, binding->host.length);
+	if (tmpfs != NULL)
+		(void) talloc_reference(binding, tmpfs);
 }
 
 /**
@@ -621,6 +635,148 @@ Binding *insort_tmpfs_binding(const Tracee *tracee, const TALLOC_CTX *context,
 	(void) talloc_unlink(tracee->ctx, tmpfs);
 
 	return binding;
+}
+
+/**
+ * Tell whether a binding of @tracee leads to the host path @path (of
+ * @length characters) exactly, and through the guest path
+ * @guest_path, unless this latter is NULL.
+ */
+static bool is_bound(const Tracee *tracee, const char *path, size_t length,
+		     const char *guest_path)
+{
+	const Binding *binding;
+
+	if (tracee->fs == NULL || tracee->fs->bindings.host == NULL)
+		return false;
+
+	CIRCLEQ_FOREACH_(tracee, binding, HOST) {
+		if (   binding->host.length == length
+		    && strcmp(binding->host.path, path) == 0
+		    && (   guest_path == NULL
+			|| compare_paths(binding->guest.path, guest_path) == PATHS_ARE_EQUAL))
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * Make the bindings of @tracee to the host path @path (of @length
+ * characters) lead to the file @kept, where it was moved.
+ */
+static void move_bindings(const Tracee *tracee, const char *path, size_t length,
+			  const Tmpfs *kept)
+{
+	Binding *binding;
+	Binding *next;
+	Tmpfs *tmpfs;
+	void *anchor;
+
+	if (tracee->fs == NULL || tracee->fs->bindings.host == NULL)
+		return;
+
+	for (binding = CIRCLEQ_FIRST(HEAD(tracee, HOST));
+	     binding != (void *) HEAD(tracee, HOST);
+	     binding = next) {
+		next = NEXT(binding, HOST);
+
+		if (   binding->host.length != length
+		    || strcmp(binding->host.path, path) != 0)
+			continue;
+
+		/* Keep it allocated while it's out of the "host" list,
+		 * this latter may own it.  */
+		anchor = talloc_new(NULL);
+		if (anchor == NULL || hold_binding(anchor, binding) < 0) {
+			talloc_free(anchor);
+			continue;
+		}
+
+		CIRCLEQ_REMOVE_(tracee, binding, host);
+
+		tmpfs = get_tmpfs(binding->host.path, binding->host.length);
+
+		strcpy(binding->host.path, kept->path);
+		binding->host.length = kept->length;
+		binding->need_substitution =
+			compare_paths(binding->host.path, binding->guest.path) != PATHS_ARE_EQUAL;
+
+		/* It holds the file now, no more the tmpfs the file was
+		 * in, if any (see hold_tmpfs()).  */
+		hold_tmpfs(binding);
+		if (tmpfs != NULL)
+			(void) talloc_unlink(binding, tmpfs);
+
+		insort_binding(tracee, HOST, binding);
+
+		release_binding(anchor, binding);
+		talloc_free(anchor);
+	}
+}
+
+/**
+ * Keep the file @host_path for the bindings to it, in every name-space,
+ * as the guest removes it through @guest_path: a mount holds the file
+ * it was made from, whereas a binding is only a path to it.  The file
+ * is moved to a temporary one, which the bindings lead to from now on,
+ * and which is removed once none does anymore, as a tmpfs (see
+ * hold_tmpfs()).  For instance, bubblewrap removes the source of the
+ * mounts it makes for --bind-data and --ro-bind-data right after.
+ *
+ * Nothing changes when no binding leads to @host_path, when it's a
+ * directory, when the guest removes it through one of its own
+ * bindings, that is, a mount point the kernel wouldn't remove, or when
+ * the file can't be moved: the guest removes it then.  This function
+ * returns 1 if the file was moved, otherwise 0.
+ */
+int keep_bound_file(Tracee *tracee, const char *host_path, const char *guest_path)
+{
+	size_t length = strlen(host_path);
+	struct stat statl;
+	Tracee *iterator;
+	Tmpfs *kept;
+
+	for (iterator = get_first_tracee(); iterator != NULL; iterator = LIST_NEXT(iterator, link)) {
+		if (is_bound(iterator, host_path, length, NULL))
+			break;
+	}
+
+	if (   iterator == NULL
+	    || is_bound(tracee, host_path, length, guest_path)
+	    || lstat(host_path, &statl) < 0
+	    || S_ISDIR(statl.st_mode))
+		return 0;
+
+	kept = talloc_zero(tracee->ctx, Tmpfs);
+	if (kept == NULL)
+		return 0;
+
+	kept->path = create_temp_file(kept, "proot-unlinked");
+	if (kept->path == NULL || strlen(kept->path) >= PATH_MAX) {
+		talloc_free(kept);
+		return 0;
+	}
+	kept->length = strlen(kept->path);
+
+	/* It replaces the empty temporary file.  */
+	if (rename(host_path, kept->path) < 0) {
+		VERBOSE(tracee, 1, "can't keep '%s' for its bindings: %s",
+			host_path, strerror(errno));
+		talloc_free(kept);
+		return 0;
+	}
+
+	LIST_INSERT_HEAD(&tmpfs_list, kept, link);
+	talloc_set_destructor(kept, forget_tmpfs);
+
+	for (iterator = get_first_tracee(); iterator != NULL; iterator = LIST_NEXT(iterator, link))
+		move_bindings(iterator, host_path, length, kept);
+
+	/* The bindings hold the file, so they own it from now on.  */
+	(void) talloc_unlink(tracee->ctx, kept);
+
+	return 1;
 }
 
 /**

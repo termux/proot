@@ -345,6 +345,15 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
 }
 
 /**
+ * Return the first of all the tracees, LIST_NEXT(tracee, link) is the
+ * one after @tracee, or NULL if there's none.
+ */
+Tracee *get_first_tracee(void)
+{
+	return LIST_FIRST(&tracees);
+}
+
+/**
  * Mark tracee as terminated and optionally take action.
  */
 void terminate_tracee(Tracee *tracee)

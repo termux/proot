@@ -251,8 +251,9 @@ static int remove_temp_file(char *path)
 {
 	int status;
 
+	/* The guest may have removed it already (see keep_bound_file()).  */
 	status = unlink(path);
-	if (status < 0)
+	if (status < 0 && errno != ENOENT)
 		note(NULL, ERROR, SYSTEM, "can't remove '%s'", path);
 
 	return 0;

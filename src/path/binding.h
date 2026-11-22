@@ -52,6 +52,7 @@ extern Binding *insort_host_only_binding(const Tracee *tracee, const TALLOC_CTX 
 extern void free_host_only_bindings(const Tracee *tracee);
 extern Binding *insort_tmpfs_binding(const Tracee *tracee, const TALLOC_CTX *context,
 				     const char guest_path[PATH_MAX]);
+extern int keep_bound_file(Tracee *tracee, const char *host_path, const char *guest_path);
 extern Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);
 extern int initialize_bindings(Tracee *tracee);
 extern int copy_bindings(Tracee *tracee, const FileSystemNameSpace *from);
