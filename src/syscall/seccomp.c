@@ -405,6 +405,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_open_tree_attr,	0 },
 	{ PR_openat,		0 },
 	{ PR_openat2,		0 },
+	{ PR_pipe,		FILTER_SYSEXIT },
+	{ PR_pipe2,		FILTER_SYSEXIT },
 	{ PR_pivot_root,	FILTER_SYSEXIT },
 	{ PR_prctl, 		0 },
 	{ PR_prlimit64,		0 },

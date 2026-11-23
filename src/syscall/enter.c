@@ -48,7 +48,6 @@
 #include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
 #include <sys/resource.h> /* RLIMIT_STACK, */
 #include <sys/time.h>    /* struct timeval, for SO_RCVTIMEO */
-#include "syscall/pipe_shadow.h"
 #include "syscall/netlink_fds.h"
 
 /* ABI-stable rtnetlink constants we synthesise for the loopback reply.
@@ -3965,12 +3964,6 @@ int translate_syscall_enter(Tracee *tracee)
 		 * its number could be reused for an unrelated file and
 		 * we'd keep intercepting sendto/recvfrom on it.  */
 		forget_netlink_fd(tracee, closed_fd);
-
-		/* Keep a shadow read end so child writers don't get
-		 * EPIPE when the parent closes its copy first (ptrace
-		 * serialisation makes this happen routinely, breaking
-		 * process substitution like `echo <(echo a)`).  */
-		shadow_pipe_read_end(tracee->pid, closed_fd);
 		break;
 	}
 

@@ -29,11 +29,20 @@
  * The child's write() then returns EPIPE, causing bash to print
  * "Broken pipe" for process substitution (`echo <(echo a)`).
  *
- * The fix: at PR_close sysenter (before the fd is released), if the fd
- * is a pipe read end, proot opens its own reference via
- * /proc/<pid>/fd/<fd>.  This keeps the pipe alive so writers do not
- * get EPIPE.  We do NOT read from the shadow — the data remains in the
- * pipe buffer for any legitimate reader (diff, cat, …).
+ * The fix: at the exit stage of pipe(2) and pipe2(2), proot opens its
+ * own reference to the new read end via /proc/<pid>/fd/<fd>.  This
+ * keeps the pipe alive so writers do not get EPIPE.  We do NOT read
+ * from the shadow — the data remains in the pipe buffer for any
+ * legitimate reader (diff, cat, …).  As long as the tracees hold read
+ * ends of their own, the shadow changes nothing.
+ *
+ * The shadow is taken when the pipe is created rather than when its
+ * read end is closed: nearly every open(2) is followed by a close(2),
+ * stopping the tracees at each of them would slow everything down,
+ * whereas pipes are created seldom.  And the race happens right after
+ * the creation of the pipe: a shell closes its copy of the read end
+ * as soon as it has forked the processes of a pipeline or of a
+ * process substitution.
  *
  * A shadow only papers over a scheduling race, so it must not outlive
  * it: holding one forever hands the guest a reader that never reads,
@@ -51,7 +60,7 @@
  * timeout.
  */
 
-#include <stdio.h>    /* snprintf, fopen, fgets, fclose */
+#include <stdio.h>    /* snprintf */
 #include <string.h>   /* strncmp */
 #include <strings.h>  /* bzero */
 #include <fcntl.h>    /* open, fcntl, O_RDONLY, O_CLOEXEC, F_GETPIPE_SZ */
@@ -76,10 +85,10 @@
 
 #define MAX_SHADOW_PIPES 32
 
-/* The racing writer runs within milliseconds of the close it lost to,
- * even with every one of its syscalls stopping for proot.  Past this
- * point a shadow protects nothing, it only keeps a pipe artificially
- * alive.  */
+/* The racing writer runs within a fraction of a second of the creation
+ * of its pipe, even with every one of its syscalls stopping for proot.
+ * Past this point a shadow protects nothing, it only keeps a pipe
+ * artificially alive.  */
 #define SHADOW_MAX_AGE_MS 1000
 
 /* How often the event loop wakes up to run shadow_pipes_reap() while
@@ -162,42 +171,25 @@ static bool writer_would_block(int fd)
 	return buffered > (capacity > PIPE_BUF ? capacity - PIPE_BUF : 0);
 }
 
-void shadow_pipe_read_end(pid_t tracee_pid, int tracee_fd)
+void shadow_new_pipe(pid_t tracee_pid, int read_fd)
 {
 	char path[64];
 	char link[32];
-	char line[128];
 	ssize_t len;
-	unsigned long flags;
-	FILE *f;
 	int shadow_fd;
 	int i;
 
 	ensure_init();
 
-	/* Check the fd is an anonymous pipe. */
-	snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee_pid, tracee_fd);
+	/* Check the fd is still an anonymous pipe: another thread may
+	 * have reused it already.  Opening it doesn't block then, unlike
+	 * opening a FIFO.  */
+	snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee_pid, read_fd);
 	len = readlink(path, link, sizeof(link) - 1);
 	if (len < 0)
 		return;
 	link[len] = '\0';
 	if (strncmp(link, "pipe:[", 6) != 0)
-		return;
-
-	/* Confirm it is the read end (flags O_RDONLY = 0 in O_ACCMODE). */
-	snprintf(path, sizeof(path), "/proc/%d/fdinfo/%d", tracee_pid, tracee_fd);
-	f = fopen(path, "r");
-	if (!f)
-		return;
-	flags = 1; /* default: not O_RDONLY */
-	while (fgets(line, sizeof(line), f)) {
-		if (strncmp(line, "flags:", 6) == 0) {
-			sscanf(line + 6, " %lo", &flags);
-			break;
-		}
-	}
-	fclose(f);
-	if ((flags & O_ACCMODE) != O_RDONLY)
 		return;
 
 	/* Find a free slot. */
@@ -208,10 +200,8 @@ void shadow_pipe_read_end(pid_t tracee_pid, int tracee_fd)
 	if (i == MAX_SHADOW_PIPES)
 		return; /* No room; skip silently. */
 
-	/* Open shadow reference before the tracee's close() executes.
-	 * We do NOT set O_NONBLOCK: we never read from this fd, we just
+	/* We do NOT set O_NONBLOCK: we never read from this fd, we just
 	 * hold it open so the pipe's read-end reference count stays > 0.  */
-	snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee_pid, tracee_fd);
 	shadow_fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (shadow_fd < 0)
 		return;

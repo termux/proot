@@ -27,9 +27,9 @@
 #include <stdbool.h>
 
 /**
- * If @tracee_fd is a pipe read end in @tracee_pid's fd table, open a
- * shadow reference to it in proot's own process space.  Must be called
- * at sysenter of close(), before the fd is released.
+ * Open a shadow reference to @read_fd, the read end of the pipe
+ * @tracee_pid has just created, in proot's own process space.  Must be
+ * called at the exit stage of pipe(2) or pipe2(2).
  *
  * The shadow keeps the pipe alive for child writers after the parent
  * closes its copy of the read end early (ptrace serialisation makes
@@ -37,12 +37,12 @@
  * The shadow is never read — data remains in the pipe buffer for any
  * legitimate reader (diff, cat, …).
  */
-void shadow_pipe_read_end(pid_t tracee_pid, int tracee_fd);
+void shadow_new_pipe(pid_t tracee_pid, int read_fd);
 
 /**
  * Close any shadow fd that has become useless — no writer is left
  * (POLLHUP), the pipe is too full for a writer to make progress, or
- * the close race it was opened for is long over.  Call this once per
+ * the race it was opened for is long over.  Call this once per
  * event loop iteration; it is non-blocking.
  */
 void shadow_pipes_reap(void);

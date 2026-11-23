@@ -38,6 +38,7 @@
 #include "syscall/heap.h"
 #include "syscall/rlimit.h"
 #include "syscall/netlink_fds.h"
+#include "syscall/pipe_shadow.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -853,6 +854,27 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_statx:
 		status = handle_statx_syscall(tracee, false);
 		break;
+
+	case PR_pipe:
+	case PR_pipe2: {
+		int fds[2];
+
+		if ((int) syscall_result != 0)
+			goto end;
+
+#if defined(ARCH_SH4)
+		/* pipe(2) returns the descriptors in registers there.  */
+		if (syscall_number == PR_pipe)
+			goto end;
+#endif
+
+		if (read_data(tracee, fds, peek_reg(tracee, ORIGINAL, SYSARG_1), sizeof(fds)) < 0)
+			goto end;
+
+		/* See pipe_shadow.c.  */
+		shadow_new_pipe(tracee->pid, fds[0]);
+		goto end;
+	}
 
 	case PR_ioctl:
 		if (peek_reg(tracee, ORIGINAL, SYSARG_2) == _IOW(0x94, 9, int) /* FICLONE */ &&
