@@ -46,6 +46,7 @@
 #include <netinet/in.h>  /* struct sockaddr_in / sockaddr_in6 */
 #include <netpacket/packet.h> /* struct sockaddr_ll (AF_PACKET) */
 #include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */
+#include <sys/resource.h> /* RLIMIT_STACK, */
 #include <sys/time.h>    /* struct timeval, for SO_RCVTIMEO */
 #include "syscall/pipe_shadow.h"
 #include "syscall/netlink_fds.h"
@@ -135,6 +136,19 @@ static void force_fork_sysexit(Tracee *tracee)
  * is translated anew.
  */
 static void keep_pushed_args(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
+ * Force PRoot to intercept the exit stage of the syscall the @tracee
+ * is entering, which is filtered without FILTER_SYSEXIT because its
+ * exit stage only has work to do for some of its arguments: each
+ * ptrace stop is expensive, and asking the kernel for one that turns
+ * out useless doubles the cost of the syscall.
+ */
+static void request_sysexit(Tracee *tracee)
 {
 	tracee->sysexit_pending = true;
 	tracee->restart_how = PTRACE_SYSCALL;
@@ -2908,6 +2922,10 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_socket: {
 		word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
 
+		/* Only NETLINK_ROUTE sockets need the exit stage, which
+		 * substitute_netlink_socket() asks for.  fake_id0 and
+		 * kompat filter socket(2) with FILTER_SYSEXIT themselves
+		 * when they need its exit stage.  */
 		if (substitute_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1),
 					      &type, peek_reg(tracee, CURRENT, SYSARG_3))) {
 			poke_reg(tracee, SYSARG_1, AF_UNIX);
@@ -3867,8 +3885,43 @@ int translate_syscall_enter(Tracee *tracee)
 			poke_reg(tracee, SYSARG_2, TCSETS);
 #endif
 
+		/* Only these requests need the exit stage: a rewritten
+		 * request gets its original value back there, and the
+		 * EACCES of FICLONE is remapped, see translate_syscall_exit().
+		 * Applications issue ioctl(2) all the time, isatty(3) for
+		 * one, hence the filter doesn't ask for it.  */
+		if (   cmd == _IOW(0x94, 9, int) /* FICLONE */
+		    || peek_reg(tracee, CURRENT, SYSARG_2) != cmd)
+			request_sysexit(tracee);
+
 		break;
 	}
+
+	case PR_setrlimit:
+	case PR_prlimit64: {
+		Reg sysarg = (syscall_number == PR_prlimit64 ? SYSARG_2 : SYSARG_1);
+
+		/* Only a new stack limit needs the exit stage, see
+		 * translate_setrlimit_exit().  glibc's getrlimit(3) is
+		 * prlimit64(2) without a new limit.  */
+		if (   peek_reg(tracee, CURRENT, sysarg) == RLIMIT_STACK
+		    && peek_reg(tracee, CURRENT, sysarg + 1) != 0)
+			request_sysexit(tracee);
+
+		status = 0;
+		break;
+	}
+
+#if defined(ARCH_X86_64)
+	case PR_uname:
+		/* Only 32-bit programs need the exit stage, which tells
+		 * them the machine is "i686", see translate_syscall_exit().  */
+		if (get_abi(tracee) == ABI_2)
+			request_sysexit(tracee);
+
+		status = 0;
+		break;
+#endif
 	
 	case PR_memfd_create:
 		{

@@ -352,7 +352,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_sendmmsg,		0 },
 	{ PR_sendmsg,		0 },
 	{ PR_sendto,		0 },
-	{ PR_socket,		FILTER_SYSEXIT },
+	{ PR_socket,		0 },
 	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_execveat,		FILTER_SYSEXIT },
 	{ PR_faccessat,		0 },
@@ -373,7 +373,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_getxattr,		0 },
 	{ PR_inotify_add_watch,	0 },
 #ifdef __ANDROID__
-	{ PR_ioctl,		FILTER_SYSEXIT },
+	{ PR_ioctl,		0 },
 #endif
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },
@@ -407,7 +407,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_openat2,		0 },
 	{ PR_pivot_root,	FILTER_SYSEXIT },
 	{ PR_prctl, 		0 },
-	{ PR_prlimit64,		FILTER_SYSEXIT },
+	{ PR_prlimit64,		0 },
 	{ PR_ptrace,		FILTER_SYSEXIT },
 	{ PR_readlink,		FILTER_SYSEXIT },
 	{ PR_readlinkat,	FILTER_SYSEXIT },
@@ -416,7 +416,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_renameat,		FILTER_SYSEXIT },
 	{ PR_renameat2,		FILTER_SYSEXIT },
 	{ PR_rmdir,		0 },
-	{ PR_setrlimit,		FILTER_SYSEXIT },
+	{ PR_setrlimit,		0 },
 	{ PR_setxattr,		0 },
 	{ PR_socketcall,	FILTER_SYSEXIT },
 	{ PR_stat,		0 },
@@ -432,7 +432,9 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_truncate64,	0 },
 	{ PR_umount,		FILTER_SYSEXIT },
 	{ PR_umount2,		FILTER_SYSEXIT },
-	{ PR_uname,		FILTER_SYSEXIT },
+#if defined(ARCH_X86_64)
+	{ PR_uname,		0 },
+#endif
 	{ PR_unshare,		FILTER_SYSEXIT },
 	{ PR_setns,		FILTER_SYSEXIT },
 	{ PR_unlink,		0 },
