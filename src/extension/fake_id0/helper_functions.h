@@ -31,6 +31,10 @@ int get_permissions(char meta_path[PATH_MAX], Config *config, bool uses_real);
 
 int path_exists(char path[PATH_MAX]);
 
+uid_t get_host_uid(void);
+
+gid_t get_host_gid(void);
+
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version);
 
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version);

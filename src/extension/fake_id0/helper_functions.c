@@ -56,7 +56,41 @@ int otod(int n)
  */
 int path_exists(char path[PATH_MAX])
 {
-	return access(path, F_OK);  
+	return access(path, F_OK);
+}
+
+/**
+ * Return the real uid of PRoot, which owns the files the tracees
+ * create.  It never changes, so it is asked to the kernel only once:
+ * the exit stage of every stat(2) compares the owner with it.
+ */
+uid_t get_host_uid(void)
+{
+	static uid_t uid;
+	static bool known = false;
+
+	if (!known) {
+		uid = getuid();
+		known = true;
+	}
+
+	return uid;
+}
+
+/**
+ * Same as get_host_uid(), for the real gid of PRoot.
+ */
+gid_t get_host_gid(void)
+{
+	static gid_t gid;
+	static bool known = false;
+
+	if (!known) {
+		gid = getgid();
+		known = true;
+	}
+
+	return gid;
 }
 
 /** Gets a path from file descriptor system argument. If that sysarg is

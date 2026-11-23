@@ -14,11 +14,61 @@
 #include "extension/fake_id0/helper_functions.h"
 #include "tracee/statx.h"
 
+/**
+ * Report the files the current user owns as owned by the user @config
+ * pretends to be, in the 'stat' structure at @address in the memory
+ * of @tracee.  Errors are not fatal here.
+ */
+void override_stat_owner(Tracee *tracee, const Config *config, word_t address)
+{
+	off_t uid_offset = offsetof_stat_uid(tracee);
+	off_t gid_offset = offsetof_stat_gid(tracee);
+	uint32_t ids[2];
+	bool override_uid;
+	bool override_gid;
+
+	/* Sanity checks.  */
+	assert(__builtin_types_compatible_p(uid_t, uint32_t));
+	assert(__builtin_types_compatible_p(gid_t, uint32_t));
+
+	/* Get the uid & gid values from the 'stat' structure, with a
+	 * single access when they are adjacent, as in the structures of
+	 * all the supported ABIs.  */
+	if (gid_offset == uid_offset + (off_t) sizeof(uint32_t)) {
+		if (read_data(tracee, ids, address + uid_offset, sizeof(ids)) < 0)
+			ids[0] = ids[1] = 0; /* Not fatal.  */
+	}
+	else {
+		ids[0] = peek_uint32(tracee, address + uid_offset);
+		if (errno != 0)
+			ids[0] = 0; /* Not fatal.  */
+
+		ids[1] = peek_uint32(tracee, address + gid_offset);
+		if (errno != 0)
+			ids[1] = 0; /* Not fatal.  */
+	}
+
+	/* Override only if the file is owned by the current user.  */
+	override_uid = (ids[0] == get_host_uid());
+	override_gid = (ids[1] == get_host_gid());
+
+	if (   override_uid && override_gid
+	    && gid_offset == uid_offset + (off_t) sizeof(uint32_t)) {
+		ids[0] = config->suid;
+		ids[1] = config->sgid;
+		(void) write_data(tracee, address + uid_offset, ids, sizeof(ids));
+		return;
+	}
+
+	if (override_uid)
+		poke_uint32(tracee, address + uid_offset, config->suid);
+
+	if (override_gid)
+		poke_uint32(tracee, address + gid_offset, config->sgid);
+}
+
 #ifndef USERLAND
 int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
-	word_t address;
-	uid_t uid;
-	gid_t gid;
 	word_t result;
 
 	/* Override only if it succeed.  */
@@ -26,28 +76,7 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
 	if (result != 0)
 		return 0;
 
-	address = peek_reg(tracee, ORIGINAL, stat_sysarg);
-
-	/* Sanity checks.  */
-	assert(__builtin_types_compatible_p(uid_t, uint32_t));
-	assert(__builtin_types_compatible_p(gid_t, uint32_t));
-
-	/* Get the uid & gid values from the 'stat' structure.  */
-	uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-	if (errno != 0)
-		uid = 0; /* Not fatal.  */
-
-	gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-	if (errno != 0)
-		gid = 0; /* Not fatal.  */
-
-	/* Override only if the file is owned by the current user.
-	 * Errors are not fatal here.  */
-	if (uid == getuid())
-		poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-
-	if (gid == getgid())
-		poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
+	override_stat_owner(tracee, config, peek_reg(tracee, ORIGINAL, stat_sysarg));
 
 	return 0;
 }
@@ -77,7 +106,6 @@ int handle_stat_enter_end(Tracee *tracee, Reg fd_sysarg) {
 
 int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 	int status = 0;
-	word_t address;
 	Reg sysarg;
 	uid_t uid;
 	gid_t gid;
@@ -145,29 +173,8 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 		}
 	}
 
-	address = peek_reg(tracee, ORIGINAL, sysarg);
+	override_stat_owner(tracee, config, peek_reg(tracee, ORIGINAL, sysarg));
 
-	/* Sanity checks.  */
-	assert(__builtin_types_compatible_p(uid_t, uint32_t));
-	assert(__builtin_types_compatible_p(gid_t, uint32_t));
-
-	/* Get the uid & gid values from the 'stat' structure.  */
-	uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-	if (errno != 0) 
-		uid = 0; /* Not fatal.  */
-	
-	gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-	if (errno != 0) 
-		gid = 0; /* Not fatal.  */
-	
-	/* Override only if the file is owned by the current user.
-	 * Errors are not fatal here.  */
-	if (uid == getuid()) 
-		poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-	
-	if (gid == getgid()) 
-		poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
-	
 	return 0;
 }
 #endif /* ifdef USERLAND */
@@ -198,13 +205,13 @@ int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t stat
 	(void) tracee;
 #endif
 	if (state->statx_buf.stx_mask & STATX_UID) {
-		if (state->statx_buf.stx_uid == getuid()) {
+		if (state->statx_buf.stx_uid == get_host_uid()) {
 			state->statx_buf.stx_uid = config->suid;
 			state->updated_stats = true;
 		}
 	}
 	if (state->statx_buf.stx_mask & STATX_GID) {
-		if (state->statx_buf.stx_gid == getgid()) {
+		if (state->statx_buf.stx_gid == get_host_gid()) {
 			state->statx_buf.stx_gid = config->sgid;
 			state->updated_stats = true;
 		}
