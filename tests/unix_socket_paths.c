@@ -79,6 +79,19 @@ static int fails_with(int status, int error)
 	return status < 0 && errno == error;
 }
 
+/* Remove the socket an older kernel, 4.19 for one, made at @path before
+ * bind(2) failed with EINVAL, as the socket was bound already.  A newer
+ * one doesn't make anything there.  */
+static int forget_failed_bind(const char *path)
+{
+	struct stat statl;
+
+	if (lstat(path, &statl) < 0)
+		return errno == ENOENT ? 0 : -1;
+
+	return S_ISSOCK(statl.st_mode) ? unlink(path) : -1;
+}
+
 static int is_listed(const char *dir, const char *name)
 {
 	struct dirent *entry;
@@ -241,6 +254,7 @@ static void check_existing(const char *dir)
 	CHECK(fails_with(bind_to(fd, path), EINVAL), "bind %s", path);
 	close(fd);
 
+	CHECK(forget_failed_bind(path) == 0, "%s left", path);
 	CHECK(create_file(path) == 0, "create %s", path);
 	CHECK(is_listed(dir, "twice"), "%s not listed", path);
 	CHECK(unlink(path) == 0, "unlink %s", path);
@@ -418,13 +432,15 @@ static void check_name(const char *dir, const char *name, int hidden)
 	CHECK(has_type(path, S_IFREG, 4), "%s changed", path);
 	CHECK(unlink(path) == 0, "unlink %s", path);
 
-	/* Nothing is left of a failed bind(2).  */
+	/* Nothing is left of a failed bind(2), but the socket an older
+	 * kernel made.  */
 	snprintf(renamed, sizeof(renamed), "%s/once", dir);
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	CHECK(bind_to(fd, renamed) == 0, "bind %s", renamed);
 	CHECK(fails_with(bind_to(fd, path), EINVAL), "bind %s", path);
 	close(fd);
 
+	CHECK(forget_failed_bind(path) == 0, "%s left", path);
 	CHECK(unlink(renamed) == 0, "unlink %s", renamed);
 	CHECK(create_file(path) == 0, "create %s", path);
 	CHECK(is_listed(dir, name), "%s not listed", path);
