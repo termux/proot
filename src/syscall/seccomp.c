@@ -342,7 +342,6 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_chroot,		FILTER_SYSEXIT },
 	{ PR_clone,		0 },
 	{ PR_clone3,		0 },
-	{ PR_close,		0 },
 	{ PR_connect,		0 },
 	{ PR_creat,		0 },
 	{ PR_recvfrom,		0 },

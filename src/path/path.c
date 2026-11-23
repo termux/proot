@@ -394,12 +394,14 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
  *
  * Only the descriptors opened with O_PATH, or by openat2(2), are
  * remembered, since this requires the exit stage of the syscall (see
- * translate_syscall_exit()).  An entry is forgotten when its
- * descriptor is closed, or when its process calls execve(2), but
- * there's no bookkeeping for dup(2) or fork(2): it is only used for
- * the very descriptor of the very process that opened it, as long as
- * it refers to the same host path and its guest path still leads
- * there.
+ * translate_syscall_exit()).  An entry is forgotten when its process
+ * calls execve(2), and once its descriptor is closed.  This latter is
+ * noticed when the process opens a file (see forget_closed_fd_paths())
+ * -- that's how a closed descriptor number comes to refer to a file
+ * again -- since close(2) isn't traced.  There's no bookkeeping for
+ * dup(2) or fork(2): an entry is only used for the very descriptor of
+ * the very process that opened it, as long as it refers to the same
+ * host path and its guest path still leads there.
  */
 #define FD_PATHS_SIZE 64
 
@@ -411,6 +413,21 @@ static struct {
 	char *host;       /* The host path the kernel reports.  */
 } fd_paths[FD_PATHS_SIZE];
 static size_t fd_paths_next;
+static size_t fd_paths_count; /* Entries in use.  */
+
+/**
+ * Empty the @index-th entry of fd_paths[].
+ */
+static void clear_fd_path(size_t index)
+{
+	if (fd_paths[index].guest != NULL)
+		fd_paths_count--;
+
+	free(fd_paths[index].guest);
+	free(fd_paths[index].translated);
+	free(fd_paths[index].host);
+	fd_paths[index].guest = fd_paths[index].translated = fd_paths[index].host = NULL;
+}
 
 /**
  * Remember that the descriptor @fd of the process @pid was opened
@@ -455,9 +472,7 @@ void remember_fd_path(const Tracee *tracee, pid_t pid, int fd, const char *guest
 		host       = strdup(real_path);
 	}
 
-	free(fd_paths[slot].guest);
-	free(fd_paths[slot].translated);
-	free(fd_paths[slot].host);
+	clear_fd_path(slot);
 
 	if (guest == NULL || translated == NULL || host == NULL) {
 		free(guest);
@@ -465,6 +480,8 @@ void remember_fd_path(const Tracee *tracee, pid_t pid, int fd, const char *guest
 		free(host);
 		guest = translated = host = NULL;
 	}
+	else
+		fd_paths_count++;
 
 	fd_paths[slot].pid        = pid;
 	fd_paths[slot].fd         = fd;
@@ -488,10 +505,35 @@ void forget_fd_path(pid_t pid, int fd)
 		    || (fd >= 0 && fd_paths[index].fd != fd))
 			continue;
 
-		free(fd_paths[index].guest);
-		free(fd_paths[index].translated);
-		free(fd_paths[index].host);
-		fd_paths[index].guest = fd_paths[index].translated = fd_paths[index].host = NULL;
+		clear_fd_path(index);
+	}
+}
+
+/**
+ * Forget the guest paths of the descriptors of the process @pid that
+ * aren't open anymore, or that refer to another host path now.  This
+ * has to be done before this process opens a file: the new descriptor
+ * may get the number of one it closed meanwhile, and close(2) isn't
+ * traced.  It costs nothing to the processes without such entries.
+ */
+void forget_closed_fd_paths(pid_t pid)
+{
+	char real_path[PATH_MAX];
+	size_t index;
+
+	if (fd_paths_count == 0)
+		return;
+
+	for (index = 0; index < FD_PATHS_SIZE; index++) {
+		if (   fd_paths[index].guest == NULL
+		    || fd_paths[index].pid != pid)
+			continue;
+
+		if (   readlink_proc_pid_fd(pid, fd_paths[index].fd, real_path) == 0
+		    && strcmp(real_path, fd_paths[index].host) == 0)
+			continue;
+
+		clear_fd_path(index);
 	}
 }
 

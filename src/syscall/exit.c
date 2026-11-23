@@ -684,6 +684,23 @@ void translate_syscall_exit(Tracee *tracee)
 		if ((int) fd != tracee->auxv_fd)
 			goto end;
 
+		/* close(2) is seen only when it happens to stop (see
+		 * the enter stage), so this number may refer to another
+		 * file by now: "/proc/<PID>/auxv" is what the kernel
+		 * reports for "/proc/self/auxv".  */
+		{
+			char link[PATH_MAX];
+			size_t length;
+
+			if (   readlink_proc_pid_fd(tracee->pid, (int) fd, link) < 0
+			    || strncmp(link, "/proc/", strlen("/proc/")) != 0
+			    || (length = strlen(link)) < strlen("/auxv")
+			    || strcmp(link + length - strlen("/auxv"), "/auxv") != 0) {
+				tracee->auxv_fd = -1;
+				goto end;
+			}
+		}
+
 		buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
 		entry_size = 2 * sizeof_word(tracee);
 
@@ -701,7 +718,8 @@ void translate_syscall_exit(Tracee *tracee)
 			}
 		}
 
-		/* Stay in PTRACE_SYSCALL mode to intercept close(auxv_fd). */
+		/* Stay in PTRACE_SYSCALL mode to intercept the next
+		 * read(2) -- not filtered -- or close(2) of auxv_fd.  */
 		tracee->sysexit_pending = true;
 		tracee->restart_how = PTRACE_SYSCALL;
 		goto end;

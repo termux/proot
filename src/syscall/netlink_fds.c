@@ -39,14 +39,16 @@
  * is its parent, every other entry holds a reference.  talloc_unlink()
  * drops either kind, handing the socket over to a remaining holder.
  *
- * Only close(2) is watched among the syscalls that change a descriptor
- * table: tracing dup(2), dup2(2), dup3(2) and fcntl(2) would cost every
- * process a ptrace stop for each of them -- shells and SQLite make a
- * lot -- whereas so few processes ever hold a netlink socket.  Instead,
- * the descriptor a netlink syscall is about is checked against the
- * inodes of the sockets, as long as its process holds any: a copy of
- * a socket is recognised there, and a descriptor that now refers to
- * another file is forgotten.
+ * None of the syscalls that change a descriptor table is watched:
+ * tracing close(2), dup(2), dup2(2), dup3(2) and fcntl(2) would cost
+ * every process a ptrace stop for each of them -- shells and SQLite
+ * make a lot -- whereas so few processes ever hold a netlink socket.
+ * Instead, the descriptor a netlink syscall is about is checked against
+ * the inodes of the sockets, as long as its process holds any: a copy
+ * of a socket is recognised there, and a descriptor that now refers to
+ * another file is forgotten.  All of them are checked whenever a new
+ * netlink socket is recorded, and after execve(2).  A close(2) PRoot
+ * happens to see only makes it forget the descriptor right away.
  */
 
 #include <errno.h>     /* E*, errno, */
@@ -226,6 +228,35 @@ int inherit_netlink_fds(Tracee *child, Tracee *parent, bool shared)
 }
 
 /**
+ * Forget the descriptors of @tracee that aren't open anymore, or that
+ * refer to another file now: close(2) isn't traced, see the top of
+ * this file.  A socket whose inode is unknown is kept as long as its
+ * descriptor can't be told to be closed.  This costs a readlink(2)
+ * per descriptor, but only to the tracees that hold a netlink socket.
+ */
+static void forget_closed_netlink_fds(Tracee *tracee)
+{
+	NetlinkFds *table = tracee->netlink_fds;
+	size_t i;
+
+	for (i = 0; i < table->nb_entries; ) {
+		NetlinkSocket *socket = table->entries[i].socket;
+		uint64_t inode = 0;
+		int status;
+
+		status = fd_inode(tracee->pid, table->entries[i].fd, &inode);
+		if (   status == -ENOENT
+		    || (status == 0 && socket->inode != 0 && inode != socket->inode)) {
+			VERBOSE(tracee, 2, "netlink: fd %d was closed",
+				table->entries[i].fd);
+			remove_entry(table, i);
+		}
+		else
+			i++;
+	}
+}
+
+/**
  * Update the netlink sockets of @tracee after its successful execve(2):
  * the kernel unshared its descriptor table there, and closed the
  * close-on-exec descriptors without any close(2) PRoot could see.
@@ -233,7 +264,6 @@ int inherit_netlink_fds(Tracee *child, Tracee *parent, bool shared)
 void unshare_netlink_fds_after_execve(Tracee *tracee)
 {
 	NetlinkFds *table = tracee->netlink_fds;
-	size_t i;
 
 	if (talloc_reference_count(table) > 0) {
 		NetlinkFds *copy;
@@ -252,26 +282,10 @@ void unshare_netlink_fds_after_execve(Tracee *tracee)
 		tracee->netlink_fds = table = copy;
 	}
 
-	/* Forget the descriptors that aren't open anymore, or that
-	 * were made to refer to another file before execve(2) without
-	 * PRoot knowing, close_range(2) then open(2) for instance.  A
-	 * socket whose inode is unknown is kept as long as its
-	 * descriptor can't be told to be closed.  */
-	for (i = 0; i < table->nb_entries; ) {
-		NetlinkSocket *socket = table->entries[i].socket;
-		uint64_t inode = 0;
-		int status;
-
-		status = fd_inode(tracee->pid, table->entries[i].fd, &inode);
-		if (   status == -ENOENT
-		    || (status == 0 && socket->inode != 0 && inode != socket->inode)) {
-			VERBOSE(tracee, 2, "netlink: fd %d closed by execve",
-				table->entries[i].fd);
-			remove_entry(table, i);
-		}
-		else
-			i++;
-	}
+	/* Forget the descriptors that were made to refer to another
+	 * file before execve(2) without PRoot knowing, close_range(2)
+	 * then open(2) for instance.  */
+	forget_closed_netlink_fds(tracee);
 }
 
 /**
@@ -475,8 +489,11 @@ NetlinkSocket *add_netlink_socket(Tracee *tracee, int fd, bool fake)
 	pid_t tgid, ppid, tracer;
 
 	/* What PRoot knew about this descriptor number was closed
-	 * meanwhile, without close(2).  */
+	 * meanwhile, without close(2).  So may be the other ones:
+	 * forgetting them releases the peers of the fake sockets
+	 * among them.  */
 	forget_netlink_fd(tracee, fd);
+	forget_closed_netlink_fds(tracee);
 
 	socket = talloc_zero(table, NetlinkSocket);
 	if (socket == NULL)

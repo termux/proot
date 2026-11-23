@@ -2676,8 +2676,25 @@ int translate_syscall_enter(Tracee *tracee)
 	if (status > 0)
 		return 0;
 
-	/* Translate input arguments. */
 	syscall_number = get_sysnum(tracee, ORIGINAL);
+
+	/* The descriptor about to be opened may get the number of one
+	 * whose guest path is remembered, see remember_fd_path().  */
+	switch (syscall_number) {
+	case PR_creat:
+	case PR_open:
+	case PR_open_tree:
+	case PR_open_tree_attr:
+	case PR_openat:
+	case PR_openat2:
+		forget_closed_fd_paths(tracee->pid);
+		break;
+
+	default:
+		break;
+	}
+
+	/* Translate input arguments. */
 	switch (syscall_number) {
 	default:
 		/* Nothing to do. */
@@ -3953,6 +3970,15 @@ int translate_syscall_enter(Tracee *tracee)
 		}
 	case PR_close: {
 		int closed_fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+
+		/* close(2) isn't in the seccomp filter: nearly every
+		 * open(2) is followed by one, they would double the
+		 * stops of many programs.  It is seen here only without
+		 * seccomp, or when it happens to be the syscall after
+		 * one that asked for PTRACE_SYSCALL mode.  So what is
+		 * done here is only a shortcut, everything that tracks
+		 * descriptors also notices on its own that they were
+		 * closed.  */
 
 		/* Stop tracking auxv_fd once the tracee closes it. */
 		if (tracee->auxv_fd >= 0 && closed_fd == tracee->auxv_fd)

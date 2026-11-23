@@ -85,6 +85,7 @@ extern int translate_path_guest(Tracee *tracee, char host_path[PATH_MAX], char g
 extern int get_fd_guest_path(Tracee *tracee, int fd, char guest_path[PATH_MAX]);
 extern void remember_fd_path(const Tracee *tracee, pid_t pid, int fd, const char *guest_path);
 extern void forget_fd_path(pid_t pid, int fd);
+extern void forget_closed_fd_paths(pid_t pid);
 
 extern int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[PATH_MAX]);
 extern bool belongs_to_guestfs(const Tracee *tracee, const char *path);
