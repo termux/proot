@@ -337,6 +337,9 @@ typedef struct tracee {
 #endif
 
 #ifdef ARCH_ARM64
+	/* Whether the syscalls of this tracee follow the ARM EABI, see
+	 * get_abi().  Its registers tell their own layout instead,
+	 * see is_aarch32_regs().  */
 	bool is_aarch32;
 #endif
 

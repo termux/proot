@@ -148,7 +148,7 @@
 
     #undef  REG
     #define REG(tracee, version, index)					\
-	(*(word_t*) (tracee->is_aarch32									\
+	(*(word_t*) (is_aarch32_regs(tracee, version)					\
 		? (((uint8_t *) &tracee->_regs[version]) + reg_offset_armeabi[index]) \
 		: (((uint8_t *) &tracee->_regs[version]) + reg_offset[index])))
 
@@ -205,7 +205,14 @@ word_t peek_reg(const Tracee *tracee, RegVersion version, Reg reg)
 
 	/* Use only the 32 least significant bits (LSB) when running
 	 * 32-bit processes on a 64-bit kernel.  */
+#if defined(ARCH_ARM64)
+	/* The registers of an AArch32 bank are 32-bit wide: the upper
+	 * half of this word is the next register.  The banks of a
+	 * tracee may differ while execve(2) changes its mode.  */
+	if (is_aarch32_regs(tracee, version))
+#else
 	if (is_32on64_mode(tracee))
+#endif
 		result &= 0xFFFFFFFF;
 
 	return result;
@@ -284,6 +291,16 @@ int fetch_regs(Tracee *tracee)
 #endif
 	if (status < 0)
 		return status;
+
+#if defined(ARCH_ARM64)
+	/* The kernel reports the registers of an AArch32 process in
+	 * the shorter ARM EABI layout, mark them so, see
+	 * is_aarch32_regs().  This is the layout of the process right
+	 * now, even at the exit stage of the execve(2) which changed
+	 * it, unlike the ABI (see get_abi()).  */
+	if (regs.iov_len < sizeof(tracee->_regs[CURRENT]))
+		tracee->_regs[CURRENT].pstate = PSR_MODE32_BIT;
+#endif
 
 	return 0;
 }
@@ -423,7 +440,7 @@ word_t get_systrap_size(Tracee *tracee) {
 	}
 #elif defined(ARCH_ARM64)
 	/* Same for AArch32, but we don't have nice macros */
-	if (tracee->is_aarch32 && (((unsigned char *) &tracee->_regs[CURRENT])[0x40] & 0x20) != 0) {
+	if (is_32on64_mode(tracee) && (((unsigned char *) &tracee->_regs[CURRENT])[0x40] & 0x20) != 0) {
 		return 2;
 	}
 #else

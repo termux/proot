@@ -415,6 +415,14 @@ void translate_execve_exit(Tracee *tracee)
 
 	tracee->auxv_fd = -1;
 
+#ifdef ARCH_ARM64
+	/* The syscalls of the new program follow its ABI from now on.
+	 * The registers tell the mode the process actually runs in,
+	 * the one of the loader or of the runner, which matches the
+	 * program, or the former one if execve(2) failed.  */
+	tracee->is_aarch32 = is_aarch32_regs(tracee, CURRENT);
+#endif
+
 	if (tracee->skip_proot_loader) {
 		tracee->restore_original_regs = false;
 		tracee->seen_execve = true;
@@ -473,10 +481,6 @@ void translate_execve_exit(Tracee *tracee)
 
 		return;
 	}
-
-#ifdef ARCH_ARM64
-	tracee->is_aarch32 = IS_CLASS32(tracee->load_info->elf_header);
-#endif
 
 	syscall_result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 	if ((int) syscall_result < 0)

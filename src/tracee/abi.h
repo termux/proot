@@ -82,8 +82,28 @@ static inline bool is_32on64_mode(const Tracee *tracee)
 	}
 }
 #elif defined(ARCH_ARM64)
+#ifndef PSR_MODE32_BIT
+#define PSR_MODE32_BIT 0x00000010
+#endif
+
+/**
+ * Return true if the @version register bank of @tracee holds the
+ * registers of an AArch32 process.  The kernel reports these in the
+ * ARM EABI layout, which ends before the pstate slot of the AArch64
+ * one: fetch_regs() marks this slot, it tells the layout of the bank
+ * as the CS register does on x86_64.  The PSTATE of an AArch64
+ * process never has its nRW bit set.
+ */
+static inline bool is_aarch32_regs(const Tracee *tracee, RegVersion version)
+{
+	return (tracee->_regs[version].pstate & PSR_MODE32_BIT) != 0;
+}
+
 static inline Abi get_abi(const Tracee *tracee)
 {
+	/* The ABI can be changed by a syscall ("execve" typically),
+	 * however the change is only effective once the syscall has
+	 * *fully* returned, see translate_execve_exit().  */
 	if (tracee->is_aarch32) {
 		return ABI_2;
 	}
@@ -97,7 +117,9 @@ static inline Abi get_abi(const Tracee *tracee)
  */
 static inline bool is_32on64_mode(const Tracee *tracee)
 {
-	return tracee->is_aarch32;
+	/* Unlike the ABI, 32-bit/64-bit mode change is effective
+	 * immediately, hence _regs[CURRENT].  */
+	return is_aarch32_regs(tracee, CURRENT);
 }
 #else
 static inline Abi get_abi(const Tracee *tracee UNUSED)
