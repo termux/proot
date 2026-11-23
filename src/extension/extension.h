@@ -182,7 +182,11 @@ typedef enum {
 
 /* Data of the HOST_PATH event.  */
 typedef struct {
-	/* Whether this host path is the last one of the translation.  */
+	/* Whether this host path is the final component of the
+	 * translation or, when this latter is a symlink the syscall
+	 * follows, the final component of its content -- recursively:
+	 * the file this content leads to is the one the syscall
+	 * operates on.  */
 	bool is_final;
 
 	/* What lstat(2) reported for this host path, or NULL if it

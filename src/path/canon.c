@@ -131,9 +131,9 @@ static inline Finality next_component(char component[NAME_MAX], const char **cur
  * path into @host_path.  Also, this function checks that a non-final
  * component is either a directory (returned value is 0) or a symlink
  * (returned value is 1), otherwise it returns -errno (-ENOENT or
- * -ENOTDIR).
+ * -ENOTDIR).  See canonicalize_in() for @resolves_final.
  */
-static inline int substitute_binding_stat(Tracee *tracee, Finality finality, unsigned int recursion_level,
+static inline int substitute_binding_stat(Tracee *tracee, Finality finality, bool resolves_final,
 					const char guest_path[PATH_MAX], char host_path[PATH_MAX])
 {
 	HostPathAccess access;
@@ -173,7 +173,7 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	if (tracee->glue_type == 0) {
 		int status2;
 
-		access.is_final = IS_FINAL(finality) && recursion_level == 0;
+		access.is_final = IS_FINAL(finality) && resolves_final;
 		status2 = notify_extensions(tracee, HOST_PATH, (intptr_t) host_path,
 					(intptr_t) &access);
 		if (status2 < 0)
@@ -201,11 +201,16 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 /**
  * Same as canonicalize(), but when @root isn't NULL, the resolution is
  * scoped to @root -- a canonicalized guest path -- as for openat2(2)
- * with RESOLVE_IN_ROOT, see canonicalize_in_root().
+ * with RESOLVE_IN_ROOT, see canonicalize_in_root().  @resolves_final
+ * tells whether the final component of @user_path is the final one of
+ * the whole translation: @user_path is the path to translate, or the
+ * content of a symlink that ends it.  The file this latter leads to is
+ * the one the syscall operates on, extensions are told so (see
+ * HostPathAccess).
  */
 static int canonicalize_in(Tracee *tracee, const char *root, const char *user_path,
 			   bool deref_final, char guest_path[PATH_MAX],
-			   unsigned int recursion_level)
+			   unsigned int recursion_level, bool resolves_final)
 {
 	char scratch_path[PATH_MAX];
 	Finality finality;
@@ -272,7 +277,7 @@ static int canonicalize_in(Tracee *tracee, const char *root, const char *user_pa
 		 * symlink.  For this latter case, we check that the
 		 * symlink points to a directory once it is
 		 * canonicalized, at the end of this loop.  */
-		status = substitute_binding_stat(tracee, finality, recursion_level, scratch_path, host_path);
+		status = substitute_binding_stat(tracee, finality, resolves_final, scratch_path, host_path);
 		if (status < 0)
 			return status;
 
@@ -391,13 +396,14 @@ static int canonicalize_in(Tracee *tracee, const char *root, const char *user_pa
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
 		status = canonicalize_in(tracee, root, scratch_path, true, guest_path,
-					 recursion_level + (++symlinks_followed));
+					 recursion_level + (++symlinks_followed),
+					 resolves_final && IS_FINAL(finality));
 		if (status < 0)
 			return status;
 
 		/* Check that a non-final canonicalized/dereferenced
 		 * symlink exists and is a directory.  */
-		status = substitute_binding_stat(tracee, finality, recursion_level, guest_path, host_path);
+		status = substitute_binding_stat(tracee, finality, resolves_final, guest_path, host_path);
 		if (status < 0)
 			return status;
 
@@ -451,7 +457,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 char guest_path[PATH_MAX], unsigned int recursion_level)
 {
 	return canonicalize_in(tracee, NULL, user_path, deref_final, guest_path,
-			       recursion_level);
+			       recursion_level, recursion_level == 0);
 }
 
 /**
@@ -471,5 +477,5 @@ int canonicalize_in_root(Tracee *tracee, const char root[PATH_MAX], const char *
 		return -ENAMETOOLONG;
 
 	strcpy(guest_path, root);
-	return canonicalize_in(tracee, root, user_path, deref_final, guest_path, 0);
+	return canonicalize_in(tracee, root, user_path, deref_final, guest_path, 0, true);
 }
