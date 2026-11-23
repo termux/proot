@@ -947,43 +947,94 @@ static int parse_utsname(Config *config, const char *string)
 	return 0;
 }
 
-/* List of syscalls handled by this extensions.  */
-static FilteredSysnum filtered_sysnums[] = {
-	{ PR_accept4,		FILTER_SYSEXIT },
-	{ PR_dup3,		FILTER_SYSEXIT },
-	{ PR_epoll_create1,	FILTER_SYSEXIT },
-	{ PR_epoll_pwait, 	0 },
-	{ PR_eventfd2, 		FILTER_SYSEXIT },
-	{ PR_execve, 		FILTER_SYSEXIT },
-	{ PR_faccessat, 	0 },
-	{ PR_fchmodat, 		0 },
-	{ PR_fchownat, 		0 },
-	{ PR_fcntl, 		FILTER_SYSEXIT },
-	{ PR_fstatat64, 	0 },
-	{ PR_futimesat, 	0 },
-	{ PR_futex, 		0 },
-	{ PR_inotify_init1, 	FILTER_SYSEXIT },
-	{ PR_linkat, 		0 },
-	{ PR_mkdirat, 		0 },
-	{ PR_mknodat, 		0 },
-	{ PR_newfstatat, 	0 },
-	{ PR_open, 		FILTER_SYSEXIT },
-	{ PR_openat, 		FILTER_SYSEXIT },
-	{ PR_pipe2, 		FILTER_SYSEXIT },
-	{ PR_pselect6, 		0 },
-	{ PR_readlinkat, 	0 },
-	{ PR_renameat, 		0 },
-	{ PR_setdomainname,	FILTER_SYSEXIT },
-	{ PR_sethostname,	FILTER_SYSEXIT },
-	{ PR_signalfd4, 	FILTER_SYSEXIT },
-	{ PR_socket,		FILTER_SYSEXIT },
-	{ PR_socketpair,	FILTER_SYSEXIT },
-	{ PR_symlinkat, 	0 },
-	{ PR_timerfd_create,	FILTER_SYSEXIT },
-	{ PR_uname, 		FILTER_SYSEXIT },
-	{ PR_unlinkat, 		0 },
-	FILTERED_SYSNUM_END,
+/* List of syscalls handled by this extension, each with the kernel
+ * release its emulation in handle_sysenter_end() and
+ * handle_sysexit_end() is gated on, or 0 when it is always required
+ * (the virtual utsname and the ELF auxiliary vectors).  A syscall may
+ * be listed once per gate.  */
+static const struct {
+	FilteredSysnum sysnum;
+	int expected_release;
+} candidate_sysnums[] = {
+	{ { PR_accept4,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,28) },
+	{ { PR_dup3,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_epoll_create1,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_epoll_pwait,	0 },		  KERNEL_VERSION(2,6,19) },
+	{ { PR_eventfd2,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_execve,		FILTER_SYSEXIT }, 0 },
+	{ { PR_faccessat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_fchmodat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_fchownat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_fcntl,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,24) },
+	{ { PR_fstatat64,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_futimesat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_futex,		0 },		  KERNEL_VERSION(2,6,22) },
+	{ { PR_inotify_init1,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_linkat,		0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_mkdirat,		0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_mknodat,		0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_newfstatat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_open,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,23) },
+	{ { PR_openat,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,16) },
+	{ { PR_openat,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,23) },
+	{ { PR_pipe2,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_pselect6,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_readlinkat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_renameat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_setdomainname,	FILTER_SYSEXIT }, 0 },
+	{ { PR_sethostname,	FILTER_SYSEXIT }, 0 },
+	{ { PR_signalfd4,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_socket,		FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_socketpair,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_symlinkat,	0 },		  KERNEL_VERSION(2,6,16) },
+	{ { PR_timerfd_create,	FILTER_SYSEXIT }, KERNEL_VERSION(2,6,27) },
+	{ { PR_uname,		FILTER_SYSEXIT }, 0 },
+	{ { PR_unlinkat,	0 },		  KERNEL_VERSION(2,6,16) },
 };
+
+/**
+ * Return the list of the syscalls @config requires to be filtered,
+ * allocated in the Talloc @context, or NULL if there's not enough
+ * memory.  The emulation of most of them is a no-op on any kernel more
+ * recent than 2.6.28, while each one costs a ptrace stop -- two with
+ * FILTER_SYSEXIT -- and some are as frequent as futex(2) or
+ * epoll_pwait(2).
+ */
+static FilteredSysnum *new_filtered_sysnums(TALLOC_CTX *context, const Config *config)
+{
+	FilteredSysnum *sysnums;
+	size_t nb_sysnums = 0;
+	size_t i, j;
+
+	sysnums = talloc_array(context, FilteredSysnum,
+			sizeof(candidate_sysnums) / sizeof(candidate_sysnums[0]) + 1);
+	if (sysnums == NULL)
+		return NULL;
+
+	for (i = 0; i < sizeof(candidate_sysnums) / sizeof(candidate_sysnums[0]); i++) {
+		int expected_release = candidate_sysnums[i].expected_release;
+		Sysnum value = candidate_sysnums[i].sysnum.value;
+
+		if (expected_release != 0 && !needs_kompat(config, expected_release))
+			continue;
+
+		/* Private futexes are left as is in forced mode, see
+		 * handle_sysenter_end().  */
+		if (value == PR_futex && config->actual_release == 0)
+			continue;
+
+		for (j = 0; j < nb_sysnums && sysnums[j].value != value; j++)
+			;
+		if (j < nb_sysnums)
+			continue;
+
+		sysnums[nb_sysnums++] = candidate_sysnums[i].sysnum;
+	}
+
+	sysnums[nb_sysnums] = (FilteredSysnum) FILTERED_SYSNUM_END;
+
+	return sysnums;
+}
 
 /**
  * Handler for this @extension.  It is triggered each time an @event
@@ -1007,7 +1058,9 @@ int kompat_callback(Extension *extension, ExtensionEvent event,
 		if (status < 0)
 			return -1;
 
-		extension->filtered_sysnums = filtered_sysnums;
+		extension->filtered_sysnums = new_filtered_sysnums(extension, config);
+		if (extension->filtered_sysnums == NULL)
+			return -1;
 		return 0;
 	}
 
