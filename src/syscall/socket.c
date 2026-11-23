@@ -266,19 +266,20 @@ static int expand_socket_alias(char path[PATH_MAX])
 }
 
 /**
- * Replace the host @path, too long to fit the sun_path array, with a
- * shorter one that leads to the same place: the kernel resolves both
- * the same way, the socket is where the guest expects it and nothing
- * else changes for the guest.  This shorter path is made of an alias
- * of the directory of the final component (see get_socket_alias())
- * followed by this component, or, if this doesn't fit sun_path either,
- * of an alias of @path itself, provided the kernel follows this final
- * symbolic link, as stated by @follow_final.  Unlike the guest, PRoot
- * leaves room for the terminating null byte: the kernel reports the
- * address of a socket bound to a path that fills sun_path as longer
- * than struct sockaddr_un, which translate_socketcall_exit() leaves
- * as is.  This function returns -errno if an error occurred, 0 if
- * @path was left as is because it can't be shortened, otherwise 1.
+ * Replace the host @path, too long to fit the sun_path array along
+ * with a terminating null byte, with a shorter one that leads to the
+ * same place: the kernel resolves both the same way, the socket is
+ * where the guest expects it and nothing else changes for the guest.
+ * This shorter path is made of an alias of the directory of the final
+ * component (see get_socket_alias()) followed by this component, or,
+ * if this doesn't fit sun_path either, of an alias of @path itself,
+ * provided the kernel follows this final symbolic link, as stated by
+ * @follow_final.  Unlike the guest, PRoot leaves room for the
+ * terminating null byte: the kernel reports the address of a socket
+ * bound to a path that fills sun_path as longer than struct
+ * sockaddr_un, which translate_socketcall_exit() leaves as is.  This
+ * function returns -errno if an error occurred, 0 if @path was left as
+ * is because it can't be shortened, otherwise 1.
  */
 static int shorten_socket_path(char path[PATH_MAX], bool follow_final)
 {
@@ -377,8 +378,15 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size, bool i
 	if (status < 0)
 		return status;
 
-	/* Be careful: sun_path doesn't have to be null-terminated.  */
-	if (strlen(host_path) > sizeof_path) {
+	/* Be careful: sun_path doesn't have to be null-terminated.  The
+	 * kernel reports the address of a socket bound to a path that
+	 * fills it as longer than struct sockaddr_un, which
+	 * translate_socketcall_exit() leaves as is: the guest would get
+	 * this host path.  So it's given through an alias too, when one
+	 * can be made, otherwise as is.  */
+	if (strlen(host_path) == sizeof_path && is_bind)
+		(void) shorten_socket_path(host_path, false);
+	else if (strlen(host_path) > sizeof_path) {
 		status = shorten_socket_path(host_path, !is_bind);
 		if (status < 0)
 			return status;

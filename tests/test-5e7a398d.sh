@@ -12,6 +12,12 @@ fi
 # the file already there, and the sockets of other sessions or of the
 # host couldn't be reached.  PRoot gives the kernel a path through a
 # symbolic link to the directory of the socket instead.
+#
+# A host path that fills sun_path, with no room for the terminating null
+# byte, was given as is: the kernel reports the address of such a socket
+# as longer than struct sockaddr_un, which PRoot didn't translate, so
+# getsockname(2) gave the guest this host path.  It is given through a
+# symbolic link as well now.
 
 DIR=${TMPDIR:?}/$(mcookie | cut -c 1-8)
 SCRIPT_DIR=$(dirname "$0")
@@ -34,6 +40,13 @@ mkdir -p "${GUEST}" "${NATIVE}" "${HOST}"
 ALIASED=$(printf "%0$((93 - ${#DIR}))d" 0)
 BOUND=$(printf "%0$((95 - ${#DIR}))d" 0)
 
+# A name that makes "<filled>/sockets/<name>" fill sun_path, whereas
+# "<unfilled>/sockets/<name>" doesn't.
+FILLED=${DIR}/h12345
+UNFILLED=${DIR}/q
+FILLING=$(printf "%0$((92 - ${#DIR}))d" 0)
+mkdir -p "${FILLED}" "${UNFILLED}"
+
 if ! gcc "${SCRIPT_DIR}/unix_socket_paths.c" -o "${DIR}/unix_socket_paths" >/dev/null 2>&1; then
     rm -rf "${DIR}"
     exit 125
@@ -42,6 +55,7 @@ fi
 # The scenarios hold on the host first.
 "${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${ALIASED}"
 "${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${BOUND}"
+"${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${FILLING}"
 
 BINARIES="${DIR}/unix_socket_paths"
 set +e
@@ -59,6 +73,11 @@ for BINARY in ${BINARIES}; do
             env ${NO_SECCOMP} PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
                 "${BINARY}" scenarios "${GUEST}" "${NAME}"
         done
+    done
+
+    for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
+        env ${NO_SECCOMP} PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${FILLED}:${UNFILLED}" \
+            "${BINARY}" scenarios "${UNFILLED}" "${FILLING}"
     done
 done
 
