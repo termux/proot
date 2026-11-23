@@ -14,15 +14,17 @@
 
 /* Usage:
  *
- *     unix_socket_paths scenarios <dir> [<name>]
+ *     unix_socket_paths scenarios <dir> [<name> [hidden]]
  *     unix_socket_paths serve|client <dir> <name>
  *
  * The scenarios check that a socket bound to a path in <dir> behaves
  * as any other file there, as the kernel makes it, and that connect(2)
  * and the destinations of sendto(2) and the like leave the files they
  * name as they are.  The socket <dir>/<name> is bound and connected to
- * as well, if <name> is given.  A line is printed for each check that
- * fails.
+ * as well, if <name> is given, and is checked to behave the same,
+ * unless "hidden" is given: it may be bound elsewhere then, through a
+ * binding that outlives it, only bind(2) mustn't hide a file at this
+ * path.  A line is printed for each check that fails.
  *
  * serve binds a socket to <name> in <dir>, says "ready" once it
  * listens, then waits for a client to say "ping".  client says it.  */
@@ -328,13 +330,37 @@ static void check_relative(const char *dir)
 	CHECK(chdir(cwd) == 0, "chdir %s", cwd);
 }
 
-static void check_name(const char *dir, const char *name)
+static void check_name(const char *dir, const char *name, int hidden)
 {
+	char renamed[PATH_MAX];
 	char path[PATH_MAX];
 	int server;
 	int client;
+	int fd;
 
 	snprintf(path, sizeof(path), "%s/%s", dir, name);
+
+	/* A file stays as it is.  */
+	CHECK(create_file(path) == 0, "create %s", path);
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(fails_with(bind_to(fd, path), EADDRINUSE), "bind %s", path);
+	close(fd);
+
+	CHECK(has_type(path, S_IFREG, 4), "%s changed", path);
+	CHECK(unlink(path) == 0, "unlink %s", path);
+
+	/* Nothing is left of a failed bind(2).  */
+	snprintf(renamed, sizeof(renamed), "%s/once", dir);
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(bind_to(fd, renamed) == 0, "bind %s", renamed);
+	CHECK(fails_with(bind_to(fd, path), EINVAL), "bind %s", path);
+	close(fd);
+
+	CHECK(unlink(renamed) == 0, "unlink %s", renamed);
+	CHECK(create_file(path) == 0, "create %s", path);
+	CHECK(is_listed(dir, name), "%s not listed", path);
+	CHECK(unlink(path) == 0, "unlink %s", path);
 
 	server = socket(AF_UNIX, SOCK_STREAM, 0);
 	client = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -343,11 +369,39 @@ static void check_name(const char *dir, const char *name)
 	CHECK(is_named(server, 0, path), "getsockname %s", path);
 	CHECK(listen(server, 4) == 0, "listen %s", path);
 	CHECK(connect_to(client, path) == 0, "connect %s", path);
-
+	CHECK(is_named(client, 1, path), "getpeername %s", path);
 	close(client);
-	close(server);
 
+	if (!hidden) {
+		CHECK(is_listed(dir, name), "%s not listed", path);
+		CHECK(has_type(path, S_IFSOCK, 0), "%s not a socket", path);
+
+		/* Nor is another socket bound over it.  */
+		fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		CHECK(fails_with(bind_to(fd, path), EADDRINUSE), "bind %s again", path);
+		close(fd);
+
+		snprintf(renamed, sizeof(renamed), "%s/renamed", dir);
+		CHECK(rename(path, renamed) == 0, "rename %s", path);
+
+		client = socket(AF_UNIX, SOCK_STREAM, 0);
+		CHECK(connect_to(client, renamed) == 0, "connect %s", renamed);
+		close(client);
+
+		CHECK(is_named(server, 0, path), "getsockname %s once renamed", path);
+		CHECK(rename(renamed, path) == 0, "rename %s", renamed);
+	}
+
+	close(server);
 	CHECK(unlink(path) == 0, "unlink %s", path);
+
+	/* The same path can be a regular file then, whereas a binding
+	 * outlives the socket.  */
+	if (!hidden) {
+		CHECK(create_file(path) == 0, "create %s", path);
+		CHECK(is_listed(dir, name), "%s not listed", path);
+		CHECK(unlink(path) == 0, "unlink %s", path);
+	}
 }
 
 static int serve(const char *name)
@@ -399,8 +453,9 @@ int main(int argc, char *argv[])
 	if (argc == 4 && strcmp(argv[1], "client") == 0)
 		return chdir(argv[2]) == 0 ? client(argv[3]) : 1;
 
-	if ((argc != 3 && argc != 4) || strcmp(argv[1], "scenarios") != 0) {
-		fprintf(stderr, "usage: %s scenarios <dir> [<name>]\n", argv[0]);
+	if (   argc < 3 || argc > 5 || strcmp(argv[1], "scenarios") != 0
+	    || (argc == 5 && strcmp(argv[4], "hidden") != 0)) {
+		fprintf(stderr, "usage: %s scenarios <dir> [<name> [hidden]]\n", argv[0]);
 		fprintf(stderr, "       %s serve|client <dir> <name>\n", argv[0]);
 		return 2;
 	}
@@ -416,8 +471,8 @@ int main(int argc, char *argv[])
 	check_datagrams(dir);
 	check_relative(dir);
 
-	if (argc == 4)
-		check_name(dir, argv[3]);
+	if (argc >= 4)
+		check_name(dir, argv[3], argc == 5);
 
 	CHECK(rmdir(dir) == 0, "rmdir %s", dir);
 

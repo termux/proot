@@ -273,6 +273,13 @@ void translate_syscall_exit(Tracee *tracee)
 			POKE_WORD(SYSARG_ADDR(2), peek_reg(tracee, MODIFIED, SYSARG_5));
 			POKE_WORD(SYSARG_ADDR(3), peek_reg(tracee, MODIFIED, SYSARG_6));
 
+			/* See case PR_bind.  */
+			if (tracee->pending_bind != NULL) {
+				status = finish_socket_bind(tracee, (int) syscall_result);
+				poke_reg(tracee, SYSARG_RESULT, (word_t) status);
+				goto end;
+			}
+
 			status = 0;
 			break;
 
@@ -852,6 +859,13 @@ void translate_syscall_exit(Tracee *tracee)
 		 * to PRoot instead.  */
 		if (tracee->pending_netlink_connect)
 			finish_fake_netlink_connect(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+
+		/* The socket was bound to a temporary path, see
+		 * prepare_long_bind().  */
+		if (tracee->pending_bind != NULL) {
+			status = finish_socket_bind(tracee, (int) syscall_result);
+			break;
+		}
 		goto end;
 
 	case PR_recvfrom:

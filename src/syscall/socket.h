@@ -28,6 +28,7 @@
 
 int translate_socketcall_enter(Tracee *tracee, word_t *sock_addr, int size, bool is_bind);
 int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr, word_t max_size);
+int finish_socket_bind(Tracee *tracee, int result);
 int translate_send_address(Tracee *tracee, word_t *sock_addr, int size);
 int translate_sendmsg_enter(Tracee *tracee, word_t *msghdr_addr);
 int translate_sendmmsg_enter(Tracee *tracee, word_t *vector_addr, word_t *vlen);

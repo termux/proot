@@ -18,6 +18,12 @@ fi
 # as longer than struct sockaddr_un, which PRoot didn't translate, so
 # getsockname(2) gave the guest this host path.  It is given through a
 # symbolic link as well now.
+#
+# A socket whose name is too long for such a link was still bound to a
+# shorter path: it is bound to a temporary name in its directory, then
+# renamed.  Only when even this doesn't fit sun_path, because of the
+# length of the temporary directory of PRoot, is it bound to a shorter
+# path, though only once bind(2) succeeded, and not over a file.
 
 DIR=${TMPDIR:?}/$(mcookie | cut -c 1-8)
 SCRIPT_DIR=$(dirname "$0")
@@ -36,9 +42,14 @@ HOST=${DIR}/l/$(mcookie)$(mcookie)$(mcookie)
 mkdir -p "${GUEST}" "${NATIVE}" "${HOST}"
 
 # The longest name an alias of "<guest>/sockets" takes, and one more
-# than this: such a socket is still bound to a shorter path.
+# than this: such a socket is bound to a temporary name, then renamed.
 ALIASED=$(printf "%0$((93 - ${#DIR}))d" 0)
-BOUND=$(printf "%0$((95 - ${#DIR}))d" 0)
+RENAMED=$(printf "%0$((95 - ${#DIR}))d" 0)
+
+# A temporary directory so long that such a socket is bound to a
+# shorter path, "<temporary directory>/proot-<PID>-XXXXXX".
+LONG_TMP=${DIR}/$(printf "%0$((83 - ${#DIR}))d" 0)
+mkdir -p "${LONG_TMP}"
 
 # A name that makes "<filled>/sockets/<name>" fill sun_path, whereas
 # "<unfilled>/sockets/<name>" doesn't.
@@ -53,9 +64,9 @@ if ! gcc "${SCRIPT_DIR}/unix_socket_paths.c" -o "${DIR}/unix_socket_paths" >/dev
 fi
 
 # The scenarios hold on the host first.
-"${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${ALIASED}"
-"${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${BOUND}"
-"${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${FILLING}"
+for NAME in ${ALIASED} ${RENAMED} ${FILLING}; do
+    "${DIR}/unix_socket_paths" scenarios "${NATIVE}" "${NAME}"
+done
 
 BINARIES="${DIR}/unix_socket_paths"
 set +e
@@ -68,14 +79,15 @@ if [ ${STATUS} -eq 0 ]; then
 fi
 
 for BINARY in ${BINARIES}; do
-    for NAME in ${ALIASED} ${BOUND}; do
-        for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
+    for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
+        for NAME in ${ALIASED} ${RENAMED}; do
             env ${NO_SECCOMP} PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
                 "${BINARY}" scenarios "${GUEST}" "${NAME}"
         done
-    done
 
-    for NO_SECCOMP in "" PROOT_NO_SECCOMP=1; do
+        env ${NO_SECCOMP} PROOT_TMP_DIR="${LONG_TMP}" ${PROOT} -b "${HOST}:${GUEST}" \
+            "${BINARY}" scenarios "${GUEST}" "${RENAMED}" hidden
+
         env ${NO_SECCOMP} PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${FILLED}:${UNFILLED}" \
             "${BINARY}" scenarios "${UNFILLED}" "${FILLING}"
     done
@@ -95,15 +107,18 @@ wait_ready() {
 }
 
 # A socket bound in a session is reached from another one, and is
-# where the host expects it.
-env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
-    "${DIR}/unix_socket_paths" serve "${GUEST}" guest > "${DIR}/server" &
-SERVER=$!
-wait_ready "${DIR}/server"
-test -S "${HOST}/guest"
-env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
-    "${DIR}/unix_socket_paths" client "${GUEST}" guest
-wait ${SERVER}
+# where the host expects it, as is a socket bound under a temporary
+# name.
+for NAME in guest ${RENAMED}; do
+    env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
+        "${DIR}/unix_socket_paths" serve "${GUEST}" ${NAME} > "${DIR}/server" &
+    SERVER=$!
+    wait_ready "${DIR}/server"
+    test -S "${HOST}/${NAME}"
+    env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
+        "${DIR}/unix_socket_paths" client "${GUEST}" ${NAME}
+    wait ${SERVER}
+done
 
 # The host reaches a socket bound in a session.
 env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
@@ -121,14 +136,14 @@ env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
     "${DIR}/unix_socket_paths" client "${GUEST}" host-guest
 wait ${SERVER}
 
-# The aliases are removed at exit, the sockets are left where they
-# were bound, as the kernel does.
-LEFT=$(cd "${DIR}" && find . -name 'proot-*')
+# The aliases and the temporary names are removed at exit, the sockets
+# are left where they were bound, as the kernel does.
+LEFT=$(cd "${DIR}" && find . -name 'proot-*' -o -name '.proot-*')
 SOCKETS=$(cd "${HOST}" && find . -mindepth 1 | sort | tr '\n' ' ')
 
 rm -rf "${DIR}"
 
-if [ -n "${LEFT}" ] || [ "${SOCKETS}" != "./guest ./guest-host ./host-guest " ]; then
+if [ -n "${LEFT}" ] || [ "${SOCKETS}" != "./${RENAMED} ./guest ./guest-host ./host-guest " ]; then
     echo "left: ${LEFT}"
     echo "sockets: ${SOCKETS}"
     exit 1

@@ -153,6 +153,11 @@ typedef struct tracee {
 	bool pending_real_netlink_socket;
 	bool pending_netlink_connect;
 
+	/* The bind(2) of a socket whose host path is too long for
+	 * sun_path, from its enter stage to its exit stage, see
+	 * syscall/socket.c.  */
+	struct PendingBind *pending_bind;
+
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
 		size_t nb_ptracees;

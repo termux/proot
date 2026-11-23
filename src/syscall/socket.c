@@ -29,7 +29,10 @@
 #include <sys/un.h>      /* struct sockaddr_un, */
 #include <sys/param.h>   /* MIN(), MAX(), */
 #include <sys/stat.h>    /* lstat(2), S_ISSOCK(), */
-#include <unistd.h>      /* unlink(2), */
+#include <unistd.h>      /* unlink(2), syscall(2), */
+#include <stdio.h>       /* rename(2), RENAME_NOREPLACE, */
+#include <fcntl.h>       /* AT_FDCWD, */
+#include <sys/syscall.h> /* SYS_renameat2, */
 #include <sys/uio.h>     /* UIO_MAXIOV, */
 #include <linux/net.h>   /* SYS_*, */
 #include <stdint.h>      /* uint8_t, uint32_t, int32_t, */
@@ -46,6 +49,10 @@
 #include "arch.h"
 
 #include "compat.h"
+
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1 << 0)
+#endif
 
 /* The sockaddr_un structure has exactly the same layout on all
  * architectures.  */
@@ -132,6 +139,40 @@ typedef struct SocketAlias {
 static SocketAlias *socket_aliases = NULL;
 
 /**
+ * The host path a socket was renamed to once bound to a temporary
+ * name, see prepare_long_bind().
+ */
+typedef struct SocketName {
+	char *address; /* What the kernel was given, through an alias.  */
+	char *path;    /* The host path of the socket.  */
+	struct SocketName *next;
+} SocketName;
+
+/* All the sockets renamed so far, the most recent first.  As the
+ * aliases, they are remembered as long as PRoot lives.  */
+static SocketName *socket_names = NULL;
+
+/**
+ * A bind(2) prepared by prepare_long_bind(), from its enter stage to
+ * its exit stage, see finish_socket_bind().
+ */
+typedef struct PendingBind {
+	/* The host path where the kernel makes the socket.  */
+	char *temporary;
+
+	/* Where the socket is renamed to, when it is made in its
+	 * directory, given through @alias as @address.  */
+	char *final;
+	char *address;
+	SocketAlias *alias;
+
+	/* Otherwise, the guest path bound to @shorter, a copy of
+	 * @temporary attached to the autofree context.  */
+	char *guest;
+	char *shorter;
+} PendingBind;
+
+/**
  * Return whether the alias @alias still leads to its target: anyone
  * may have removed it, as the guest cleaning its "/tmp" up when it is
  * the temporary directory of PRoot.
@@ -169,11 +210,11 @@ static size_t get_socket_alias_length()
 }
 
 /**
- * Return the path of an alias of the host path @target, that is, a
- * symbolic link to it, made unless there's one already.  This
- * function returns NULL and sets errno if an error occurred.
+ * Return an alias of the host path @target, that is, a symbolic link
+ * to it, made unless there's one already.  This function returns NULL
+ * and sets errno if an error occurred.
  */
-static const char *get_socket_alias(const char *target)
+static SocketAlias *get_socket_alias(const char *target)
 {
 	SocketAlias *alias;
 	int saved_errno;
@@ -186,7 +227,7 @@ static const char *get_socket_alias(const char *target)
 			continue;
 
 		if (is_socket_alias_intact(alias))
-			return alias->path;
+			return alias;
 		break;
 	}
 
@@ -227,7 +268,7 @@ static const char *get_socket_alias(const char *target)
 	alias->next = socket_aliases;
 	socket_aliases = alias;
 
-	return alias->path;
+	return alias;
 
 no_memory:
 	talloc_free(alias);
@@ -237,15 +278,26 @@ no_memory:
 
 /**
  * Replace in @path the alias it starts with, if any, with the host
- * path this latter leads to.  This function returns -errno if an
- * error occurred, otherwise 0.
+ * path this latter leads to, or with the host path of the socket bound
+ * there under a temporary name, if it was renamed since (see
+ * prepare_long_bind()).  This function returns -errno if an error
+ * occurred, otherwise 0.
  */
 static int expand_socket_alias(char path[PATH_MAX])
 {
 	char expanded_path[PATH_MAX];
 	const SocketAlias *alias;
+	const SocketName *name;
 	size_t length;
 	int status;
+
+	/* The socket was renamed, not the directory of the alias.  */
+	for (name = socket_names; name != NULL; name = name->next) {
+		if (strcmp(path, name->address) == 0) {
+			strcpy(path, name->path);
+			return 0;
+		}
+	}
 
 	for (alias = socket_aliases; alias != NULL; alias = alias->next) {
 		length = strlen(alias->path);
@@ -263,6 +315,37 @@ static int expand_socket_alias(char path[PATH_MAX])
 	}
 
 	return 0;
+}
+
+/**
+ * Return the offset of the final component of @path, which goes along
+ * with its trailing "/", if any.
+ */
+static size_t get_final_component(const char *path)
+{
+	size_t final;
+
+	final = strlen(path);
+	while (final > 0 && path[final - 1] == '/')
+		final--;
+	while (final > 0 && path[final - 1] != '/')
+		final--;
+
+	return final;
+}
+
+/**
+ * Copy in @directory the directory of @path, whose final component
+ * starts at @final (see get_final_component()).
+ */
+static void get_directory(char directory[PATH_MAX], const char *path, size_t final)
+{
+	assert(final > 0);
+
+	/* path[final - 1] is the "/" before the final component, the
+	 * one of "/" itself is kept.  */
+	memcpy(directory, path, final);
+	directory[final > 1 ? final - 1 : 1] = '\0';
 }
 
 /**
@@ -284,33 +367,20 @@ static int expand_socket_alias(char path[PATH_MAX])
 static int shorten_socket_path(char path[PATH_MAX], bool follow_final)
 {
 	const size_t alias_length = get_socket_alias_length();
+	const size_t final = get_final_component(path);
 	char directory[PATH_MAX];
-	const char *alias;
-	size_t final;
-	size_t length;
+	SocketAlias *alias;
 	int status;
 
-	/* The final component starts at path[final], it goes along
-	 * with its trailing "/", if any.  */
-	length = strlen(path);
-	final  = length;
-	while (final > 0 && path[final - 1] == '/')
-		final--;
-	while (final > 0 && path[final - 1] != '/')
-		final--;
-
 	if (final > 0 && alias_length + 1 + strlen(path + final) < sizeof_path) {
-		/* path[final - 1] is the "/" before the final
-		 * component, the one of "/" itself is kept.  */
-		memcpy(directory, path, final);
-		directory[final > 1 ? final - 1 : 1] = '\0';
+		get_directory(directory, path, final);
 
 		alias = get_socket_alias(directory);
 		if (alias == NULL)
 			return -errno;
 
 		memmove(path + alias_length + 1, path + final, strlen(path + final) + 1);
-		memcpy(path, alias, alias_length);
+		memcpy(path, alias->path, alias_length);
 		path[alias_length] = '/';
 		return 1;
 	}
@@ -322,7 +392,7 @@ static int shorten_socket_path(char path[PATH_MAX], bool follow_final)
 	if (alias == NULL)
 		return -errno;
 
-	status = snprintf(path, PATH_MAX, "%s", alias);
+	status = snprintf(path, PATH_MAX, "%s", alias->path);
 	assert(status >= 0 && (size_t) status == alias_length);
 
 	return 1;
@@ -352,6 +422,255 @@ static int remove_shorter_host_path(char *path)
 }
 
 /**
+ * Remove the socket the kernel made at @pending->temporary, if any, as
+ * the bind(2) wasn't finished.
+ *
+ * Note: this is a talloc destructor.
+ */
+static int discard_pending_bind(PendingBind *pending)
+{
+	struct stat statl;
+
+	if (   pending->temporary != NULL
+	    && lstat(pending->temporary, &statl) == 0
+	    && S_ISSOCK(statl.st_mode))
+		(void) unlink(pending->temporary);
+
+	TALLOC_FREE(pending->shorter);
+
+	return 0;
+}
+
+/**
+ * Prepare the bind(2) of a socket to the host @path, whose final
+ * component is too long for an alias of its directory, see
+ * shorten_socket_path().  The kernel makes the socket under a
+ * temporary name in this directory, given through such an alias, and
+ * finish_socket_bind() renames it at the exit stage: the socket is
+ * where the guest expects it from then on, as with an alias.
+ *
+ * If even this doesn't fit sun_path, because the temporary directory
+ * of PRoot is that long, the kernel makes the socket at a shorter host
+ * path, which finish_socket_bind() binds the guest path to.  Unlike
+ * an alias, this binding stands for this guest path in all cases: it
+ * isn't removed along with the socket, which isn't listed in its
+ * directory.  The socket bound there is removed when PRoot exits
+ * rather than with this binding: the copies of the bindings made for a
+ * child that asked for a mount name-space of its own still lead there.
+ *
+ * @path is replaced with the path given to the kernel.  This function
+ * returns -errno if an error occurred, otherwise 0.
+ */
+static int prepare_long_bind(Tracee *tracee, char path[PATH_MAX])
+{
+	const size_t alias_length = get_socket_alias_length();
+	const size_t final = get_final_component(path);
+	char temporary[PATH_MAX];
+	PendingBind *pending;
+	struct stat statl;
+	size_t length;
+	int status;
+
+	/* Like the kernel, don't make a socket over an existing file,
+	 * which the renaming or the binding would replace.  A final
+	 * "/" asks for a directory, the kernel never makes one.  */
+	strcpy(temporary, path);
+	length = strlen(temporary);
+	while (length > 1 && temporary[length - 1] == '/')
+		temporary[--length] = '\0';
+
+	if (lstat(temporary, &statl) == 0)
+		return -EADDRINUSE;
+
+	if (length != strlen(path))
+		return -ENOENT;
+
+	pending = talloc_zero(tracee, PendingBind);
+	if (pending == NULL)
+		return -ENOMEM;
+	talloc_set_destructor(pending, discard_pending_bind);
+
+	if (final > 0 && alias_length + 1 + strlen(".proot-XXXXXX") < sizeof_path) {
+		char directory[PATH_MAX];
+
+		get_directory(directory, path, final);
+
+		pending->alias = get_socket_alias(directory);
+		if (pending->alias == NULL) {
+			status = -errno;
+			goto error;
+		}
+
+		/* A name nothing has in this directory.  */
+		status = snprintf(temporary, sizeof(temporary), "%.*s.proot-XXXXXX",
+				(int) final, path);
+		if (status < 0 || (size_t) status >= sizeof(temporary)) {
+			status = -ENAMETOOLONG;
+			goto error;
+		}
+
+		errno = 0;
+		(void) mktemp(temporary);
+		if (temporary[0] == '\0') {
+			status = -(errno ?: EEXIST);
+			goto error;
+		}
+
+		pending->temporary = talloc_strdup(pending, temporary);
+		pending->final     = talloc_strdup(pending, path);
+
+		snprintf(path, PATH_MAX, "%s/%s", pending->alias->path, temporary + final);
+		pending->address = talloc_strdup(pending, path);
+
+		if (   pending->temporary == NULL
+		    || pending->final == NULL
+		    || pending->address == NULL) {
+			status = -ENOMEM;
+			goto error;
+		}
+	}
+	else {
+		char guest_path[PATH_MAX];
+
+		pending->shorter = create_temp_name(NULL, "proot");
+		if (pending->shorter == NULL) {
+			status = -EINVAL;
+			goto error;
+		}
+
+		/* Leave room for the terminating null byte, see
+		 * shorten_socket_path().  */
+		(void) mktemp(pending->shorter);
+		if (pending->shorter[0] == '\0' || strlen(pending->shorter) >= sizeof_path) {
+			status = -EINVAL;
+			goto error;
+		}
+
+		/* Ensure the guest path of this new binding is
+		 * canonicalized, as it is always assumed.  */
+		strcpy(guest_path, path);
+		status = detranslate_path(tracee, guest_path, NULL);
+		if (status < 0) {
+			status = -EINVAL;
+			goto error;
+		}
+
+		pending->guest     = talloc_strdup(pending, guest_path);
+		pending->temporary = talloc_strdup(pending, pending->shorter);
+		if (pending->guest == NULL || pending->temporary == NULL) {
+			status = -ENOMEM;
+			goto error;
+		}
+
+		strcpy(path, pending->shorter);
+	}
+
+	tracee->pending_bind = pending;
+
+	return 0;
+
+error:
+	talloc_free(pending);
+	return status;
+}
+
+/**
+ * Rename @old to @new, unless something exists at @new: -EEXIST is
+ * returned then.  This function returns -errno if an error occurred,
+ * otherwise 0.
+ */
+static int rename_noreplace(const char *old, const char *new)
+{
+	struct stat statl;
+
+	/* The seccomp policy of Android apps kills the processes that
+	 * make a syscall it doesn't allow, and renameat2(2) isn't
+	 * known to be allowed everywhere: it is never tried there.  */
+#if defined(SYS_renameat2) && !defined(__ANDROID__)
+	if (syscall(SYS_renameat2, AT_FDCWD, old, AT_FDCWD, new, RENAME_NOREPLACE) == 0)
+		return 0;
+
+	/* Not supported by the kernel, the file-system, or a seccomp
+	 * policy.  */
+	if (errno != ENOSYS && errno != EINVAL && errno != EPERM)
+		return -errno;
+#endif
+
+	/* Only PRoot knows the temporary name, but something could be
+	 * made at @new in between.  */
+	if (lstat(new, &statl) == 0)
+		return -EEXIST;
+
+	if (rename(old, new) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/**
+ * Finish the bind(2) @tracee made, now that the kernel returned
+ * @result, see prepare_long_bind().  This function returns the result
+ * to report to @tracee.
+ */
+int finish_socket_bind(Tracee *tracee, int result)
+{
+	PendingBind *pending = tracee->pending_bind;
+	SocketName *name;
+	int status;
+
+	if (pending == NULL)
+		return result;
+
+	tracee->pending_bind = NULL;
+
+	if (result < 0)
+		goto end;
+
+	if (pending->guest != NULL) {
+		if (insort_binding3(tracee, tracee->ctx, pending->shorter, pending->guest) == NULL) {
+			result = -ENOMEM;
+			goto end;
+		}
+
+		talloc_set_destructor(pending->shorter, remove_shorter_host_path);
+		pending->shorter   = NULL;
+		pending->temporary = NULL;
+		goto end;
+	}
+
+	/* The kernel reports the temporary name from now on.  */
+	name = talloc_zero(pending->alias, SocketName);
+	if (name != NULL) {
+		name->address = talloc_strdup(name, pending->address);
+		name->path    = talloc_strdup(name, pending->final);
+	}
+
+	if (name == NULL || name->address == NULL || name->path == NULL) {
+		talloc_free(name);
+		result = -ENOMEM;
+		goto end;
+	}
+
+	/* The kernel would have refused to make the socket there,
+	 * though this socket stays bound to its temporary name.  */
+	status = rename_noreplace(pending->temporary, pending->final);
+	if (status < 0) {
+		talloc_free(name);
+		result = (status == -EEXIST ? -EADDRINUSE : status);
+		goto end;
+	}
+
+	pending->temporary = NULL;
+
+	name->next = socket_names;
+	socket_names = name;
+
+end:
+	talloc_free(pending);
+	return result;
+}
+
+/**
  * Translate the pathname of the struct sockaddr_un currently stored
  * in the @tracee memory at the given @address, for bind(2) if
  * @is_bind, otherwise for connect(2).  See the documentation of
@@ -366,6 +685,10 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size, bool i
 	char user_path[PATH_MAX];
 	char host_path[PATH_MAX];
 	int status;
+
+	/* A previous bind(2) wasn't finished, its exit stage was
+	 * skipped since an error occurred at its enter stage.  */
+	TALLOC_FREE(tracee->pending_bind);
 
 	if (*address == 0)
 		return 0;
@@ -398,51 +721,16 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size, bool i
 	 * long for an alias of its directory: the kernel would make the
 	 * socket at the alias itself, not where it leads.  */
 	if (strlen(host_path) > sizeof_path) {
-		char *shorter_host_path;
-		Binding *binding;
-
-		/* So let's bind the guest path to a shorter path, where
-		 * the socket is made instead.  Unlike an alias, this
-		 * binding stands for this guest path in all cases: it is
-		 * not removed along with the socket.  The socket bound
-		 * there, if any, is removed when PRoot exits rather than
-		 * with this binding: the copies of the bindings made for
-		 * a child that asked for a mount name-space of its own
-		 * still lead there.  */
-		shorter_host_path = create_temp_name(NULL, "proot");
-		if (shorter_host_path == NULL)
-			return -EINVAL;
-
-		(void) mktemp(shorter_host_path);
-
-		if (strlen(shorter_host_path) > sizeof_path) {
-			TALLOC_FREE(shorter_host_path);
-			return -EINVAL;
-		}
-
-		/* Ensure the guest path of this new binding is
-		 * canonicalized, as it is always assumed.  */
-		strcpy(user_path, host_path);
-		status = detranslate_path(tracee, user_path, NULL);
-		if (status < 0) {
-			TALLOC_FREE(shorter_host_path);
-			return -EINVAL;
-		}
-
-		/* Bing the guest path to a shorter host path.  */
-		binding = insort_binding3(tracee, tracee->ctx, shorter_host_path, user_path);
-		if (binding == NULL) {
-			TALLOC_FREE(shorter_host_path);
-			return -EINVAL;
-		}
-
-		talloc_set_destructor(shorter_host_path, remove_shorter_host_path);
-
-		/* Let's use this shorter path now.  */
-		strcpy(host_path, shorter_host_path);
+		status = prepare_long_bind(tracee, host_path);
+		if (status < 0)
+			return status;
 	}
 
-	return push_sockaddr_un(tracee, &sockaddr, host_path, address);
+	status = push_sockaddr_un(tracee, &sockaddr, host_path, address);
+	if (status < 0)
+		TALLOC_FREE(tracee->pending_bind);
+
+	return status;
 }
 
 /**

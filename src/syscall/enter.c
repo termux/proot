@@ -2823,6 +2823,13 @@ int translate_syscall_enter(Tracee *tracee)
 		poke_reg(tracee, SYSARG_2, address);
 		poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
 
+		/* The exit stage finishes this bind(2), see
+		 * prepare_long_bind().  */
+		if (tracee->pending_bind != NULL) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
 		status = 0;
 		break;
 	}
