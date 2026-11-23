@@ -346,6 +346,8 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_connect,		0 },
 	{ PR_creat,		0 },
 	{ PR_recvfrom,		0 },
+	{ PR_recvmmsg,		0 },
+	{ PR_recvmmsg_time64,	0 },
 	{ PR_recvmsg,		0 },
 	{ PR_sendmmsg,		0 },
 	{ PR_sendmsg,		0 },

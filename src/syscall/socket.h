@@ -29,6 +29,12 @@
 int translate_socketcall_enter(Tracee *tracee, word_t *sock_addr, int size, bool is_bind);
 int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr, word_t max_size);
 int finish_socket_bind(Tracee *tracee, int result);
+bool prepare_recvfrom_exit(Tracee *tracee, int fd, word_t address, word_t size_address);
+bool prepare_recvmsg_exit(Tracee *tracee, int fd, word_t msghdr_address);
+bool prepare_recvmmsg_exit(Tracee *tracee, int fd, word_t vector_address, word_t vlen);
+void translate_recvfrom_exit(Tracee *tracee, word_t address, word_t size_address, int result);
+void translate_recvmsg_exit(Tracee *tracee, word_t msghdr_address, int result);
+void translate_recvmmsg_exit(Tracee *tracee, word_t vector_address, int result);
 int translate_send_address(Tracee *tracee, word_t *sock_addr, int size);
 int translate_sendmsg_enter(Tracee *tracee, word_t *msghdr_addr);
 int translate_sendmmsg_enter(Tracee *tracee, word_t *vector_addr, word_t *vlen);

@@ -382,6 +382,7 @@ static const Sysnum sysnums_i386[] = {
 	[ 382 ] = PR_pkey_free,
 	[ 383 ] = PR_statx,
 	[ 428 ] = PR_open_tree,
+	[ 417 ] = PR_recvmmsg_time64,
 	[ 429 ] = PR_move_mount,
 	[ 430 ] = PR_fsopen,
 	[ 431 ] = PR_fsconfig,

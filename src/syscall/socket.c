@@ -33,6 +33,7 @@
 #include <stdio.h>       /* rename(2), RENAME_NOREPLACE, */
 #include <fcntl.h>       /* AT_FDCWD, */
 #include <sys/syscall.h> /* SYS_renameat2, */
+#include <sys/xattr.h>   /* getxattr(2), */
 #include <sys/uio.h>     /* UIO_MAXIOV, */
 #include <linux/net.h>   /* SYS_*, */
 #include <stdint.h>      /* uint8_t, uint32_t, int32_t, */
@@ -1110,14 +1111,18 @@ int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr
 		return status;
 
 	/* The socket was bound through an alias, see
-	 * shorten_socket_path().  */
+	 * shorten_socket_path().  The address is left as is when it
+	 * can't be expressed in the guest namespace: it names a host
+	 * path, as the address of a socket a process of the host bound
+	 * where the guest can't go.  A message sent there still reaches
+	 * it, see translate_send_address().  */
 	status = expand_socket_alias(path);
 	if (status < 0)
-		return status;
+		return 0;
 
 	status = detranslate_path(tracee, path, NULL);
 	if (status < 0)
-		return status;
+		return 0;
 
 	/* Be careful: sun_path doesn't have to be null-terminated.  */
 	size = offsetof_path + strlen(path) + 1;
@@ -1143,4 +1148,214 @@ int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr
 		return -errno;
 
 	return 0;
+}
+
+/**
+ * Remember the sizes of the @count buffers at @sizes where the kernel
+ * reports the sources of the messages @tracee receives, for the exit
+ * stage.  This function returns whether they were remembered.
+ */
+static bool remember_name_sizes(Tracee *tracee, const uint32_t *sizes, size_t count)
+{
+	TALLOC_FREE(tracee->recv_name_sizes);
+
+	tracee->recv_name_sizes = talloc_memdup(tracee, sizes, count * sizeof(uint32_t));
+	return tracee->recv_name_sizes != NULL;
+}
+
+/**
+ * Return whether the descriptor @fd of @tracee may be a Unix domain
+ * socket: the kernel tells the protocol of a socket through an
+ * extended attribute, which older kernels don't provide.  The exit
+ * stage of the syscalls that receive messages on the other sockets is
+ * spared that way, it's a costly ptrace stop.
+ */
+static bool may_be_unix_socket(const Tracee *tracee, int fd)
+{
+	char link[64];
+	char name[32];
+	ssize_t length;
+	int status;
+
+	status = snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, fd);
+	if (status < 0 || (size_t) status >= sizeof(link))
+		return true;
+
+	length = getxattr(link, "system.sockprotoname", name, sizeof(name) - 1);
+	if (length < 0)
+		return true;
+	name[length] = '\0';
+
+	/* "UNIX", "UNIX-STREAM", ...  */
+	return strncmp(name, "UNIX", strlen("UNIX")) == 0;
+}
+
+/**
+ * Prepare the translation of the source of the message @tracee
+ * receives on its descriptor @fd through recvfrom(2), reported in the
+ * buffer at @address, whose size is at @size_address, see
+ * translate_recvfrom_exit().  This function returns whether the exit
+ * stage has to translate it.
+ */
+bool prepare_recvfrom_exit(Tracee *tracee, int fd, word_t address, word_t size_address)
+{
+	uint32_t size;
+
+	TALLOC_FREE(tracee->recv_name_sizes);
+
+	if (address == 0 || size_address == 0 || !may_be_unix_socket(tracee, fd))
+		return false;
+
+	/* Let the kernel report a bad address.  */
+	size = peek_uint32(tracee, size_address);
+	if (errno != 0)
+		return false;
+
+	return remember_name_sizes(tracee, &size, 1);
+}
+
+/**
+ * Same as prepare_recvfrom_exit() for recvmsg(2), whose struct msghdr
+ * is at @address in the @tracee memory.
+ */
+bool prepare_recvmsg_exit(Tracee *tracee, int fd, word_t address)
+{
+	uint8_t msghdr[7 * sizeof(word_t)];
+	uint32_t size;
+
+	TALLOC_FREE(tracee->recv_name_sizes);
+
+	if (address == 0)
+		return false;
+
+	/* Let the kernel report a bad address.  */
+	if (read_data(tracee, msghdr, address, SIZEOF_MSGHDR(tracee)) < 0)
+		return false;
+
+	if (get_word(tracee, msghdr) == 0 || !may_be_unix_socket(tracee, fd))
+		return false;
+
+	memcpy(&size, msghdr + sizeof_word(tracee), sizeof(size));
+	return remember_name_sizes(tracee, &size, 1);
+}
+
+/**
+ * Same as prepare_recvfrom_exit() for recvmmsg(2), whose vector of
+ * @vlen struct mmsghdr is at @address in the @tracee memory.
+ */
+bool prepare_recvmmsg_exit(Tracee *tracee, int fd, word_t address, word_t vlen)
+{
+	const size_t size = SIZEOF_MMSGHDR(tracee);
+	bool named = false;
+	uint32_t *sizes;
+	uint8_t *vector;
+	word_t count;
+	word_t i;
+
+	TALLOC_FREE(tracee->recv_name_sizes);
+
+	if (address == 0 || vlen == 0)
+		return false;
+
+	/* The kernel doesn't receive more messages at once.  */
+	count = MIN(vlen, UIO_MAXIOV);
+
+	vector = talloc_size(tracee->ctx, count * size);
+	sizes  = talloc_array(tracee, uint32_t, count);
+	if (vector == NULL || sizes == NULL) {
+		talloc_free(sizes);
+		return false;
+	}
+
+	/* Let the kernel report a bad address.  */
+	if (read_data(tracee, vector, address, count * size) < 0) {
+		talloc_free(sizes);
+		return false;
+	}
+
+	for (i = 0; i < count; i++) {
+		if (get_word(tracee, vector + i * size) != 0)
+			named = true;
+		memcpy(&sizes[i], vector + i * size + sizeof_word(tracee), sizeof(uint32_t));
+	}
+
+	if (!named || !may_be_unix_socket(tracee, fd)) {
+		talloc_free(sizes);
+		return false;
+	}
+
+	tracee->recv_name_sizes = sizes;
+	return true;
+}
+
+/**
+ * Detranslate the source of the message @tracee received through
+ * recvfrom(2), as translate_socketcall_exit() does for getsockname(2),
+ * now that the kernel returned @result: the guest can reply to it,
+ * see translate_send_address().  See prepare_recvfrom_exit() for the
+ * meaning of @address and @size_address.
+ */
+void translate_recvfrom_exit(Tracee *tracee, word_t address, word_t size_address, int result)
+{
+	uint32_t *sizes = tracee->recv_name_sizes;
+
+	if (sizes == NULL)
+		return;
+
+	if (result >= 0)
+		(void) translate_socketcall_exit(tracee, address, size_address, sizes[0]);
+
+	TALLOC_FREE(tracee->recv_name_sizes);
+}
+
+/**
+ * Same as translate_recvfrom_exit() for recvmsg(2), see
+ * prepare_recvmsg_exit().
+ */
+void translate_recvmsg_exit(Tracee *tracee, word_t address, int result)
+{
+	uint32_t *sizes = tracee->recv_name_sizes;
+	word_t name;
+
+	if (sizes == NULL)
+		return;
+
+	if (result >= 0) {
+		name = peek_word(tracee, address);
+		if (errno == 0 && name != 0)
+			(void) translate_socketcall_exit(tracee, name, address + sizeof_word(tracee),
+							sizes[0]);
+	}
+
+	TALLOC_FREE(tracee->recv_name_sizes);
+}
+
+/**
+ * Same as translate_recvfrom_exit() for recvmmsg(2), which received
+ * @result messages, see prepare_recvmmsg_exit().
+ */
+void translate_recvmmsg_exit(Tracee *tracee, word_t address, int result)
+{
+	const size_t size = SIZEOF_MMSGHDR(tracee);
+	uint32_t *sizes = tracee->recv_name_sizes;
+	word_t message;
+	word_t name;
+	int i;
+
+	if (sizes == NULL)
+		return;
+
+	for (i = 0; i < result && (size_t) i < talloc_array_length(sizes); i++) {
+		message = address + i * size;
+
+		name = peek_word(tracee, message);
+		if (errno != 0)
+			break;
+
+		if (name != 0)
+			(void) translate_socketcall_exit(tracee, name, message + sizeof_word(tracee),
+							sizes[i]);
+	}
+
+	TALLOC_FREE(tracee->recv_name_sizes);
 }

@@ -3015,10 +3015,20 @@ int translate_syscall_enter(Tracee *tracee)
 						     &result)) {
 			poke_reg(tracee, SYSARG_RESULT, result);
 			set_sysnum(tracee, PR_void);
+			TALLOC_FREE(tracee->recv_name_sizes);
 			status = 0;
 			break;
 		}
 		note_netns_netlink_reply(tracee, sock);
+
+		/* The exit stage detranslates the source of the
+		 * message, see translate_recvfrom_exit().  */
+		if (prepare_recvfrom_exit(tracee, fd, peek_reg(tracee, CURRENT, SYSARG_5),
+					  peek_reg(tracee, CURRENT, SYSARG_6))) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
 		status = 0;
 		break;
 	}
@@ -3035,13 +3045,34 @@ int translate_syscall_enter(Tracee *tracee)
 						    &result)) {
 			poke_reg(tracee, SYSARG_RESULT, result);
 			set_sysnum(tracee, PR_void);
+			TALLOC_FREE(tracee->recv_name_sizes);
 			status = 0;
 			break;
 		}
 		note_netns_netlink_reply(tracee, sock);
+
+		/* See case PR_recvfrom.  */
+		if (prepare_recvmsg_exit(tracee, fd, peek_reg(tracee, CURRENT, SYSARG_2))) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
 		status = 0;
 		break;
 	}
+
+	case PR_recvmmsg:
+	case PR_recvmmsg_time64:
+		/* See case PR_recvfrom.  */
+		if (prepare_recvmmsg_exit(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1),
+					  peek_reg(tracee, CURRENT, SYSARG_2),
+					  (unsigned int) peek_reg(tracee, CURRENT, SYSARG_3))) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+
+		status = 0;
+		break;
 
 	case PR_socketcall: {
 		word_t args_addr;
@@ -3087,6 +3118,18 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 		}
 
+		case SYS_RECVMMSG: {
+			/* See case PR_recvmmsg.  */
+			word_t args[3] = { 0 };
+
+			status = 0;
+			TALLOC_FREE(tracee->recv_name_sizes);
+			if (peek_socketcall_args(tracee, args_addr, args, 3) == 0)
+				(void) prepare_recvmmsg_exit(tracee, (int) args[0], args[1],
+							     (unsigned int) args[2]);
+			break;
+		}
+
 		case SYS_RECV:
 		case SYS_RECVFROM:
 		case SYS_RECVMSG: {
@@ -3098,6 +3141,7 @@ int translate_syscall_enter(Tracee *tracee)
 			bool answered;
 
 			status = 0;
+			TALLOC_FREE(tracee->recv_name_sizes);
 			if (peek_socketcall_args(tracee, args_addr, args,
 						 call == SYS_RECVMSG ? 3 : call == SYS_RECV ? 4 : 6) < 0)
 				break;
@@ -3105,6 +3149,13 @@ int translate_syscall_enter(Tracee *tracee)
 			sock = get_netlink_socket(tracee, (int) args[0]);
 			if (sock == NULL || !sock->fake) {
 				note_netns_netlink_reply(tracee, sock);
+
+				/* See case PR_recvfrom.  */
+				if (call == SYS_RECVFROM)
+					(void) prepare_recvfrom_exit(tracee, (int) args[0],
+								     args[4], args[5]);
+				else if (call == SYS_RECVMSG)
+					(void) prepare_recvmsg_exit(tracee, (int) args[0], args[1]);
 				break;
 			}
 

@@ -11,11 +11,15 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/syscall.h>
+#include <linux/net.h>
 
 /* Usage:
  *
  *     unix_socket_paths scenarios <dir> [<name> [hidden]]
- *     unix_socket_paths serve|client <dir> <name>
+ *     unix_socket_paths serve|dgram-serve <dir> <name>
+ *     unix_socket_paths client <dir> <name> [<own path>]
+ *     unix_socket_paths dgram-client <dir> <name> <own path>
  *
  * The scenarios check that a socket bound to a path in <dir> behaves
  * as any other file there, as the kernel makes it, and that connect(2)
@@ -27,7 +31,10 @@
  * path.  A line is printed for each check that fails.
  *
  * serve binds a socket to <name> in <dir>, says "ready" once it
- * listens, then waits for a client to say "ping".  client says it.  */
+ * listens, then waits for a client to say "ping", and tells the address
+ * of this client.  client says it, from a socket bound to <own path> if
+ * it is given.  dgram-serve and dgram-client do the same with datagrams,
+ * dgram-serve tells the source of "ping", and replies "pong" to it.  */
 
 static int failures = 0;
 
@@ -114,6 +121,13 @@ static int create_file(const char *path)
 	}
 
 	return close(fd);
+}
+
+/* Whether the address @address, @size bytes long, is @path.  */
+static int is_address(const struct sockaddr_un *address, socklen_t size, const char *path)
+{
+	return size == offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1
+		&& strcmp(address->sun_path, path) == 0;
 }
 
 /* Whether the address of the socket @fd, or of its peer, is @path.  */
@@ -238,8 +252,11 @@ static void check_existing(const char *dir)
 static void check_datagrams(const char *dir)
 {
 	struct sockaddr_un destination;
+	struct sockaddr_un sources[2];
 	struct sockaddr_un source;
 	struct mmsghdr messages[2];
+	struct iovec received_iovec;
+	struct msghdr received;
 	struct msghdr message;
 	struct iovec iovec;
 	char server_path[PATH_MAX];
@@ -267,6 +284,7 @@ static void check_datagrams(const char *dir)
 	memset(&source, 0, sizeof(source));
 	CHECK(recvfrom(server, buffer, 1, MSG_DONTWAIT, (struct sockaddr *) &source,
 		       &source_size) == 1, "recvfrom %s", server_path);
+	CHECK(is_address(&source, source_size, client_path), "source %s", client_path);
 	CHECK(sendto(server, "b", 1, 0, (struct sockaddr *) &source, source_size) == 1,
 	      "reply from %s", server_path);
 	CHECK(recv(client, buffer, 1, MSG_DONTWAIT) == 1, "reply to %s", client_path);
@@ -279,15 +297,65 @@ static void check_datagrams(const char *dir)
 	message.msg_iov     = &iovec;
 	message.msg_iovlen  = 1;
 	CHECK(sendmsg(client, &message, 0) == 1, "sendmsg %s", server_path);
-	CHECK(recv(server, buffer, 1, MSG_DONTWAIT) == 1, "sendmsg to %s", server_path);
+
+	received_iovec.iov_base = buffer;
+	received_iovec.iov_len  = 1;
+	memset(&received, 0, sizeof(received));
+	memset(&sources, 0, sizeof(sources));
+	received.msg_name    = &sources[0];
+	received.msg_namelen = sizeof(sources[0]);
+	received.msg_iov     = &received_iovec;
+	received.msg_iovlen  = 1;
+	CHECK(recvmsg(server, &received, MSG_DONTWAIT) == 1, "sendmsg to %s", server_path);
+	CHECK(is_address(&sources[0], received.msg_namelen, client_path),
+	      "recvmsg source %s", client_path);
 
 	memset(messages, 0, sizeof(messages));
 	messages[0].msg_hdr = message;
 	messages[1].msg_hdr = message;
 	CHECK(sendmmsg(client, messages, 2, 0) == 2
 	      && messages[0].msg_len == 1 && messages[1].msg_len == 1, "sendmmsg %s", server_path);
-	CHECK(recv(server, buffer, 1, MSG_DONTWAIT) == 1
-	      && recv(server, buffer, 1, MSG_DONTWAIT) == 1, "sendmmsg to %s", server_path);
+
+	memset(&sources, 0, sizeof(sources));
+	memset(messages, 0, sizeof(messages));
+	messages[0].msg_hdr = received;
+	messages[1].msg_hdr = received;
+	messages[0].msg_hdr.msg_name    = &sources[0];
+	messages[1].msg_hdr.msg_name    = &sources[1];
+	messages[0].msg_hdr.msg_namelen = sizeof(sources[0]);
+	messages[1].msg_hdr.msg_namelen = sizeof(sources[1]);
+	CHECK(recvmmsg(server, messages, 2, MSG_DONTWAIT, NULL) == 2, "sendmmsg to %s", server_path);
+	CHECK(   is_address(&sources[0], messages[0].msg_hdr.msg_namelen, client_path)
+	      && is_address(&sources[1], messages[1].msg_hdr.msg_namelen, client_path),
+	      "recvmmsg sources %s", client_path);
+
+#if defined(__i386__)
+	/* The C library makes recvmmsg_time64(2), and recvmmsg(2), or
+	 * its socketcall(2), only where it isn't implemented.  */
+	{
+		unsigned long args[5];
+		int i;
+
+		for (i = 0; i < 2; i++) {
+			CHECK(sendmsg(client, &message, 0) == 1, "sendmsg %s", server_path);
+
+			memset(&sources, 0, sizeof(sources));
+			messages[0].msg_hdr.msg_namelen = sizeof(sources[0]);
+
+			args[0] = server;
+			args[1] = (unsigned long) messages;
+			args[2] = 1;
+			args[3] = MSG_DONTWAIT;
+			args[4] = 0;
+			CHECK((i == 0
+			       ? syscall(SYS_recvmmsg, server, messages, 1, MSG_DONTWAIT, NULL)
+			       : syscall(SYS_socketcall, SYS_RECVMMSG, args)) == 1,
+			      "%s to %s", i == 0 ? "recvmmsg" : "socketcall", server_path);
+			CHECK(is_address(&sources[0], messages[0].msg_hdr.msg_namelen, client_path),
+			      "%s source %s", i == 0 ? "recvmmsg" : "socketcall", client_path);
+		}
+	}
+#endif
 
 	close(client);
 	close(server);
@@ -404,14 +472,27 @@ static void check_name(const char *dir, const char *name, int hidden)
 	}
 }
 
-static int serve(const char *name)
+/* Print the address @address, @size bytes long.  */
+static void print_address(const char *what, const struct sockaddr_un *address, socklen_t size)
 {
+	if (size <= offsetof(struct sockaddr_un, sun_path))
+		printf("%s: (unnamed)\n", what);
+	else
+		printf("%s: %.*s\n", what, (int) (size - offsetof(struct sockaddr_un, sun_path) - 1),
+		       address->sun_path);
+	fflush(stdout);
+}
+
+static int serve(int type, const char *name)
+{
+	struct sockaddr_un address;
+	socklen_t size = sizeof(address);
 	char buffer[4];
 	int server;
 	int peer;
 
-	server = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (bind_to(server, name) < 0 || listen(server, 1) < 0) {
+	server = socket(AF_UNIX, type, 0);
+	if (bind_to(server, name) < 0 || (type == SOCK_STREAM && listen(server, 1) < 0)) {
 		perror("bind");
 		return 1;
 	}
@@ -419,20 +500,56 @@ static int serve(const char *name)
 	printf("ready\n");
 	fflush(stdout);
 
-	peer = accept(server, NULL, NULL);
+	memset(&address, 0, sizeof(address));
+	if (type == SOCK_DGRAM) {
+		/* Reply to the source.  */
+		if (   recvfrom(server, buffer, 4, 0, (struct sockaddr *) &address, &size) != 4
+		    || memcmp(buffer, "ping", 4) != 0) {
+			perror("recvfrom");
+			return 1;
+		}
+		print_address("source", &address, size);
+
+		if (sendto(server, "pong", 4, 0, (struct sockaddr *) &address, size) != 4) {
+			perror("sendto");
+			return 1;
+		}
+		return 0;
+	}
+
+	peer = accept(server, (struct sockaddr *) &address, &size);
 	if (peer < 0 || read(peer, buffer, 4) != 4 || memcmp(buffer, "ping", 4) != 0) {
 		perror("accept");
 		return 1;
 	}
+	print_address("peer", &address, size);
 
 	return 0;
 }
 
-static int client(const char *name)
+static int client(int type, const char *name, const char *own)
 {
+	struct sockaddr_un address;
+	socklen_t size;
+	char buffer[4];
 	int fd;
 
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	fd = socket(AF_UNIX, type, 0);
+	if (own != NULL && bind_to(fd, own) < 0) {
+		perror("bind");
+		return 1;
+	}
+
+	if (type == SOCK_DGRAM) {
+		size = make_address(&address, name);
+		if (   sendto(fd, "ping", 4, 0, (struct sockaddr *) &address, size) != 4
+		    || recv(fd, buffer, 4, 0) != 4 || memcmp(buffer, "pong", 4) != 0) {
+			perror("sendto");
+			return 1;
+		}
+		return 0;
+	}
+
 	if (connect_to(fd, name) < 0 || write(fd, "ping", 4) != 4) {
 		perror("connect");
 		return 1;
@@ -448,15 +565,23 @@ int main(int argc, char *argv[])
 	alarm(60);
 
 	if (argc == 4 && strcmp(argv[1], "serve") == 0)
-		return chdir(argv[2]) == 0 ? serve(argv[3]) : 1;
+		return chdir(argv[2]) == 0 ? serve(SOCK_STREAM, argv[3]) : 1;
 
-	if (argc == 4 && strcmp(argv[1], "client") == 0)
-		return chdir(argv[2]) == 0 ? client(argv[3]) : 1;
+	if (argc == 4 && strcmp(argv[1], "dgram-serve") == 0)
+		return chdir(argv[2]) == 0 ? serve(SOCK_DGRAM, argv[3]) : 1;
+
+	if ((argc == 4 || argc == 5) && strcmp(argv[1], "client") == 0)
+		return chdir(argv[2]) == 0 ? client(SOCK_STREAM, argv[3], argv[4]) : 1;
+
+	if (argc == 5 && strcmp(argv[1], "dgram-client") == 0)
+		return chdir(argv[2]) == 0 ? client(SOCK_DGRAM, argv[3], argv[4]) : 1;
 
 	if (   argc < 3 || argc > 5 || strcmp(argv[1], "scenarios") != 0
 	    || (argc == 5 && strcmp(argv[4], "hidden") != 0)) {
 		fprintf(stderr, "usage: %s scenarios <dir> [<name> [hidden]]\n", argv[0]);
-		fprintf(stderr, "       %s serve|client <dir> <name>\n", argv[0]);
+		fprintf(stderr, "       %s serve|dgram-serve <dir> <name>\n", argv[0]);
+		fprintf(stderr, "       %s client <dir> <name> [<own path>]\n", argv[0]);
+		fprintf(stderr, "       %s dgram-client <dir> <name> <own path>\n", argv[0]);
 		return 2;
 	}
 

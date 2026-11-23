@@ -158,6 +158,12 @@ typedef struct tracee {
 	 * syscall/socket.c.  */
 	struct PendingBind *pending_bind;
 
+	/* The sizes of the buffers where the kernel reports the
+	 * sources of the messages a recvfrom(2), recvmsg(2) or
+	 * recvmmsg(2) receives, from its enter stage to its exit stage,
+	 * see syscall/socket.c.  */
+	uint32_t *recv_name_sizes;
+
 	/* Support for ptrace emulation (tracer side).  */
 	struct {
 		size_t nb_ptracees;

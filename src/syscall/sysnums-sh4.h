@@ -340,6 +340,7 @@ static const Sysnum sysnums_sh4[] = {
 	[ 365 ] = PR_process_vm_readv,
 	[ 366 ] = PR_process_vm_writev,
 	[ 428 ] = PR_open_tree,
+	[ 417 ] = PR_recvmmsg_time64,
 	[ 429 ] = PR_move_mount,
 	[ 430 ] = PR_fsopen,
 	[ 431 ] = PR_fsconfig,

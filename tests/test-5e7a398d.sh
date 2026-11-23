@@ -1,4 +1,4 @@
-if [ -z "$(which mcookie)" ] || [ -z "$(which gcc)" ] || [ -z "$(which cut)" ] || [ -z "$(which find)" ] || [ -z "$(which grep)" ] || [ -z "$(which sleep)" ]; then
+if [ -z "$(which mcookie)" ] || [ -z "$(which gcc)" ] || [ -z "$(which cut)" ] || [ -z "$(which find)" ] || [ -z "$(which grep)" ] || [ -z "$(which sed)" ] || [ -z "$(which sleep)" ]; then
     exit 125;
 fi
 
@@ -24,6 +24,11 @@ fi
 # renamed.  Only when even this doesn't fit sun_path, because of the
 # length of the temporary directory of PRoot, is it bound to a shorter
 # path, though only once bind(2) succeeded, and not over a file.
+#
+# The source of a datagram, given by recvfrom(2), recvmsg(2) or
+# recvmmsg(2), was reported as a host path, it is detranslated as the
+# address given by getsockname(2) is.  An address the guest namespace
+# can't express is left as is, rather than failing the syscall.
 
 DIR=${TMPDIR:?}/$(mcookie | cut -c 1-8)
 SCRIPT_DIR=$(dirname "$0")
@@ -135,6 +140,27 @@ wait_ready "${DIR}/server"
 env PROOT_TMP_DIR="${DIR}" ${PROOT} -b "${HOST}:${GUEST}" \
     "${DIR}/unix_socket_paths" client "${GUEST}" host-guest
 wait ${SERVER}
+
+# The address of a client the host bound where the guest can't go,
+# out of its rootfs, is left as is: accept(2) failed with EPERM, though
+# the kernel made the descriptor already.  So is the source of a
+# datagram from there, which a reply still reaches.  This takes a
+# program the rootfs can run on its own.
+OUTSIDE=${DIR}/o
+mkdir -p "${OUTSIDE}" "${DIR}/root/s"
+if gcc -static "${SCRIPT_DIR}/unix_socket_paths.c" -o "${DIR}/root/unix_socket_paths" >/dev/null 2>&1; then
+
+    for SERVE in serve dgram-serve; do
+        env PROOT_TMP_DIR="${DIR}" ${PROOT} -r "${DIR}/root" -b "${HOST}:/s" \
+            /unix_socket_paths ${SERVE} /s outside > "${DIR}/server" &
+        SERVER=$!
+        wait_ready "${DIR}/server"
+        "${DIR}/unix_socket_paths" $(echo ${SERVE} | sed s/serve/client/) "${HOST}" outside "${OUTSIDE}/${SERVE}"
+        wait ${SERVER}
+        grep -q ": ${OUTSIDE}/${SERVE}\$" "${DIR}/server"
+        rm "${HOST}/outside"
+    done
+fi
 
 # The aliases and the temporary names are removed at exit, the sockets
 # are left where they were bound, as the kernel does.

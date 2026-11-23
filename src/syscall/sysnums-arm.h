@@ -357,6 +357,7 @@ static const Sysnum sysnums_arm[] = {
 	[ 396 ] = PR_pkey_free,
 	[ 397 ] = PR_statx,
 	[ 428 ] = PR_open_tree,
+	[ 417 ] = PR_recvmmsg_time64,
 	[ 429 ] = PR_move_mount,
 	[ 430 ] = PR_fsopen,
 	[ 431 ] = PR_fsconfig,

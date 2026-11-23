@@ -222,8 +222,8 @@ void translate_syscall_exit(Tracee *tracee)
 		case SYS_RECVMSG: {
 			/* See case PR_recvfrom.  The arguments of the
 			 * caller are as they were.  */
-			size_t nb_args = (call == SYS_RECVMSG ? 3 : 4);
-			word_t args[4];
+			size_t nb_args = (call == SYS_RECVMSG ? 3 : call == SYS_RECV ? 4 : 6);
+			word_t args[6];
 			size_t i;
 
 			for (i = 0; i < nb_args; i++) {
@@ -238,6 +238,20 @@ void translate_syscall_exit(Tracee *tracee)
 			else
 				handle_netlink_reply_exit(tracee, (int) args[0], false,
 							  args[1], args[2], (int) args[3]);
+
+			if (call == SYS_RECVFROM)
+				translate_recvfrom_exit(tracee, args[4], args[5], (int) syscall_result);
+			else if (call == SYS_RECVMSG)
+				translate_recvmsg_exit(tracee, args[1], (int) syscall_result);
+			goto end;
+		}
+
+		case SYS_RECVMMSG: {
+			/* See case PR_recvmmsg.  */
+			word_t vector = peek_word(tracee, SYSARG_ADDR(2));
+
+			if (errno == 0)
+				translate_recvmmsg_exit(tracee, vector, (int) syscall_result);
 			goto end;
 		}
 
@@ -881,6 +895,23 @@ void translate_syscall_exit(Tracee *tracee)
 			handle_netlink_reply_exit(tracee, (int) peek_reg(tracee, ORIGINAL, SYSARG_1), true,
 						  peek_reg(tracee, ORIGINAL, SYSARG_2), 0,
 						  (int) peek_reg(tracee, ORIGINAL, SYSARG_3));
+
+		/* The guest can reply to the source of the message, see
+		 * translate_recvfrom_exit().  */
+		if (syscall_number == PR_recvfrom)
+			translate_recvfrom_exit(tracee, peek_reg(tracee, ORIGINAL, SYSARG_5),
+						peek_reg(tracee, ORIGINAL, SYSARG_6),
+						(int) syscall_result);
+		else
+			translate_recvmsg_exit(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2),
+					       (int) syscall_result);
+		goto end;
+
+	case PR_recvmmsg:
+	case PR_recvmmsg_time64:
+		/* See case PR_recvfrom.  */
+		translate_recvmmsg_exit(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2),
+					(int) syscall_result);
 		goto end;
 
 	case PR_chroot:
