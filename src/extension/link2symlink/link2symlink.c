@@ -1607,6 +1607,73 @@ static void remember_opened_link(Extension *extension, const char host_path[PATH
 }
 
 /**
+ * What the canonicalization of the guest path being translated found
+ * out about its final host path: whether it is a symlink, according to
+ * the lstat(2) made for its HOST_PATH event.  This spares translated_path()
+ * a readlink(2) that can't succeed, it's made for nearly every path.
+ * Not attached to a tracee: a translation is done at once, from its
+ * GUEST_PATH event to its TRANSLATED_PATH event.
+ */
+static struct {
+	/* Whether a translation is in progress, see the GUEST_PATH and
+	 * TRANSLATED_PATH events.  */
+	bool translating;
+
+	/* Whether the fields below describe the final host path of the
+	 * translation in progress.  */
+	bool known;
+
+	bool is_symlink;
+	char path[PATH_MAX];
+} final_host_path;
+
+/**
+ * Remember what lstat(2) reported for @host_path, the final component
+ * of the translation in progress, as @access tells.  The last one
+ * reported is the one the translation ends with: the target of the
+ * symlinks it follows comes after them.
+ */
+static void remember_final_host_path(const char *host_path, const HostPathAccess *access)
+{
+	size_t length;
+
+	if (!final_host_path.translating || !access->is_final)
+		return;
+
+	length = strlen(host_path);
+	if (length >= sizeof(final_host_path.path)) {
+		final_host_path.known = false;
+		return;
+	}
+
+	memcpy(final_host_path.path, host_path, length + 1);
+
+	/* When lstat(2) failed, readlink(2) would fail the same way:
+	 * there's no such file, or it can't be reached.  */
+	final_host_path.is_symlink = (access->lstat != NULL && S_ISLNK(access->lstat->st_mode));
+	final_host_path.known = true;
+}
+
+/**
+ * Tell whether @translated_path, the result of the translation that is
+ * ending, may be a symlink, then forget about this translation.  It is
+ * known not to be one when the canonicalization made lstat(2) on this
+ * very path and it didn't report a symlink -- the paths that end with
+ * "/" or "/." for instance aren't the ones it lstat()ed.
+ */
+static bool translated_path_may_be_symlink(const char translated_path[PATH_MAX])
+{
+	bool may_be_symlink = (   !final_host_path.known
+			       || final_host_path.is_symlink
+			       || strcmp(final_host_path.path, translated_path) != 0);
+
+	final_host_path.translating = false;
+	final_host_path.known = false;
+
+	return may_be_symlink;
+}
+
+/**
  * When @translated_path is a faked hard-link, replace it with the
  * point it (internally) points to.
  */
@@ -1615,6 +1682,9 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 	Tracee *tracee = TRACEE(extension);
 	Link2SymlinkConfig *config;
 	char final[PATH_MAX];
+	bool may_be_symlink;
+
+	may_be_symlink = translated_path_may_be_symlink(translated_path);
 
 	/* Don't translate l2s symlinks if call is (un)link */
 	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
@@ -1636,7 +1706,7 @@ static void translated_path(Extension *extension, char translated_path[PATH_MAX]
 	 * not to -- lstat(2), open(O_NOFOLLOW), ... -- in which case
 	 * that is done here.  The name of that link is remembered the
 	 * same way, a faked hard link is a regular file to the tracee.  */
-	if (resolve_faked_hard_link(translated_path, final) == 0) {
+	if (may_be_symlink && resolve_faked_hard_link(translated_path, final) == 0) {
 		config = get_config(extension, true);
 		if (config != NULL)
 			strcpy(config->dereferenced_link, translated_path);
@@ -1964,8 +2034,14 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		if (config != NULL)
 			config->dereferenced_link[0] = '\0';
 
+		final_host_path.translating = true;
+		final_host_path.known = false;
 		return 0;
 	}
+
+	case HOST_PATH:
+		remember_final_host_path((const char *) data1, (const HostPathAccess *) data2);
+		return 0;
 
 	case SYMLINK_DEREFERENCED:
 		remember_dereferenced_link(extension, (const char *) data1, (const char *) data2);
