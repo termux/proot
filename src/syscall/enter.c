@@ -2939,9 +2939,9 @@ int translate_syscall_enter(Tracee *tracee)
 		word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
 
 		/* Only NETLINK_ROUTE sockets need the exit stage, which
-		 * substitute_netlink_socket() asks for.  fake_id0 and
-		 * kompat filter socket(2) with FILTER_SYSEXIT themselves
-		 * when they need its exit stage.  */
+		 * substitute_netlink_socket() asks for.  kompat filters
+		 * socket(2) with FILTER_SYSEXIT when it needs its exit
+		 * stage, fake_id0 asks for it at the enter stage.  */
 		if (substitute_netlink_socket(tracee, peek_reg(tracee, CURRENT, SYSARG_1),
 					      &type, peek_reg(tracee, CURRENT, SYSARG_3))) {
 			poke_reg(tracee, SYSARG_1, AF_UNIX);

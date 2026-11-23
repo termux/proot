@@ -1,4 +1,3 @@
-#include <unistd.h>      /* get*id(2),  */
 #include <linux/limits.h>
 #include <errno.h>
 
@@ -17,9 +16,9 @@ int handle_chown_enter_end(Tracee *tracee, Config *config, Reg uid_sysarg, Reg g
 	/* Swap actual and emulated ids to get a chance of
 	 * success.  */
 	if (uid == config->ruid)
-		poke_reg(tracee, uid_sysarg, getuid());
+		poke_reg(tracee, uid_sysarg, get_host_uid());
 	if (gid == config->rgid)
-		poke_reg(tracee, gid_sysarg, getgid());
+		poke_reg(tracee, gid_sysarg, get_host_gid());
 
 	return 0;
 }

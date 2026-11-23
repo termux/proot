@@ -36,6 +36,7 @@
 #include <linux/auxvec.h>/* AT_,  */
 #include <sys/socket.h>  /* cmsghdr, */
 #include <linux/net.h>   /* SYS_SENDMSG, */
+#include <linux/netlink.h> /* NETLINK_AUDIT, */
 
 #include "extension/extension.h"
 #include "syscall/syscall.h"
@@ -353,21 +354,21 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_fstat,		FILTER_SYSEXIT },
 	{ PR_fstat64,		FILTER_SYSEXIT },
 	{ PR_fstatat64,		FILTER_SYSEXIT },
-	{ PR_getegid,		FILTER_SYSEXIT },
-	{ PR_getegid32,		FILTER_SYSEXIT },
-	{ PR_geteuid,		FILTER_SYSEXIT },
-	{ PR_geteuid32,		FILTER_SYSEXIT },
-	{ PR_getgid,		FILTER_SYSEXIT },
-	{ PR_getgid32,		FILTER_SYSEXIT },
+	{ PR_getegid,		0 },
+	{ PR_getegid32,		0 },
+	{ PR_geteuid,		0 },
+	{ PR_geteuid32,		0 },
+	{ PR_getgid,		0 },
+	{ PR_getgid32,		0 },
 	{ PR_getgroups,		FILTER_SYSEXIT },
 	{ PR_getgroups32,	FILTER_SYSEXIT },
 	{ PR_getresgid,		FILTER_SYSEXIT },
 	{ PR_getresgid32,	FILTER_SYSEXIT },
 	{ PR_getresuid,		FILTER_SYSEXIT },
 	{ PR_getresuid32,	FILTER_SYSEXIT },
-	{ PR_getuid,		FILTER_SYSEXIT },
-	{ PR_getuid32,		FILTER_SYSEXIT },
-	{ PR_getsockopt,	FILTER_SYSEXIT },
+	{ PR_getuid,		0 },
+	{ PR_getuid32,		0 },
+	{ PR_getsockopt,	0 },
 	{ PR_lchown,		FILTER_SYSEXIT },
 	{ PR_lchown32,		FILTER_SYSEXIT },
 	{ PR_lstat,		FILTER_SYSEXIT },
@@ -377,7 +378,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_newfstatat,	FILTER_SYSEXIT },
 	{ PR_oldlstat,		FILTER_SYSEXIT },
 	{ PR_oldstat,		FILTER_SYSEXIT },
-	{ PR_prctl,		FILTER_SYSEXIT },
+	{ PR_prctl,		0 },
 	{ PR_sendmsg,		0 },
 	{ PR_setfsgid,		FILTER_SYSEXIT },
 	{ PR_setfsgid32,	FILTER_SYSEXIT },
@@ -400,7 +401,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_setxattr,		FILTER_SYSEXIT },
 	{ PR_setdomainname,	FILTER_SYSEXIT },
 	{ PR_sethostname,	FILTER_SYSEXIT },
-	{ PR_socket,		FILTER_SYSEXIT },
+	{ PR_socket,		0 },
 	{ PR_lsetxattr,		FILTER_SYSEXIT },
 	{ PR_fsetxattr,		FILTER_SYSEXIT },
 	{ PR_stat,		FILTER_SYSEXIT },
@@ -604,6 +605,31 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config, bool even_if
 	if (even_if_not_root || config->euid == 0) /* TODO: || HAS_CAP(...) */
 		poke_reg(tracee, SYSARG_RESULT, 0);
 
+	return 0;
+}
+
+/**
+ * Make the current syscall of @tracee return @result without letting
+ * the kernel run it.  Its result doesn't depend on the kernel, so it
+ * is set right now, at the enter stage, which spares the exit stop.
+ * This function always returns 0.
+ */
+static int answer_at_enter(Tracee *tracee, word_t result)
+{
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, result);
+	return 0;
+}
+
+/**
+ * Ask for the exit stage of the current syscall of @tracee, which is
+ * filtered without FILTER_SYSEXIT because its exit stage has work to
+ * do in a few cases only.  This function always returns 0.
+ */
+static int request_sysexit(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
 	return 0;
 }
 
@@ -908,6 +934,44 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	}
 #endif /* ifndef USERLAND */
 
+	/* These syscalls are fully emulated.  Their exit stage, if
+	 * any, gives the same results, see handle_sysexit_end().  */
+	case PR_getuid:
+	case PR_getuid32:
+		return answer_at_enter(tracee, config->ruid);
+
+	case PR_getgid:
+	case PR_getgid32:
+		return answer_at_enter(tracee, config->rgid);
+
+	case PR_geteuid:
+	case PR_geteuid32:
+		return answer_at_enter(tracee, config->euid);
+
+	case PR_getegid:
+	case PR_getegid32:
+		return answer_at_enter(tracee, config->egid);
+
+	/* The exit stage of these syscalls has work to do in a single
+	 * case each, see handle_sysexit_end() and the functions it
+	 * calls.  */
+	case PR_prctl:
+		if (peek_reg(tracee, ORIGINAL, SYSARG_1) == PR_SET_KEEPCAPS)
+			return request_sysexit(tracee);
+		return 0;
+
+	case PR_socket:
+		if (   peek_reg(tracee, ORIGINAL, SYSARG_1) == AF_NETLINK
+		    && peek_reg(tracee, ORIGINAL, SYSARG_3) == NETLINK_AUDIT)
+			return request_sysexit(tracee);
+		return 0;
+
+	case PR_getsockopt:
+		if (   peek_reg(tracee, ORIGINAL, SYSARG_2) == SOL_SOCKET
+		    && peek_reg(tracee, ORIGINAL, SYSARG_3) == SO_PEERCRED)
+			return request_sysexit(tracee);
+		return 0;
+
 	case PR_setgroups:
 	case PR_setgroups32:
 	case PR_getgroups:
@@ -1030,7 +1094,8 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		 * runs on the kernel; we only observe successful calls so the
 		 * fake_id0 cap model stays in sync with what the kernel does
 		 * for the tracee (PR_GET_KEEPCAPS is satisfied by the kernel
-		 * directly and needs no intercept). */
+		 * directly and needs no intercept).  The enter stage asks
+		 * for this exit stage only for PR_SET_KEEPCAPS. */
 		int op = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
 		int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
 		if (result == 0 && op == PR_SET_KEEPCAPS) {
@@ -1040,6 +1105,9 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		return 0;
 	}
 
+	/* Already answered at the enter stage, their exit stage is
+	 * reached only when it is needed anyway, eg. ARM's avoider is
+	 * a syscall the kernel really runs.  */
 	case PR_getuid:
 	case PR_getuid32:
 		poke_reg(tracee, SYSARG_RESULT, config->ruid);
