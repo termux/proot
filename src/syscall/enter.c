@@ -2815,7 +2815,8 @@ int translate_syscall_enter(Tracee *tracee)
 		address = peek_reg(tracee, CURRENT, SYSARG_2);
 		size    = peek_reg(tracee, CURRENT, SYSARG_3);
 
-		status = translate_socketcall_enter(tracee, &address, size);
+		status = translate_socketcall_enter(tracee, &address, size,
+						    syscall_number == PR_bind);
 		if (status <= 0)
 			break;
 
@@ -3224,7 +3225,8 @@ int translate_syscall_enter(Tracee *tracee)
 		size      = PEEK_WORD(SYSARG_ADDR(3), 0);
 
 		sock_addr_saved = sock_addr;
-		status = translate_socketcall_enter(tracee, &sock_addr, size);
+		status = translate_socketcall_enter(tracee, &sock_addr, size,
+						    peek_reg(tracee, CURRENT, SYSARG_1) == SYS_BIND);
 		if (status <= 0)
 			break;
 

@@ -2,11 +2,14 @@ if [ ! -x ${ROOTFS}/bin/unix_socket ] || [ -z "$(which mcookie)" ] || [ -z "$(wh
     exit 125;
 fi
 
-# A translated socket path too long for sun_path is replaced with a
-# shorter one in the temporary directory of PRoot, which the guest path
-# gets bound to.  The comment said this alias was removed along with the
-# binding, but nothing removed it: each socket bound to such a path and
-# not removed by the program itself stayed there forever.
+# A translated socket path too long for sun_path is given to the kernel
+# through a symbolic link to its directory (test-5e7a398d), unless the
+# name of the socket is too long for this too, as here: the socket is
+# bound to a shorter path in the temporary directory of PRoot then,
+# which the guest path gets bound to.  The comment said this file was
+# removed along with the binding, but nothing removed it: each socket
+# bound to such a path and not removed by the program itself stayed
+# there forever.
 
 DIR=${TMPDIR:?}/$(mcookie)
 NAME=$(mcookie)$(mcookie)$(mcookie)

@@ -117,6 +117,217 @@ static int push_sockaddr_un(Tracee *tracee, struct sockaddr_un *sockaddr,
 }
 
 /**
+ * A symbolic link PRoot made in its temporary directory to a host path
+ * too long to fit the sun_path array, see shorten_socket_path().
+ */
+typedef struct SocketAlias {
+	char *path;   /* "<temporary directory>/proot-XXXXXX".  */
+	char *target; /* The host path it leads to.  */
+	struct SocketAlias *next;
+} SocketAlias;
+
+/* All the aliases made so far, the most recent first.  They live as
+ * long as PRoot does, as the sockets bound through them might do: the
+ * kernel reports the path a socket was bound to as it was given.  */
+static SocketAlias *socket_aliases = NULL;
+
+/**
+ * Return whether the alias @alias still leads to its target: anyone
+ * may have removed it, as the guest cleaning its "/tmp" up when it is
+ * the temporary directory of PRoot.
+ */
+static bool is_socket_alias_intact(const SocketAlias *alias)
+{
+	char target[PATH_MAX];
+	ssize_t length;
+
+	length = readlink(alias->path, target, sizeof(target));
+	return length >= 0
+		&& (size_t) length == strlen(alias->target)
+		&& memcmp(target, alias->target, length) == 0;
+}
+
+/**
+ * Remove the alias @alias, unless it was replaced with another file.
+ *
+ * Note: this is a talloc destructor.
+ */
+static int remove_socket_alias(SocketAlias *alias)
+{
+	if (is_socket_alias_intact(alias) && unlink(alias->path) < 0)
+		note(NULL, WARNING, SYSTEM, "can't remove '%s'", alias->path);
+
+	return 0;
+}
+
+/**
+ * Return the length of the path of the aliases (see get_socket_alias()).
+ */
+static size_t get_socket_alias_length()
+{
+	return strlen(get_temp_directory()) + strlen("/proot-XXXXXX");
+}
+
+/**
+ * Return the path of an alias of the host path @target, that is, a
+ * symbolic link to it, made unless there's one already.  This
+ * function returns NULL and sets errno if an error occurred.
+ */
+static const char *get_socket_alias(const char *target)
+{
+	SocketAlias *alias;
+	int saved_errno;
+	int status = -1;
+	int i;
+
+	/* Only the most recent alias of @target is worth a try.  */
+	for (alias = socket_aliases; alias != NULL; alias = alias->next) {
+		if (strcmp(alias->target, target) != 0)
+			continue;
+
+		if (is_socket_alias_intact(alias))
+			return alias->path;
+		break;
+	}
+
+	alias = talloc_zero(talloc_autofree_context(), SocketAlias);
+	if (alias == NULL)
+		goto no_memory;
+
+	alias->target = talloc_strdup(alias, target);
+	alias->path   = talloc_asprintf(alias, "%s/proot-XXXXXX", get_temp_directory());
+	if (alias->target == NULL || alias->path == NULL)
+		goto no_memory;
+
+	/* Like mkstemp(3), but for a symbolic link.  */
+	for (i = 0; i < 100; i++) {
+		strcpy(alias->path + strlen(alias->path) - strlen("XXXXXX"), "XXXXXX");
+		(void) mktemp(alias->path);
+		if (alias->path[0] == '\0') {
+			errno = EEXIST;
+			break;
+		}
+
+		status = symlink(target, alias->path);
+		if (status == 0 || errno != EEXIST)
+			break;
+	}
+
+	if (status < 0) {
+		saved_errno = errno;
+		note(NULL, WARNING, SYSTEM, "can't create a symbolic link in '%s'",
+			get_temp_directory());
+		talloc_free(alias);
+		errno = saved_errno;
+		return NULL;
+	}
+
+	talloc_set_destructor(alias, remove_socket_alias);
+
+	alias->next = socket_aliases;
+	socket_aliases = alias;
+
+	return alias->path;
+
+no_memory:
+	talloc_free(alias);
+	errno = ENOMEM;
+	return NULL;
+}
+
+/**
+ * Replace in @path the alias it starts with, if any, with the host
+ * path this latter leads to.  This function returns -errno if an
+ * error occurred, otherwise 0.
+ */
+static int expand_socket_alias(char path[PATH_MAX])
+{
+	char expanded_path[PATH_MAX];
+	const SocketAlias *alias;
+	size_t length;
+	int status;
+
+	for (alias = socket_aliases; alias != NULL; alias = alias->next) {
+		length = strlen(alias->path);
+		if (   strncmp(path, alias->path, length) != 0
+		    || (path[length] != '/' && path[length] != '\0'))
+			continue;
+
+		status = snprintf(expanded_path, sizeof(expanded_path), "%s%s",
+				alias->target, path + length);
+		if (status < 0 || (size_t) status >= sizeof(expanded_path))
+			return -ENAMETOOLONG;
+
+		strcpy(path, expanded_path);
+		return 0;
+	}
+
+	return 0;
+}
+
+/**
+ * Replace the host @path, too long to fit the sun_path array, with a
+ * shorter one that leads to the same place: the kernel resolves both
+ * the same way, the socket is where the guest expects it and nothing
+ * else changes for the guest.  This shorter path is made of an alias
+ * of the directory of the final component (see get_socket_alias())
+ * followed by this component, or, if this doesn't fit sun_path either,
+ * of an alias of @path itself, provided the kernel follows this final
+ * symbolic link, as stated by @follow_final.  Unlike the guest, PRoot
+ * leaves room for the terminating null byte: the kernel reports the
+ * address of a socket bound to a path that fills sun_path as longer
+ * than struct sockaddr_un, which translate_socketcall_exit() leaves
+ * as is.  This function returns -errno if an error occurred, 0 if
+ * @path was left as is because it can't be shortened, otherwise 1.
+ */
+static int shorten_socket_path(char path[PATH_MAX], bool follow_final)
+{
+	const size_t alias_length = get_socket_alias_length();
+	char directory[PATH_MAX];
+	const char *alias;
+	size_t final;
+	size_t length;
+	int status;
+
+	/* The final component starts at path[final], it goes along
+	 * with its trailing "/", if any.  */
+	length = strlen(path);
+	final  = length;
+	while (final > 0 && path[final - 1] == '/')
+		final--;
+	while (final > 0 && path[final - 1] != '/')
+		final--;
+
+	if (final > 0 && alias_length + 1 + strlen(path + final) < sizeof_path) {
+		/* path[final - 1] is the "/" before the final
+		 * component, the one of "/" itself is kept.  */
+		memcpy(directory, path, final);
+		directory[final > 1 ? final - 1 : 1] = '\0';
+
+		alias = get_socket_alias(directory);
+		if (alias == NULL)
+			return -errno;
+
+		memmove(path + alias_length + 1, path + final, strlen(path + final) + 1);
+		memcpy(path, alias, alias_length);
+		path[alias_length] = '/';
+		return 1;
+	}
+
+	if (!follow_final || alias_length >= sizeof_path)
+		return 0;
+
+	alias = get_socket_alias(path);
+	if (alias == NULL)
+		return -errno;
+
+	status = snprintf(path, PATH_MAX, "%s", alias);
+	assert(status >= 0 && (size_t) status == alias_length);
+
+	return 1;
+}
+
+/**
  * Remove the socket that lies at the shorter host @path, if any.  A
  * file of another type was put there by the tracees through the
  * binding, it is theirs.
@@ -141,13 +352,14 @@ static int remove_shorter_host_path(char *path)
 
 /**
  * Translate the pathname of the struct sockaddr_un currently stored
- * in the @tracee memory at the given @address.  See the documentation
- * of read_sockaddr_un() for the meaning of the @size parameter.
- * Also, the new address of the translated sockaddr_un is put in the
+ * in the @tracee memory at the given @address, for bind(2) if
+ * @is_bind, otherwise for connect(2).  See the documentation of
+ * read_sockaddr_un() for the meaning of the @size parameter.  Also,
+ * the new address of the translated sockaddr_un is put in the
  * @address parameter.  This function returns -errno if an error
  * occurred, 0 if there was nothing to translate, otherwise 1.
  */
-int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
+int translate_socketcall_enter(Tracee *tracee, word_t *address, int size, bool is_bind)
 {
 	struct sockaddr_un sockaddr;
 	char user_path[PATH_MAX];
@@ -167,15 +379,28 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
 
 	/* Be careful: sun_path doesn't have to be null-terminated.  */
 	if (strlen(host_path) > sizeof_path) {
+		status = shorten_socket_path(host_path, !is_bind);
+		if (status < 0)
+			return status;
+		if (status == 0 && !is_bind)
+			return -EINVAL;
+	}
+
+	/* Only bind(2) gets there, when the final component is too
+	 * long for an alias of its directory: the kernel would make the
+	 * socket at the alias itself, not where it leads.  */
+	if (strlen(host_path) > sizeof_path) {
 		char *shorter_host_path;
 		Binding *binding;
 
-		/* The translated path is too long to fit the sun_path
-		 * array, so let's bind it to a shorter path.  The socket
-		 * bound there, if any, is removed when PRoot exits rather
-		 * than with this binding: the copies of the bindings made
-		 * for a child that asked for a mount name-space of its
-		 * own still lead there.  */
+		/* So let's bind the guest path to a shorter path, where
+		 * the socket is made instead.  Unlike an alias, this
+		 * binding stands for this guest path in all cases: it is
+		 * not removed along with the socket.  The socket bound
+		 * there, if any, is removed when PRoot exits rather than
+		 * with this binding: the copies of the bindings made for
+		 * a child that asked for a mount name-space of its own
+		 * still lead there.  */
 		shorter_host_path = create_temp_name(NULL, "proot");
 		if (shorter_host_path == NULL)
 			return -EINVAL;
@@ -217,19 +442,10 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
  * in the @tracee memory at the given @address (@size bytes long), the
  * destination of a message sent by sendto(2), sendmsg(2) or
  * sendmmsg(2).  It is translated like the address connect(2) is
- * given, except:
- *
- *   - when nothing exists at this absolute path in the guest
- *     namespace, the address is left as is.  Addresses the kernel
- *     reports, like the source of a datagram given by recvfrom(2),
- *     name host paths: a reply sent to one of them has to reach it.
- *
- *   - a translated path too long to fit the sun_path array is
- *     refused with -ENAMETOOLONG, or with -ENOENT when nothing exists
- *     there: unlike bind(2), the socket has to exist already, so it
- *     can't be bound to a shorter path.  A socket bound by the
- *     tracees to such a path is found through the binding created by
- *     bind(2) instead.
+ * given, except when nothing exists at this absolute path in the guest
+ * namespace: the address is left as is then.  Addresses the kernel
+ * reports, like the source of a datagram given by recvfrom(2), name
+ * host paths: a reply sent to one of them has to reach it.
  *
  * The new address of the translated sockaddr_un is put in the
  * @address parameter.  This function returns -errno if an error
@@ -255,10 +471,11 @@ int translate_send_address(Tracee *tracee, word_t *address, int size)
 
 	/* Only an absolute path can be a host path the kernel reported:
 	 * bind(2) gives it the absolute host path of the sockets the
-	 * tracees bind.  A relative path is always resolved against the
-	 * guest working directory, the kernel tells whether something
-	 * exists there unless the translated path is too long for it.  */
-	if (status == 0 && (user_path[0] == '/' || strlen(host_path) > sizeof_path)) {
+	 * tracees bind, possibly through an alias (see
+	 * shorten_socket_path()).  A relative path is always resolved
+	 * against the guest working directory, the kernel tells whether
+	 * something exists there.  */
+	if (status == 0 && user_path[0] == '/') {
 		saved_errno = errno;
 		if (lstat(host_path, &statl) < 0 && (errno == ENOENT || errno == ENOTDIR))
 			status = -errno;
@@ -272,8 +489,13 @@ int translate_send_address(Tracee *tracee, word_t *address, int size)
 		return status;
 
 	/* Be careful: sun_path doesn't have to be null-terminated.  */
-	if (strlen(host_path) > sizeof_path)
-		return -ENAMETOOLONG;
+	if (strlen(host_path) > sizeof_path) {
+		status = shorten_socket_path(host_path, true);
+		if (status < 0)
+			return status;
+		if (status == 0)
+			return -ENAMETOOLONG;
+	}
 
 	return push_sockaddr_un(tracee, &sockaddr, host_path, address);
 }
@@ -589,6 +811,12 @@ int translate_socketcall_exit(Tracee *tracee, word_t sock_addr, word_t size_addr
 	max_size = MIN(max_size, sizeof(sockaddr));
 	status = read_sockaddr_un(tracee, &sockaddr, max_size, path, sock_addr, size);
 	if (status <= 0)
+		return status;
+
+	/* The socket was bound through an alias, see
+	 * shorten_socket_path().  */
+	status = expand_socket_alias(path);
+	if (status < 0)
 		return status;
 
 	status = detranslate_path(tracee, path, NULL);
