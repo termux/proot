@@ -222,6 +222,12 @@ typedef struct tracee {
 	bool restore_original_regs;
 	bool restore_original_regs_after_seccomp_event;
 
+	/* True when the event loop already fetched the current
+	 * registers during this very stop, for translate_syscall()
+	 * not to fetch them again.  Reset whenever the tracee is
+	 * restarted.  */
+	bool regs_fetched_at_stop;
+
 	/* True when the fork-like syscall which created the child
 	 * being registered is one PRoot runs in place of another, that
 	 * the outer seccomp policy rejected: fork(2) is run as clone(2)

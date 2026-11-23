@@ -144,9 +144,12 @@ void translate_syscall(Tracee *tracee)
 
 	assert(tracee->exe != NULL);
 
-	status = fetch_regs(tracee);
-	if (status < 0)
-		return;
+	if (!tracee->regs_fetched_at_stop) {
+		status = fetch_regs(tracee);
+		if (status < 0)
+			return;
+	}
+	tracee->regs_fetched_at_stop = false;
 
 	int suppressed_syscall_status = 0;
 

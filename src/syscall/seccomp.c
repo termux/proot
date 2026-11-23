@@ -536,36 +536,52 @@ int enable_syscall_filtering(const Tracee *tracee)
 	return 0;
 }
 
+/* The flags the filter of enable_syscall_filtering() associates with
+ * each syscall, see remember_filtered_sysnums().  */
+static word_t filtered_flags[PR_NB_SYSNUM];
+
 /**
- * Return the flags the filter of enable_syscall_filtering() associates
- * with @sysnum for @tracee, ie. the data PTRACE_EVENT_SECCOMP stops of
- * that syscall report: the filter was built from the very same lists.
+ * Remember the flags the filter of enable_syscall_filtering() is
+ * going to associate with each syscall, as it is built from the lists
+ * of PRoot and of the extensions of @tracee.  This must be called by
+ * the tracer before it creates @tracee, the tracee that installs this
+ * filter for itself and all its future children: none of these
+ * children keep the lists of their extensions.
  */
-int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum)
+void remember_filtered_sysnums(const Tracee *tracee)
 {
 	Extension *extension;
-	int flags = 0;
 	size_t i;
 
-	for (i = 0; proot_sysnums[i].value != PR_void; i++) {
-		if (proot_sysnums[i].value == sysnum)
-			flags |= proot_sysnums[i].flags;
-	}
+	memset(filtered_flags, 0, sizeof(filtered_flags));
+
+	for (i = 0; proot_sysnums[i].value != PR_void; i++)
+		filtered_flags[proot_sysnums[i].value] |= proot_sysnums[i].flags;
 
 	if (tracee->extensions == NULL)
-		return flags;
+		return;
 
 	LIST_FOREACH(extension, tracee->extensions, link) {
 		if (extension->filtered_sysnums == NULL)
 			continue;
 
-		for (i = 0; extension->filtered_sysnums[i].value != PR_void; i++) {
-			if (extension->filtered_sysnums[i].value == sysnum)
-				flags |= extension->filtered_sysnums[i].flags;
-		}
+		for (i = 0; extension->filtered_sysnums[i].value != PR_void; i++)
+			filtered_flags[extension->filtered_sysnums[i].value] |=
+				extension->filtered_sysnums[i].flags;
 	}
+}
 
-	return flags;
+/**
+ * Return the flags the filter of enable_syscall_filtering() associates
+ * with @sysnum, ie. the data PTRACE_EVENT_SECCOMP stops of that
+ * syscall report, see remember_filtered_sysnums().
+ */
+int filtered_sysnum_flags(Sysnum sysnum)
+{
+	if ((unsigned int) sysnum >= PR_NB_SYSNUM)
+		return 0;
+
+	return filtered_flags[sysnum];
 }
 
 #else
@@ -579,7 +595,11 @@ int enable_syscall_filtering(const Tracee *tracee UNUSED)
 	return 0;
 }
 
-int filtered_sysnum_flags(const Tracee *tracee UNUSED, Sysnum sysnum UNUSED)
+void remember_filtered_sysnums(const Tracee *tracee UNUSED)
+{
+}
+
+int filtered_sysnum_flags(Sysnum sysnum UNUSED)
 {
 	return 0;
 }
