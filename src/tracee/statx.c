@@ -11,6 +11,15 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 	struct stat stat_buf = {};
 	bool do_fstat = false;
 
+	/* When the kernel performed this statx() successfully, the
+	 * host path it looked at is the one the enter stage put in
+	 * place of the guest path: read it back rather than translating
+	 * the guest path once again.  Otherwise statx() is emulated
+	 * below, which requires a fresh translation: permissions that
+	 * fake_id0 overrode during the enter stage are restored by
+	 * now.  */
+	bool kernel_succeeded = !from_sigsys && peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0;
+
 	/* Read arguments and translate path */
 	word_t flags = peek_reg(tracee, regVersion, SYSARG_3);
 	bool do_lstat = ((flags & AT_SYMLINK_NOFOLLOW) != 0);
@@ -31,7 +40,10 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 		/* The empty path names the cwd, which is emulated: the
 		 * guest one, not the tracee's actual cwd on the host.  */
 		if ((int) dirfd == AT_FDCWD) {
-			status = translate_path(tracee, state.host_path, AT_FDCWD, ".", !do_lstat);
+			if (kernel_succeeded)
+				status = read_path(tracee, state.host_path, peek_reg(tracee, MODIFIED, SYSARG_2));
+			else
+				status = translate_path(tracee, state.host_path, AT_FDCWD, ".", !do_lstat);
 		} else {
 			status = readlink_proc_pid_fd(tracee->pid, dirfd, state.host_path);
 			do_fstat = true;
@@ -40,13 +52,16 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 		if (status >= PATH_MAX) {
 			return -ENAMETOOLONG;
 		}
-		status = translate_path(tracee, state.host_path, dirfd, guest_path, !do_lstat);
+		if (kernel_succeeded)
+			status = read_path(tracee, state.host_path, peek_reg(tracee, MODIFIED, SYSARG_2));
+		else
+			status = translate_path(tracee, state.host_path, dirfd, guest_path, !do_lstat);
 	}
 	if (status < 0) {
 		return status;
 	}
 
-	if (from_sigsys || peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0) {
+	if (!kernel_succeeded) {
 		/* Call [l]stat() on translated path */
 		if (do_fstat) {
 			char link[32] = {}; /* 32 > sizeof("/proc//cwd") + sizeof(#ULONG_MAX) */
