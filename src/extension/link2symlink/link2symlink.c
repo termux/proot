@@ -450,9 +450,40 @@ static int read_faked_hard_link(const char link[PATH_MAX], char intermediate[PAT
 }
 
 /**
+ * Tell whether @link -- a host path -- is the intermediate that points
+ * to @final, a file this extension has moved into the l2s directory,
+ * that is, whether they are named "<PREFIX><name><NNNN>" and
+ * "<PREFIX><name><NNNN>.<count>" -- c.f. get_link_count().
+ */
+static bool is_intermediate_of(const char *link, const char *final)
+{
+	const char *link_name;
+	const char *final_name;
+	size_t length;
+
+	link_name = strrchr(link, '/');
+	final_name = strrchr(final, '/');
+	if (link_name == NULL || final_name == NULL)
+		return false;
+	link_name++;
+	final_name++;
+
+	length = strlen(link_name);
+	return (strncmp(link_name, PREFIX, strlen(PREFIX)) == 0
+		&& strncmp(final_name, link_name, length) == 0
+		&& final_name[length] == '.'
+		&& is_l2s_file(final));
+}
+
+/**
  * Copy in @final the path of the file the faked hard link @link -- a
- * host path -- refers to.  This function returns -errno if @link is
- * not a faked hard link or if it is a broken one, otherwise 0.
+ * host path -- refers to.  An intermediate is resolved the same way:
+ * the tracee reaches one only by listing its directory, it is one more
+ * name of that file to the tracee, as it is to the stat(2) family --
+ * c.f. handle_sysexit_end().  As the symbolic link it is, programs
+ * that walk directories -- tar(1) -- failed to open(2) it with
+ * O_NOFOLLOW.  This function returns -errno if @link is neither a faked
+ * hard link nor an intermediate, or if it is a broken one, otherwise 0.
  */
 static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX])
 {
@@ -463,7 +494,12 @@ static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MA
 	if (status < 0)
 		return status;
 
-	return my_readlink(intermediate, final);
+	status = my_readlink(intermediate, final);
+	if (status != -EINVAL || !is_intermediate_of(link, intermediate))
+		return status;
+
+	strcpy(final, intermediate);
+	return 0;
 }
 
 /**
@@ -1239,9 +1275,7 @@ static int get_faked_hard_link_type(const char path[PATH_MAX])
  * a symbolic link where lstat(2) sees a regular file, then skip it or
  * trip over the contradiction.
  *
- * Intermediates are left alone: they are symbolic links to statx(2),
- * hence to most recent programs, even though the stat(2) family reports
- * them as the file they point to, c.f. handle_sysexit_end().
+ * The same goes for intermediates, c.f. resolve_faked_hard_link().
  *
  * This syscall is never failed: an entry that can't be checked is left
  * as the kernel reported it.
