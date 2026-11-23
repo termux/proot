@@ -97,12 +97,15 @@ end:
 int iterate_program_headers(const Tracee *tracee, int fd, const ElfHeader *elf_header,
 			program_headers_iterator_t callback, void *data)
 {
+	/* Most ELF files have far fewer program headers.  */
+	uint8_t buffer[16 * sizeof(ProgramHeader)];
 	ProgramHeader program_header;
 
 	uint64_t elf_phoff;
 	uint16_t elf_phentsize;
 	uint16_t elf_phnum;
 
+	ssize_t size;
 	int status;
 	int i;
 
@@ -126,18 +129,35 @@ int iterate_program_headers(const Tracee *tracee, int fd, const ElfHeader *elf_h
 		return -ENOTSUP;
 	}
 
-	status = (int) lseek(fd, elf_phoff, SEEK_SET);
-	if (status < 0)
-		return -errno;
+	/* Read the program headers by batches, rather than one by
+	 * one.  */
+	for (i = 0; i < elf_phnum; ) {
+		int nb_wanted = elf_phnum - i;
+		int nb_read;
+		int j;
 
-	for (i = 0; i < elf_phnum; i++) {
-		status = read(fd, &program_header, elf_phentsize);
-		if (status != elf_phentsize)
-			return (status < 0 ? -errno : -ENOTSUP);
+		if (nb_wanted > (int) (sizeof(buffer) / elf_phentsize))
+			nb_wanted = sizeof(buffer) / elf_phentsize;
 
-		status = callback(elf_header, &program_header, data);
-		if (status != 0)
-			return status;
+		size = pread(fd, buffer, nb_wanted * elf_phentsize,
+			     elf_phoff + (uint64_t) i * elf_phentsize);
+		if (size < 0)
+			return -errno;
+
+		/* Only complete headers can be used, the file is
+		 * truncated otherwise.  */
+		nb_read = size / elf_phentsize;
+
+		for (j = 0; j < nb_read; i++, j++) {
+			memcpy(&program_header, &buffer[j * elf_phentsize], elf_phentsize);
+
+			status = callback(elf_header, &program_header, data);
+			if (status != 0)
+				return status;
+		}
+
+		if (nb_read < nb_wanted)
+			return -ENOTSUP;
 	}
 
 	return 0;
