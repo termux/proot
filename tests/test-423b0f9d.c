@@ -18,6 +18,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <limits.h>
 #include <sched.h>
 #include <stdint.h>
@@ -393,6 +394,30 @@ static void sandbox(void)
 	CHECK(contains(-1, at("y"), "y"));
 }
 
+/* Remove the file @path, or the directory once its content is.  */
+static int remove_entry(const char *path, const struct stat *statl, int type, struct FTW *ftw)
+{
+	(void) statl;
+	(void) ftw;
+
+	CHECK((type == FTW_DP ? rmdir(path) : unlink(path)) == 0);
+	return 0;
+}
+
+/* Remove the base directory, once the mounts made below are undone:
+ * removing the files through them would remove these files twice and
+ * leave the mount points.  The sandbox made its own mounts in a mount
+ * name-space of its own.  */
+static void clean_up(void)
+{
+	CHECK(umount2(at("b/file"), MNT_DETACH) == 0);
+	CHECK(umount2(at("b/d"), MNT_DETACH) == 0);
+	CHECK(umount2(at("b"), MNT_DETACH) == 0);
+	CHECK(umount2(at("a"), MNT_DETACH) == 0);
+
+	CHECK(nftw(base, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -430,6 +455,8 @@ int main(void)
 	/* The sandbox has a mount name-space of its own.  */
 	CHECK(contains(-1, at("x/hidden"), "hidden"));
 	CHECK(access(at("x/file"), F_OK) < 0);
+
+	clean_up();
 
 	exit(failed ? EXIT_FAILURE : EXIT_SUCCESS);
 }
