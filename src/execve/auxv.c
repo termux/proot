@@ -27,6 +27,9 @@
 #include <sys/types.h>     /* open(2), */
 #include <sys/stat.h>      /* open(2), */
 #include <fcntl.h>         /* open(2), */
+#include <stdint.h>        /* uint*_t, */
+#include <string.h>        /* memcpy(3), */
+#include <sys/uio.h>       /* process_vm_readv(2), struct iovec, */
 
 #include "execve/auxv.h"
 #include "syscall/sysnum.h"
@@ -35,6 +38,7 @@
 #include "tracee/reg.h"
 #include "tracee/abi.h"
 #include "arch.h"
+#include "build.h"         /* HAVE_PROCESS_VM, */
 
 
 /**
@@ -70,17 +74,109 @@ int add_elf_aux_vector(ElfAuxVector **vectors, word_t type, word_t value)
 	return 0;
 }
 
+/* The words of the initial stack -- argc, argv[], envp[], auxv[] --
+ * are loaded by chunks, which spares a process_vm_readv(2) per word.
+ * A chunk never spans a CHUNK_SIZE boundary, hence never two pages:
+ * the stack ends with the strings these arrays point to, a read that
+ * went beyond its last page would fail.  */
+#define CHUNK_SIZE 1024
+
+typedef struct {
+	const Tracee *tracee;
+	word_t address; /* Address of the loaded chunk in the tracee.  */
+	size_t size;    /* Size of the loaded chunk, 0 if none.  */
+	uint8_t data[CHUNK_SIZE];
+} WordCache;
+
+/**
+ * Load in @cache the chunk of the memory of @cache->tracee that starts
+ * at the given @address.  This function returns -1 if it couldn't be
+ * loaded at once, otherwise 0.
+ */
+static int load_chunk(WordCache *cache, word_t address)
+{
+#if defined(HAVE_PROCESS_VM)
+	size_t size = CHUNK_SIZE - address % CHUNK_SIZE;
+	struct iovec local;
+	struct iovec remote;
+	ssize_t status;
+
+	local.iov_base = cache->data;
+	local.iov_len  = size;
+
+	remote.iov_base = (void *) address;
+	remote.iov_len  = size;
+
+	status = process_vm_readv(cache->tracee->pid, &local, 1, &remote, 1, 0);
+	if (status == (ssize_t) size) {
+		cache->address = address;
+		cache->size    = size;
+		return 0;
+	}
+#else
+	(void) address;
+#endif
+
+	cache->size = 0;
+	return -1;
+}
+
+/**
+ * Put in @value the word at the given @address in the memory of
+ * @cache->tracee, loading the chunk it lies in unless @cache already
+ * holds it.  This function returns -errno if an error occurred,
+ * otherwise 0.
+ */
+static int read_word(WordCache *cache, word_t address, word_t *value)
+{
+	const size_t word_size = sizeof_word(cache->tracee);
+	size_t offset;
+
+	if (   cache->size == 0
+	    || address < cache->address
+	    || address - cache->address > cache->size - word_size) {
+		/* Read this word alone when its chunk can't be loaded,
+		 * as before chunks were used: process_vm_readv(2) may
+		 * be missing, or a misaligned word may span a chunk
+		 * boundary.  This fails silently, the callers report
+		 * nothing either.  */
+		if (load_chunk(cache, address) < 0 || cache->size < word_size) {
+			cache->size = 0;
+			errno = 0;
+			*value = peek_word(cache->tracee, address);
+			return (errno != 0 ? -errno : 0);
+		}
+	}
+
+	offset = address - cache->address;
+	if (word_size == sizeof(uint32_t)) {
+		uint32_t value32;
+
+		memcpy(&value32, &cache->data[offset], sizeof(value32));
+		*value = value32;
+	}
+	else
+		memcpy(value, &cache->data[offset], sizeof(*value));
+
+	return 0;
+}
+
 /**
  * Get the address of the the ELF auxiliary vectors table for the
  * given @tracee.  This function returns 0 if an error occurred.
  */
 word_t get_elf_aux_vectors_address(const Tracee *tracee)
 {
+	WordCache cache;
 	word_t address;
 	word_t data;
+	int status;
 
 	/* Sanity check: this works only in execve sysexit.  */
 	assert(IS_IN_SYSEXIT2(tracee, PR_execve));
+
+	cache.tracee = tracee;
+	cache.size   = 0;
 
 	/* Right after execve, the stack layout is:
 	 *
@@ -89,8 +185,8 @@ word_t get_elf_aux_vectors_address(const Tracee *tracee)
 	address = peek_reg(tracee, CURRENT, STACK_POINTER);
 
 	/* Read: argc */
-	data = peek_word(tracee, address);
-	if (errno != 0)
+	status = read_word(&cache, address, &data);
+	if (status < 0)
 		return 0;
 
 	/* Skip: argc, argv, 0 */
@@ -98,8 +194,8 @@ word_t get_elf_aux_vectors_address(const Tracee *tracee)
 
 	/* Skip: envp, 0 */
 	do {
-		data = peek_word(tracee, address);
-		if (errno != 0)
+		status = read_word(&cache, address, &data);
+		if (status < 0)
 			return 0;
 		address += sizeof_word(tracee);
 	} while (data != 0);
@@ -118,7 +214,11 @@ ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 {
 	ElfAuxVector *vectors = NULL;
 	ElfAuxVector vector;
+	WordCache cache;
 	int status;
+
+	cache.tracee = tracee;
+	cache.size   = 0;
 
 	/* It is assumed the sentinel always exists.  */
 	vectors = talloc_array(tracee->ctx, ElfAuxVector, 1);
@@ -128,16 +228,16 @@ ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 	vectors[0].value = 0;
 
 	while (1) {
-		vector.type = peek_word(tracee, address);
-		if (errno != 0)
+		status = read_word(&cache, address, &vector.type);
+		if (status < 0)
 			return NULL;
 		address += sizeof_word(tracee);
 
 		if (vector.type == AT_NULL)
 			break; /* Already added.  */
 
-		vector.value = peek_word(tracee, address);
-		if (errno != 0)
+		status = read_word(&cache, address, &vector.value);
+		if (status < 0)
 			return NULL;
 		address += sizeof_word(tracee);
 
@@ -150,35 +250,49 @@ ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 }
 
 /**
- * Push ELF auxiliary @vectors to the given @address in @tracee's
- * memory.  This function returns -errno if an error occurred,
- * otherwise 0.
+ * Store @value as the @index-th word of @data, an array of words of
+ * the @tracee's ABI.
  */
-int push_elf_aux_vectors(const Tracee* tracee, ElfAuxVector *vectors, word_t address)
+static void store_word(const Tracee *tracee, uint8_t *data, size_t index, word_t value)
 {
+	const size_t word_size = sizeof_word(tracee);
+
+	if (word_size == sizeof(uint32_t)) {
+		uint32_t value32 = value;
+
+		memcpy(&data[index * word_size], &value32, sizeof(value32));
+	}
+	else
+		memcpy(&data[index * word_size], &value, sizeof(value));
+}
+
+/**
+ * Push ELF auxiliary @vectors to the given @address in @tracee's
+ * memory, all at once.  This function returns -errno if an error
+ * occurred, otherwise 0.
+ */
+int push_elf_aux_vectors(Tracee *tracee, ElfAuxVector *vectors, word_t address)
+{
+	const size_t word_size = sizeof_word(tracee);
+	size_t nb_vectors;
+	uint8_t *data;
 	size_t i;
 
-	for (i = 0; vectors[i].type != AT_NULL; i++) {
-		poke_word(tracee, address, vectors[i].type);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+	/* Count the vectors, including the sentinel.  */
+	for (nb_vectors = 1; vectors[nb_vectors - 1].type != AT_NULL; nb_vectors++)
+		;
 
-		poke_word(tracee, address, vectors[i].value);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+	data = talloc_size(tracee->ctx, 2 * nb_vectors * word_size);
+	if (data == NULL)
+		return -ENOMEM;
+
+	for (i = 0; i < nb_vectors - 1; i++) {
+		store_word(tracee, data, 2 * i, vectors[i].type);
+		store_word(tracee, data, 2 * i + 1, vectors[i].value);
 	}
 
-	poke_word(tracee, address, AT_NULL);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
+	store_word(tracee, data, 2 * i, AT_NULL);
+	store_word(tracee, data, 2 * i + 1, 0);
 
-	poke_word(tracee, address, 0);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
-
-	return 0;
+	return write_data(tracee, address, data, 2 * nb_vectors * word_size);
 }
