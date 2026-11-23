@@ -11,6 +11,23 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 	struct stat stat_buf = {};
 	bool do_fstat = false;
 
+	/* The kernel's answer stands, unless statx() itself is missing:
+	 * ENOSYS before Linux 4.11, or EPERM when a seccomp policy
+	 * denies it (container runtimes, systemd), as Rust's standard
+	 * library assumes too -- PRoot gets to see this latter only when
+	 * it runs without seccomp, otherwise the policy outranks the
+	 * filter of PRoot.  Then it is emulated with [l]stat() below.
+	 * Any other error is about the path or the arguments: [l]stat()
+	 * would only report ENOENT once again -- after the cost of a
+	 * second path translation -- and it would turn EINVAL for
+	 * unknown flags or mask bits into a made-up success.  */
+	if (!from_sigsys) {
+		int result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+
+		if (result < 0 && result != -ENOSYS && result != -EPERM)
+			return result;
+	}
+
 	/* When the kernel performed this statx() successfully, the
 	 * host path it looked at is the one the enter stage put in
 	 * place of the guest path: read it back rather than translating
