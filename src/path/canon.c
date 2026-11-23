@@ -136,6 +136,7 @@ static inline Finality next_component(char component[NAME_MAX], const char **cur
 static inline int substitute_binding_stat(Tracee *tracee, Finality finality, unsigned int recursion_level,
 					const char guest_path[PATH_MAX], char host_path[PATH_MAX])
 {
+	HostPathAccess access;
 	struct stat statl;
 	int status;
 
@@ -144,19 +145,15 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	if (status < 0)
 		return status;
 
-	/* Don't notify extensions during the initialization of a binding.  */
-	if (tracee->glue_type == 0) {
-		status = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path,
-					IS_FINAL(finality) && recursion_level == 0);
-		if (status < 0)
-			return status;
-	}
-
 	statl.st_mode = 0;
+	access.lstat = NULL;
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
 		status = -ENOENT;
 	} else {
 		status = lstat(host_path, &statl);
+		if (status == 0)
+			access.lstat = &statl;
+
 		/* /linkerconfig directory is present and accessible on Android,
 		 * but cannot be stat()'d, use hardcoded stat if access was denied
 		 *
@@ -166,6 +163,21 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 			status = 0;
 			statl.st_mode = S_IFDIR;
 		}
+	}
+
+	/* Don't notify extensions during the initialization of a
+	 * binding.  They are notified after lstat(2) so that they can
+	 * reuse its result: it doesn't depend on the permissions of
+	 * this host path, only on the ones of its parent directories,
+	 * which were already notified.  */
+	if (tracee->glue_type == 0) {
+		int status2;
+
+		access.is_final = IS_FINAL(finality) && recursion_level == 0;
+		status2 = notify_extensions(tracee, HOST_PATH, (intptr_t) host_path,
+					(intptr_t) &access);
+		if (status2 < 0)
+			return status2;
 	}
 
 	/* Build the glue between the hostfs and the guestfs during

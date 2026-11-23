@@ -25,6 +25,8 @@
 
 #include <sys/queue.h> /* LIST_, */
 #include <stdint.h>    /* intptr_t, */
+#include <stdbool.h>   /* bool, */
+#include <sys/stat.h>  /* struct stat, */
 
 #include "tracee/tracee.h"
 #include "syscall/seccomp.h"
@@ -41,8 +43,9 @@ typedef enum {
 
 	/* A canonicalized host path is being accessed during the
 	 * translation of a guest path: "(char *) data1" is the
-	 * canonicalized host path and "(bool) data2" is true if it is
-	 * the last iteration.  Note that several host paths are accessed
+	 * canonicalized host path and "(const HostPathAccess *) data2"
+	 * tells whether it is the last iteration and what lstat(2)
+	 * reported for it.  Note that several host paths are accessed
 	 * for a given guest path since PRoot has to walk along all
 	 * parent directories and symlinks in order to translate it.
 	 * If the extension returns < 0, then PRoot reports this errno
@@ -176,6 +179,16 @@ typedef enum {
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)
+
+/* Data of the HOST_PATH event.  */
+typedef struct {
+	/* Whether this host path is the last one of the translation.  */
+	bool is_final;
+
+	/* What lstat(2) reported for this host path, or NULL if it
+	 * failed or wasn't called.  */
+	const struct stat *lstat;
+} HostPathAccess;
 
 struct extension;
 typedef int (*extension_callback_t)(struct extension *extension, ExtensionEvent event,

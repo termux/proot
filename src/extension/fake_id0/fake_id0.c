@@ -48,7 +48,6 @@
 #include "tracee/mem.h"
 #include "execve/auxv.h"
 #include "path/binding.h"
-#include "path/f2fs-bug.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -426,22 +425,30 @@ static int restore_mode(ModifiedNode *node)
  * Force permissions of @path to "rwx" during the path translation of
  * current @tracee's syscall, in order to simulate CAP_DAC_OVERRIDE.
  * The original permissions are restored through talloc destructors.
- * See canonicalize() for the meaning of @is_final.
+ * See HostPathAccess for the meaning of @access.
  */
-static void override_permissions(const Tracee *tracee, const char *path, bool is_final)
+static void override_permissions(const Tracee *tracee, const char *path,
+				const HostPathAccess *access)
 {
+	bool is_final = access->is_final;
 	ModifiedNode *node;
 	struct stat perms;
 	mode_t new_mode;
 	int status;
 
-	/* Get the meta-data */
-	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
+	/* Get the meta-data: stat(2) can't succeed where lstat(2)
+	 * failed -- or was skipped because of the f2fs bug -- and it
+	 * reports the same as lstat(2) for anything but a symlink.  */
+	if (access->lstat == NULL)
 		return;
 
-	status = stat(path, &perms);
-	if (status < 0)
-		return;
+	if (S_ISLNK(access->lstat->st_mode)) {
+		status = stat(path, &perms);
+		if (status < 0)
+			return;
+	}
+	else
+		perms = *access->lstat;
 
 	/* Copy the current permissions */
 	new_mode = perms.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
@@ -476,21 +483,18 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 			node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
 			break;
 
-		case PR_fchmodat2: {
-			struct stat link;
-
+		case PR_fchmodat2:
 			/* The mode of a symlink can't be changed: with
 			 * AT_SYMLINK_NOFOLLOW the syscall fails with EOPNOTSUPP
 			 * and leaves everything as is.  Don't hand the new mode
 			 * over to the target of the symlink, which is the file
 			 * stat(2) above looked at; restore its previous mode.  */
 			if ((peek_reg(tracee, ORIGINAL, SYSARG_4) & AT_SYMLINK_NOFOLLOW) != 0
-			    && lstat(path, &link) == 0 && S_ISLNK(link.st_mode))
+			    && S_ISLNK(access->lstat->st_mode))
 				node->mode = perms.st_mode;
 			else
 				node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
 			break;
-		}
 
 		/* For stat syscalls: don't touch the mode of the final component.  */
 		case PR_fstatat64:
@@ -1417,7 +1421,8 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		/* Force permissions if the tracee was supposed to
 		 * have the capability.  */
 		if (config->euid == 0) /* TODO: || HAS_CAP(DAC_OVERRIDE) */
-			override_permissions(tracee, (char*) data1, (bool) data2);
+			override_permissions(tracee, (char*) data1,
+					(const HostPathAccess *) data2);
 		return 0;
 	}
 
