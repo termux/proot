@@ -2023,52 +2023,6 @@ void record_netlink_socket(Tracee *tracee, int result)
 }
 
 /**
- * Read the @nb_args first arguments of the socketcall(2) of @tracee,
- * at @args_addr, into @args.  This function returns -errno if an error
- * occurred, otherwise 0.
- */
-static int peek_socketcall_args(Tracee *tracee, word_t args_addr, word_t *args,
-				size_t nb_args)
-{
-	size_t w = sizeof_word(tracee);
-	size_t i;
-
-	for (i = 0; i < nb_args; i++) {
-		args[i] = peek_word(tracee, args_addr + i * w);
-		if (errno != 0)
-			return -errno;
-	}
-
-	return 0;
-}
-
-/**
- * Make the socketcall(2) of @tracee use the @nb_args arguments @args,
- * pushed in its memory, instead of the array its caller passed, which
- * stays as it is.  This function returns -errno if an error occurred,
- * otherwise 0.
- */
-static int push_socketcall_args(Tracee *tracee, const word_t *args, size_t nb_args)
-{
-	size_t w = sizeof_word(tracee);
-	word_t address;
-	size_t i;
-
-	address = alloc_mem(tracee, nb_args * w);
-	if (address == 0)
-		return -EFAULT;
-
-	for (i = 0; i < nb_args; i++) {
-		poke_word(tracee, address + i * w, args[i]);
-		if (errno != 0)
-			return -errno;
-	}
-
-	poke_reg(tracee, SYSARG_2, address);
-	return 0;
-}
-
-/**
  * Emulate bind(2) or connect(2) on the fake @sock of @tracee, its
  * descriptor @fd, made through socketcall(2) if @socketcall.  The
  * netlink address means nothing to its substitute, so the syscall can

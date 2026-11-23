@@ -40,5 +40,7 @@ int translate_sendmsg_enter(Tracee *tracee, word_t *msghdr_addr);
 int translate_sendmmsg_enter(Tracee *tracee, word_t *vector_addr, word_t *vlen);
 int translate_sendmmsg_exit(Tracee *tracee, word_t vector_addr, word_t copy_addr, word_t count);
 int translate_socketcall_send_enter(Tracee *tracee, word_t call, word_t *args_addr);
+int peek_socketcall_args(const Tracee *tracee, word_t args_addr, word_t *args, size_t nb_args);
+int push_socketcall_args(Tracee *tracee, const word_t *args, size_t nb_args);
 
 #endif /* SOCKET_H */

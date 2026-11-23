@@ -35,8 +35,7 @@
 #include <stdlib.h>      /* strtol(3), */
 #include <linux/auxvec.h>/* AT_,  */
 #include <sys/socket.h>  /* cmsghdr, */
-#include <linux/net.h>   /* SYS_SENDMSG, */
-#include <linux/netlink.h> /* NETLINK_AUDIT, */
+#include <linux/net.h>   /* SYS_SOCKET, SYS_GETSOCKOPT, */
 
 #include "extension/extension.h"
 #include "syscall/syscall.h"
@@ -402,6 +401,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_setdomainname,	FILTER_SYSEXIT },
 	{ PR_sethostname,	FILTER_SYSEXIT },
 	{ PR_socket,		0 },
+	{ PR_socketcall,	0 },
 	{ PR_lsetxattr,		FILTER_SYSEXIT },
 	{ PR_fsetxattr,		FILTER_SYSEXIT },
 	{ PR_stat,		FILTER_SYSEXIT },
@@ -805,7 +805,13 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return handle_stat_enter_end(tracee, SYSARG_1);
 #endif
 	case PR_sendmsg:
+		return handle_sendmsg_enter_end(tracee, sysnum);
+
+	/* The socket syscalls of 32-bit x86 programs, see the cases of
+	 * the syscalls it stands for.  */
 	case PR_socketcall:
+		if (is_audit_socket(tracee) || is_peercred_getsockopt(tracee, NULL))
+			return request_sysexit(tracee);
 		return handle_sendmsg_enter_end(tracee, sysnum);
 
 	case PR_setuid:
@@ -961,14 +967,12 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return 0;
 
 	case PR_socket:
-		if (   peek_reg(tracee, ORIGINAL, SYSARG_1) == AF_NETLINK
-		    && peek_reg(tracee, ORIGINAL, SYSARG_3) == NETLINK_AUDIT)
+		if (is_audit_socket(tracee))
 			return request_sysexit(tracee);
 		return 0;
 
 	case PR_getsockopt:
-		if (   peek_reg(tracee, ORIGINAL, SYSARG_2) == SOL_SOCKET
-		    && peek_reg(tracee, ORIGINAL, SYSARG_3) == SO_PEERCRED)
+		if (is_peercred_getsockopt(tracee, NULL))
 			return request_sysexit(tracee);
 		return 0;
 
@@ -1202,6 +1206,16 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 
 	case PR_socket: 
 		return handle_socket_exit_end(tracee, config);
+
+	case PR_socketcall:
+		switch (peek_reg(tracee, ORIGINAL, SYSARG_1)) {
+		case SYS_SOCKET:
+			return handle_socket_exit_end(tracee, config);
+		case SYS_GETSOCKOPT:
+			return handle_getsockopt_exit_end(tracee);
+		default:
+			return 0;
+		}
 
 #ifndef USERLAND
 	case PR_fstatat64:

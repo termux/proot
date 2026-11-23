@@ -6,7 +6,7 @@
 #include "cli/note.h"
 #include "tracee/mem.h"
 #include "syscall/sysnum.h"
-#include "syscall/syscall.h"
+#include "syscall/socket.h"
 #include "extension/fake_id0/sendmsg.h"
 
 #define MAX_CONTROLLEN 1024
@@ -63,7 +63,7 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 {
 	/* Read sendmsg header.  */
 	int status;
-	unsigned long socketcall_args[3];
+	word_t socketcall_args[3];
 	struct msghdr msg = {};
 	bool is_socketcall = sysnum == PR_socketcall;
 
@@ -85,26 +85,11 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 	}
 	else
 	{
-		word_t call = peek_reg(tracee, CURRENT, SYSARG_1);
-
-		/* On i386 opening audit socket is done through socketcall()
-		 * See extension/fake_id0/socket.c
-		 * for non-socketcall handler.  */
-		if (call == SYS_SOCKET) {
-			status = read_data(tracee, socketcall_args, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(socketcall_args));
-			/* Emulate audit functionality not compiled into kernel
-			 * 		 * if tracee was supposed to have the capability.  */
-			if (
-			socketcall_args[0] == 16 /* AF_NETLINK */ &&
-			socketcall_args[2] == 9 /* NETLINK_AUDIT */)
-				return -EPROTONOSUPPORT;
-		}
-
 		/* Check if socketcall(2) is a sendmsg(2)  */
-		if (call != SYS_SENDMSG) return 0;
+		if (peek_reg(tracee, CURRENT, SYSARG_1) != SYS_SENDMSG) return 0;
 
-		/* Read socketcall args structure */
-		status = read_data(tracee, socketcall_args, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(socketcall_args));
+		/* Read socketcall args structure, words of the tracee.  */
+		status = peek_socketcall_args(tracee, peek_reg(tracee, CURRENT, SYSARG_2), socketcall_args, 3);
 		if (status < 0) return status;
 
 		/* Read sendmsg header */
@@ -119,7 +104,7 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 	{
 		bool did_modify = 0;
 
-		if (msg.msg_controllen > MAX_CONTROLLEN) {
+		if (msg_controllen > MAX_CONTROLLEN) {
 			VERBOSE(tracee, 1, "sendmsg() with msg_controllen=%zu, is_32on64_mode=%d, not doing fixup", msg_controllen, is_32on64_mode(tracee));
 			return 0;
 		}
@@ -196,7 +181,7 @@ int handle_sendmsg_enter_end(Tracee *tracee, word_t sysnum)
 			else
 			{
 				socketcall_args[1] = sendmsg_header_addr;
-				status = set_sysarg_data(tracee, socketcall_args, sizeof(socketcall_args), SYSARG_2);
+				status = push_socketcall_args(tracee, socketcall_args, 3);
 				if (status < 0) return status;
 			}
 		}
