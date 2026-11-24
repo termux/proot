@@ -29,9 +29,13 @@ fi
 
 # Only the helpers that work: on Termux, "gcc -m32" builds 32-bit
 # programs that crash or spin at startup.  They run under PRoot, the
-# seccomp policy of Android kills glibc ones otherwise.
+# seccomp policy of Android kills glibc ones otherwise.  A helper has
+# to print its report too: PRoot used to exit with the status of the
+# last tracee that exited, 0 after a crash once, as Android's crash
+# handler runs in children that exit first.
 runs() {
-    ${PROBE} ${PROOT} "$1" >/dev/null 2>&1
+    ${PROBE} ${PROOT} "$1" > "${DIR}/report" 2>/dev/null \
+    && grep -q '^uid=[0-9]* euid=' "${DIR}/report"
 }
 
 if ! gcc "${SCRIPT_DIR}/auxv_ids.c" -o "${NATIVE}" >/dev/null 2>&1 || ! runs "${NATIVE}"; then
