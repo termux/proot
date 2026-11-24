@@ -456,6 +456,7 @@ extern void terminate_tracee(Tracee *tracee);
 extern void free_terminated_tracees();
 extern int swap_config(Tracee *tracee1, Tracee *tracee2);
 extern void kill_all_tracees();
+extern bool were_all_tracees_killed();
 
 typedef LIST_HEAD(tracees, tracee) Tracees;
 extern Tracees *get_tracees_list_head();

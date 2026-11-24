@@ -1119,13 +1119,29 @@ int swap_config(Tracee *tracee1, Tracee *tracee2)
 	return 0;
 }
 
+/* Whether kill_all_tracees() was called.  It is called from a signal
+ * handler too.  */
+static volatile sig_atomic_t all_tracees_killed;
+
 /* Send the KILL signal to all tracees.  */
 void kill_all_tracees()
 {
 	Tracee *tracee;
 
+	all_tracees_killed = 1;
+
 	LIST_FOREACH(tracee, &tracees, link)
 		kill(tracee->pid, SIGKILL);
+}
+
+/**
+ * Tell whether PRoot sent the KILL signal to all tracees: once the
+ * tracee of --kill-on-exit terminated, or when PRoot itself received a
+ * fatal signal.
+ */
+bool were_all_tracees_killed()
+{
+	return all_tracees_killed != 0;
 }
 
 Tracees *get_tracees_list_head() {

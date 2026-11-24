@@ -508,6 +508,20 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		VERBOSE(tracee, (int) (tracee->vpid != 1),
 			"vpid %" PRIu64 ": terminated with signal %d",
 			tracee->vpid, WTERMSIG(tracee_status));
+
+		/* PRoot exits with the status of the last tracee that
+		 * exited, so the death of the program it was asked to
+		 * run -- the first tracee -- by a signal was left out:
+		 * PRoot exited with 0 after a crash, as Android's crash
+		 * handler runs in children that exit first, or with 255
+		 * when no tracee exited.  It is reported the way shells
+		 * do now, unless PRoot sent this signal itself, to every
+		 * tracee, when it received a fatal one.  The deaths of
+		 * the other tracees are left out still: "kill $!" of a
+		 * job doesn't make a shell script fail.  */
+		if (tracee->vpid == 1 && !were_all_tracees_killed())
+			last_exit_status = 128 + WTERMSIG(tracee_status);
+
 		terminate_tracee(tracee);
 	}
 	else if (WIFSTOPPED(tracee_status)) {
