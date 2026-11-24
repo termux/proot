@@ -54,11 +54,12 @@ typedef enum {
 
 	/* A symbolic link is being dereferenced during the translation
 	 * of a guest path: "(const char *) data1" is the host path of
-	 * this link and "(const char *) data2" is its content, as read
-	 * from the host.  Several links can be dereferenced for a given
-	 * guest path; extensions are notified in the order PRoot follows
-	 * them.  If the extension returns < 0, then PRoot reports this
-	 * errno as-is.  */
+	 * this link and "(char *) data2" is its content, as read from
+	 * the host -- PATH_MAX bytes the extension can substitute.
+	 * Several links can be dereferenced for a given guest path;
+	 * extensions are notified in the order PRoot follows them.  If
+	 * the extension returns < 0, then PRoot reports this errno
+	 * as-is.  */
 	SYMLINK_DEREFERENCED,
 
 	/* The canonicalization succeed: "(char *) data1" is the

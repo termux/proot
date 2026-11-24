@@ -455,31 +455,6 @@ static int rename_final(const char final[PATH_MAX], const char new_final[PATH_MA
 }
 
 /**
- * Copy in @intermediate the path of the intermediate the faked hard
- * link @link -- a host path -- points to.  This function returns
- * -errno if @link is not a faked hard link, otherwise 0.
- */
-static int read_faked_hard_link(const char link[PATH_MAX], char intermediate[PATH_MAX])
-{
-	const char *name;
-	int status;
-
-	status = my_readlink(link, intermediate);
-	if (status < 0)
-		return status;
-
-	name = strrchr(intermediate, '/');
-	if (name == NULL)
-		return -EINVAL;
-	name++;
-
-	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-		return -EINVAL;
-
-	return 0;
-}
-
-/**
  * Tell whether @link -- a host path -- is the intermediate that points
  * to @final, a file this extension has moved into the l2s directory,
  * that is, whether they are named "<PREFIX><name><NNNN>" and
@@ -506,6 +481,316 @@ static bool is_intermediate_of(const char *link, const char *final)
 }
 
 /**
+ * Tell whether the host paths @path1 and @path2 spell the same
+ * directory, c.f. in_same_directory().
+ */
+static bool have_same_directory_name(const char *path1, const char *path2)
+{
+	const char *slash1 = strrchr(path1, '/');
+	const char *slash2 = strrchr(path2, '/');
+
+	return (slash1 != NULL && slash2 != NULL
+		&& slash1 - path1 == slash2 - path2
+		&& strncmp(path1, path2, slash1 - path1) == 0);
+}
+
+/**
+ * Tell whether the host path @path names one of the final files the
+ * intermediate @intermediate may point to, c.f. get_link_count().
+ */
+static bool is_final_name_of(const char *path, const char *intermediate)
+{
+	size_t length = strlen(intermediate);
+
+	return (strncmp(path, intermediate, length) == 0
+		&& path[length] == '.'
+		&& get_link_count(path) >= 0);
+}
+
+/**
+ * Replace the symbolic link @path -- a host path -- with one that points
+ * to @target, all at once.  This function returns -errno if an error
+ * occured, otherwise 0.
+ */
+static int replace_symlink(const char path[PATH_MAX], const char target[PATH_MAX])
+{
+	char temporary[PATH_MAX];
+	const char *slash;
+	int status;
+	int i;
+
+	slash = strrchr(path, '/');
+	if (slash == NULL)
+		return -EINVAL;
+
+	for (i = 0; ; i++) {
+		if (i >= 100)
+			return -EEXIST;
+
+		status = snprintf(temporary, PATH_MAX, "%.*s/%srepair.%d.%d",
+				(int) (slash - path), path, PREFIX, (int) getpid(), i);
+		if (status < 0 || status >= PATH_MAX)
+			return -ENAMETOOLONG;
+
+		if (l2s_symlink(target, temporary) == 0)
+			break;
+		if (errno != EEXIST)
+			return -errno;
+	}
+
+	if (l2s_rename(temporary, path) < 0) {
+		status = -errno;
+		(void) l2s_unlink(temporary);
+		return status;
+	}
+
+	return 0;
+}
+
+/**
+ * The intermediates that were looked for in vain, c.f.
+ * find_moved_intermediate(): the faked hard links that point to them
+ * are dangling for good -- their chain was removed along with the
+ * directory of the first name of their file, typically -- and they
+ * would be looked for again at each use of these links.  An entry is
+ * replaced by the next one that hashes the same.
+ */
+#define LOST_INTERMEDIATES_SIZE 256
+
+static char *lost_intermediates[LOST_INTERMEDIATES_SIZE];
+
+static size_t hash_lost_intermediate(const char *intermediate)
+{
+	size_t hash = 5381;
+
+	while (*intermediate != '\0')
+		hash = hash * 33 + (unsigned char) *intermediate++;
+
+	return hash % LOST_INTERMEDIATES_SIZE;
+}
+
+static bool is_lost_intermediate(const char *intermediate)
+{
+	const char *entry = lost_intermediates[hash_lost_intermediate(intermediate)];
+
+	return entry != NULL && strcmp(entry, intermediate) == 0;
+}
+
+static void remember_lost_intermediate(const char *intermediate)
+{
+	size_t index = hash_lost_intermediate(intermediate);
+	char *copy;
+
+	copy = strdup(intermediate);
+	if (copy == NULL)
+		return;
+
+	free(lost_intermediates[index]);
+	lost_intermediates[index] = copy;
+}
+
+/**
+ * Copy in @moved the host path of the final file the intermediate
+ * @intermediate pointed to at @final, a path that is gone, once their
+ * directory was renamed: they are always next to each other.  This
+ * function returns false if it isn't there.
+ */
+static bool find_moved_final(const char intermediate[PATH_MAX], const char final[PATH_MAX],
+			char moved[PATH_MAX])
+{
+	const char *final_name;
+	const char *slash;
+	struct stat statl;
+	int status;
+
+	slash = strrchr(intermediate, '/');
+	final_name = strrchr(final, '/');
+	if (slash == NULL || final_name == NULL)
+		return false;
+
+	status = snprintf(moved, PATH_MAX, "%.*s%s", (int) (slash - intermediate), intermediate, final_name);
+	if (status < 0 || status >= PATH_MAX)
+		return false;
+
+	return l2s_lstat(moved, &statl) == 0 && !S_ISLNK(statl.st_mode);
+}
+
+/**
+ * Copy in @moved the host path of the intermediate the faked hard link
+ * @link pointed to at @intermediate, a path that is gone, once a
+ * directory was renamed.  This directory is the topmost one of
+ * @intermediate that is gone, and @link was moved along with it when its
+ * new name is @link's own directory or one of its ancestors: the
+ * intermediate lies below it, as it did below the former name.  An
+ * intermediate found there must point to the final file of the one that
+ * was at @intermediate, at its former path or at its new one.  This
+ * function returns false if there's none.
+ */
+static bool find_moved_intermediate(const char link[PATH_MAX], const char intermediate[PATH_MAX],
+				char moved[PATH_MAX])
+{
+	char directory[PATH_MAX];
+	char content[PATH_MAX];
+	struct stat statl;
+	const char *below;
+	char *slash;
+	size_t depth;
+	int status;
+
+	/* @below: what lies below the deepest directory of
+	 * @intermediate that is left.  */
+	strcpy(directory, intermediate);
+	slash = strrchr(directory, '/');
+	for (depth = 0; ; depth++) {
+		if (slash == NULL || depth >= 16)
+			return false;
+
+		if (slash == directory) {
+			below = intermediate + 1;
+			break;
+		}
+
+		*slash = '\0';
+		if (lstat(directory, &statl) == 0) {
+			below = intermediate + strlen(directory) + 1;
+			break;
+		}
+		if (errno != ENOENT && errno != ENOTDIR)
+			return false;
+
+		slash = strrchr(directory, '/');
+	}
+
+	/* The first component is the former name of the directory that
+	 * was renamed, unless the intermediate itself is all that's
+	 * gone.  */
+	slash = strchr(below, '/');
+	if (slash != NULL)
+		below = slash + 1;
+
+	strcpy(directory, link);
+	slash = strrchr(directory, '/');
+	for (depth = 0; slash != NULL && depth < 16; depth++) {
+		*slash = '\0';
+
+		status = snprintf(moved, PATH_MAX, "%s/%s", directory, below);
+		if (status < 0 || status >= PATH_MAX)
+			return false;
+
+		if (   strcmp(moved, intermediate) != 0
+		    && l2s_lstat(moved, &statl) == 0
+		    && S_ISLNK(statl.st_mode)
+		    && my_readlink(moved, content) == 0
+		    && (is_final_name_of(content, intermediate) || is_final_name_of(content, moved)))
+			return true;
+
+		if (directory[0] == '\0')
+			break;
+		slash = strrchr(directory, '/');
+	}
+
+	return false;
+}
+
+/**
+ * Point the faked hard link -- or the intermediate -- @path, a host
+ * path, to where what it points to is now, if a directory was renamed
+ * since, c.f. find_moved_intermediate() and find_moved_final(), and copy
+ * this new path in @target, its current content.  They record absolute
+ * host paths, so "mv dir newdir" left every faked hard link in it
+ * dangling, unless PROOT_L2S_DIR was set: the data was out of reach,
+ * and its chain was taken for a broken one.  The new path is used even
+ * when @path can't be updated, a directory that isn't writable
+ * typically.  The faked hard links that were not moved along with their
+ * chain are left dangling.
+ */
+static void repair_chain_link(const char path[PATH_MAX], char target[PATH_MAX])
+{
+	char moved[PATH_MAX];
+	const char *name;
+	struct stat statl;
+
+	name = strrchr(target, '/');
+	if (name == NULL || strncmp(name + 1, PREFIX, strlen(PREFIX)) != 0)
+		return;
+
+	/* Nothing to check for the usual chains -- next to the link,
+	 * and the intermediate next to its final file -- nor for the
+	 * ones in the l2s directory.  */
+	if (have_same_directory_name(path, target))
+		return;
+
+	if (   get_l2s_directory()
+	    && strncmp(target, l2s_directory, l2s_directory_length) == 0
+	    && target[l2s_directory_length] == '/')
+		return;
+
+	if (l2s_lstat(target, &statl) == 0 || (errno != ENOENT && errno != ENOTDIR))
+		return;
+
+	if (is_intermediate_of(path, target)) {
+		if (!find_moved_final(path, target, moved))
+			return;
+	}
+	else {
+		if (is_lost_intermediate(target))
+			return;
+
+		if (!find_moved_intermediate(path, target, moved)) {
+			remember_lost_intermediate(target);
+			return;
+		}
+	}
+
+	(void) replace_symlink(path, moved);
+	strcpy(target, moved);
+}
+
+/**
+ * Copy the content of the symbolic link @path -- a faked hard link or
+ * an intermediate, a host path -- in @target, as my_readlink() does,
+ * once it is repaired if needed, c.f. repair_chain_link().  This
+ * function returns -errno if an error occured, otherwise 0.
+ */
+static int read_chain_link(const char path[PATH_MAX], char target[PATH_MAX])
+{
+	int status;
+
+	status = my_readlink(path, target);
+	if (status < 0)
+		return status;
+
+	repair_chain_link(path, target);
+
+	return 0;
+}
+
+/**
+ * Copy in @intermediate the path of the intermediate the faked hard
+ * link @link -- a host path -- points to.  This function returns
+ * -errno if @link is not a faked hard link, otherwise 0.
+ */
+static int read_faked_hard_link(const char link[PATH_MAX], char intermediate[PATH_MAX])
+{
+	const char *name;
+	int status;
+
+	status = read_chain_link(link, intermediate);
+	if (status < 0)
+		return status;
+
+	name = strrchr(intermediate, '/');
+	if (name == NULL)
+		return -EINVAL;
+	name++;
+
+	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+/**
  * Copy in @final the path of the file the faked hard link @link -- a
  * host path -- refers to.  An intermediate is resolved the same way:
  * it is left out of the listings of its directory, c.f.
@@ -526,7 +811,7 @@ static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MA
 	if (status < 0)
 		return status;
 
-	status = my_readlink(intermediate, final);
+	status = read_chain_link(intermediate, final);
 	if (status != -EINVAL || !is_intermediate_of(link, intermediate))
 		return status;
 
@@ -544,7 +829,7 @@ static int read_intermediate(const char intermediate[PATH_MAX], char final[PATH_
 {
 	int status;
 
-	status = my_readlink(intermediate, final);
+	status = read_chain_link(intermediate, final);
 	if (status < 0)
 		return status;
 
@@ -637,7 +922,7 @@ static bool is_final_file(const char path[PATH_MAX])
 	memcpy(intermediate, path, length);
 	intermediate[length] = '\0';
 
-	if (my_readlink(intermediate, target) < 0)
+	if (read_chain_link(intermediate, target) < 0)
 		return false;
 
 	return is_same_entry(target, path);
@@ -675,7 +960,7 @@ static bool is_internal_file(const char path[PATH_MAX], unsigned char type)
 
 	/* An intermediate points to its own name followed by the link
 	 * count of its file.  */
-	if (   my_readlink(path, target) < 0
+	if (   read_chain_link(path, target) < 0
 	    || !is_intermediate_of(path, target)
 	    || !in_same_directory(path, target))
 		return false;
@@ -1035,7 +1320,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	/* Check if it is a symbolic link.  */
 	if (S_ISLNK(statl.st_mode)) {
 		/* get name */
-		size = my_readlink(original, intermediate);
+		size = read_chain_link(original, intermediate);
 		if (size < 0)
 			return size;
 
@@ -2092,7 +2377,7 @@ static int handle_sysexit_end(Extension *extension)
 		 * dangling symbolic link it is.  Failing this syscall made it
 		 * impossible to lstat(2), hence to list or to remove with
 		 * most tools.  */
-		if (my_readlink(original, intermediate) < 0)
+		if (read_chain_link(original, intermediate) < 0)
 			return 0;
 
 		name = strrchr(intermediate, '/');
@@ -2684,6 +2969,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return 0;
 
 	case SYMLINK_DEREFERENCED:
+		repair_chain_link((const char *) data1, (char *) data2);
 		remember_dereferenced_link(extension, (const char *) data1, (const char *) data2);
 		return 0;
 
