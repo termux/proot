@@ -96,6 +96,18 @@ int register_chained_syscall(Tracee *tracee, Sysnum sysnum,
 }
 
 /**
+ * Tell whether syscalls were chained to the current one of @tracee and
+ * are still to come, that is, whether the result of this one is going
+ * to be replaced.  Extensions that ask for the current syscall to be
+ * made again check it first, otherwise a syscall that two of them
+ * reissue would be made twice, and the result of the first one lost.
+ */
+bool has_chained_syscalls(const Tracee *tracee)
+{
+	return tracee->chain.syscalls != NULL && !STAILQ_EMPTY(tracee->chain.syscalls);
+}
+
+/**
  * Use/remove the first element of @tracee->chain.syscalls to forge a
  * new syscall.  This function should be called only at the end of in
  * the sysexit stage.

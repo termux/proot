@@ -62,6 +62,13 @@ static int handle_getdents(Tracee *tracee)
             return 0;
         }
 
+        /* Another extension -- link2symlink hides files too -- already asked
+         * for getdents to be made again: these entries are going to be
+         * replaced, and asking once more would lose the next ones.  */
+        if (has_chained_syscalls(tracee)) {
+            return 0;
+        }
+
         /* get the system call arguments */
         word_t orig_start = peek_reg(tracee, CURRENT, SYSARG_2);
         unsigned int count = peek_reg(tracee, CURRENT, SYSARG_3);

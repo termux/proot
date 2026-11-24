@@ -21,6 +21,7 @@
 #include "tracee/statx.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
+#include "syscall/chain.h"
 #include "path/path.h"
 #include "path/f2fs-bug.h"
 #include "arch.h"
@@ -351,6 +352,12 @@ static bool is_open_syscall(Sysnum sysnum)
  * intermediate and <count> is written with 4 digits at least -- 5 from
  * 10000 links on -- and 9 at most, so it fits an int.  This function
  * returns -1 if @host_path is not named that way.
+ *
+ * The count is padded to 4 digits, never more, so a longer one doesn't
+ * start with 0: that is the intermediate of a file named like a final
+ * one -- that the tracee copied, typically.  The intermediate of
+ * ".l2s.a0001.0003" is ".l2s..l2s.a0001.00030001", which was taken for
+ * a file with 30001 links.
  */
 static int get_link_count(const char *host_path)
 {
@@ -381,7 +388,7 @@ static int get_link_count(const char *host_path)
 	}
 
 	length = strlen(dot + 1);
-	if (length < 4 || length > 9)
+	if (length < 4 || length > 9 || (length > 4 && dot[1] == '0'))
 		return -1;
 
 	count = 0;
@@ -478,12 +485,14 @@ static bool is_intermediate_of(const char *link, const char *final)
 /**
  * Copy in @final the path of the file the faked hard link @link -- a
  * host path -- refers to.  An intermediate is resolved the same way:
- * the tracee reaches one only by listing its directory, it is one more
- * name of that file to the tracee, as it is to the stat(2) family --
- * c.f. handle_sysexit_end().  As the symbolic link it is, programs
- * that walk directories -- tar(1) -- failed to open(2) it with
- * O_NOFOLLOW.  This function returns -errno if @link is neither a faked
- * hard link nor an intermediate, or if it is a broken one, otherwise 0.
+ * it is left out of the listings of its directory, c.f.
+ * handle_getdents_exit(), so the tracee reaches one only by its name --
+ * one an archive made by an older PRoot recorded, for instance -- and
+ * it is one more name of that file then, as it is to the stat(2)
+ * family, c.f. handle_sysexit_end().  As the symbolic link it is,
+ * tar(1) failed to open(2) it with O_NOFOLLOW.  This function returns
+ * -errno if @link is neither a faked hard link nor an intermediate, or
+ * if it is a broken one, otherwise 0.
  */
 static int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX])
 {
@@ -522,6 +531,161 @@ static int read_intermediate(const char intermediate[PATH_MAX], char final[PATH_
 		return -ENOENT;
 
 	return 0;
+}
+
+/**
+ * Tell whether the host paths @path1 and @path2 lie in the same
+ * directory.  They are compared as strings first; a directory can be
+ * spelled in more than one way though -- the new name given to link(2)
+ * can keep a "." component, for instance -- hence the identity of both
+ * directories when the strings differ.
+ */
+static bool in_same_directory(const char *path1, const char *path2)
+{
+	char directory1[PATH_MAX];
+	char directory2[PATH_MAX];
+	struct stat stat1;
+	struct stat stat2;
+	const char *slash1;
+	const char *slash2;
+	size_t length1;
+	size_t length2;
+
+	slash1 = strrchr(path1, '/');
+	slash2 = strrchr(path2, '/');
+	if (slash1 == NULL || slash2 == NULL)
+		return false;
+
+	length1 = slash1 - path1;
+	length2 = slash2 - path2;
+	if (length1 == length2 && strncmp(path1, path2, length1) == 0)
+		return true;
+
+	/* The directory of "/name" is "/".  */
+	length1 = (length1 == 0 ? 1 : length1);
+	length2 = (length2 == 0 ? 1 : length2);
+
+	memcpy(directory1, path1, length1);
+	directory1[length1] = '\0';
+	memcpy(directory2, path2, length2);
+	directory2[length2] = '\0';
+
+	if (stat(directory1, &stat1) < 0 || stat(directory2, &stat2) < 0)
+		return false;
+
+	return stat1.st_dev == stat2.st_dev && stat1.st_ino == stat2.st_ino;
+}
+
+/**
+ * Tell whether the host paths @path1 and @path2 name the same entry of
+ * the same directory, however they spell it, c.f. in_same_directory().
+ */
+static bool is_same_entry(const char *path1, const char *path2)
+{
+	const char *name1;
+	const char *name2;
+
+	if (strcmp(path1, path2) == 0)
+		return true;
+
+	name1 = strrchr(path1, '/');
+	name2 = strrchr(path2, '/');
+
+	return (name1 != NULL && name2 != NULL
+		&& strcmp(name1, name2) == 0
+		&& in_same_directory(path1, path2));
+}
+
+/**
+ * Tell whether @path -- a host path -- is the final file of a chain this
+ * extension made, that is, whether the intermediate its name starts
+ * with points to it, c.f. is_internal_file().
+ */
+static bool is_final_file(const char path[PATH_MAX])
+{
+	char intermediate[PATH_MAX];
+	char target[PATH_MAX];
+	size_t length;
+
+	if (!is_l2s_file(path))
+		return false;
+
+	length = strrchr(path, '.') - path;
+	memcpy(intermediate, path, length);
+	intermediate[length] = '\0';
+
+	if (my_readlink(intermediate, target) < 0)
+		return false;
+
+	return is_same_entry(target, path);
+}
+
+/**
+ * Tell whether @path -- a host path, @type being its d_type or
+ * DT_UNKNOWN -- is the intermediate or the final file of a chain this
+ * extension made, that is, no name of any file to the tracee.  These
+ * are left out of the listings of their directory, c.f.
+ * handle_getdents_exit().  Each half of a chain has to point to the
+ * other, next to it: otherwise the chain is broken -- its other half
+ * was removed, or the directory was renamed since the intermediate
+ * recorded its path -- and what's left of it is shown to the tracee,
+ * that has no other way to remove it.
+ */
+static bool is_internal_file(const char path[PATH_MAX], unsigned char type)
+{
+	char target[PATH_MAX];
+	const char *name;
+	struct stat statl;
+
+	name = strrchr(path, '/');
+	if (name == NULL || strncmp(name + 1, PREFIX, strlen(PREFIX)) != 0)
+		return false;
+
+	if (type == DT_UNKNOWN) {
+		if (l2s_lstat(path, &statl) < 0)
+			return false;
+		type = IFTODT(statl.st_mode);
+	}
+
+	if (type != DT_LNK)
+		return is_final_file(path);
+
+	/* An intermediate points to its own name followed by the link
+	 * count of its file.  */
+	if (   my_readlink(path, target) < 0
+	    || !is_intermediate_of(path, target)
+	    || !in_same_directory(path, target))
+		return false;
+
+	return l2s_lstat(target, &statl) == 0 && !S_ISLNK(statl.st_mode);
+}
+
+/**
+ * Tell whether the host path @link is named like the intermediate
+ * @intermediate or one of the final files it may point to, next to it,
+ * c.f. get_link_count(), that is, whether it is a name this extension
+ * needs for the chain of @intermediate.
+ */
+static bool is_name_of_chain(const char link[PATH_MAX], const char intermediate[PATH_MAX])
+{
+	const char *intermediate_name;
+	const char *link_name;
+	size_t length;
+
+	/* Note: both names keep their slash.  */
+	link_name = strrchr(link, '/');
+	intermediate_name = strrchr(intermediate, '/');
+	if (link_name == NULL || intermediate_name == NULL)
+		return false;
+
+	length = strlen(intermediate_name);
+	if (strncmp(link_name, intermediate_name, length) != 0)
+		return false;
+
+	if (link_name[length] != '\0' && (link_name[length] != '.' || get_link_count(link) < 0))
+		return false;
+
+	return in_same_directory(link, intermediate);
 }
 
 /**
@@ -813,6 +977,7 @@ static int link_symbolic_link(Tracee *tracee, const char target[PATH_MAX], Reg l
 static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sysarg)
 {
 	char original[PATH_MAX];
+	char link[PATH_MAX];
 	char intermediate[PATH_MAX];
 	char new_intermediate[PATH_MAX];
 	char final[PATH_MAX];
@@ -831,6 +996,11 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		return size;
 	if (size >= PATH_MAX)
 		return -ENAMETOOLONG;
+
+	/* Note: this path was already canonicalized.  */
+	status = read_path(tracee, link, peek_reg(tracee, CURRENT, link_target_sysarg));
+	if (status < 0)
+		return status;
 
 	/* Sanity check: directories can't be linked.  */
 	status = lstat(original, &statl);
@@ -852,8 +1022,14 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		else
 			name++;
 
-		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
+		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
 			first_link = 0;
+
+			/* An intermediate named directly is one more name
+			 * of its file, c.f. resolve_faked_hard_link().  */
+			if (is_intermediate_of(original, intermediate))
+				strcpy(intermediate, original);
+		}
 		else {
 			/* An ordinary symbolic link used to be moved as a
 			 * file, under the name its content spells, followed
@@ -912,6 +1088,22 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		strcat(intermediate, name);
 	}
 
+	/* The names of the chain of this file are reserved for it: when
+	 * the tracee asks for one -- it copies a tree that contained such
+	 * files, typically, as they were listed until they were left out
+	 * of directory listings -- it already stands for this very file.
+	 * Making it a name of its own collided with the chain: link(2)
+	 * failed with EEXIST when it was the intermediate or the final
+	 * file, and "cp -a" then renamed another name over it, which left
+	 * an intermediate that pointed to itself; any other one got
+	 * replaced by the final file once the count came to the number it
+	 * ends with.  */
+	if (!first_link && is_name_of_chain(link, intermediate)) {
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		return 0;
+	}
+
 	if (first_link) {
 		/* Reserve a free intermediate by creating it, pointing to
 		 * the final file the original one is about to become, since
@@ -923,7 +1115,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		 * behind is not replaced either, and nothing is moved when
 		 * there's no free slot left.  The suffix has 4 digits, so
 		 * up to 9999 files of the same name can be linked at once:
-		 * per directory, or in the whole l2s directory.  */
+		 * per directory, or in the whole l2s directory.  A slot
+		 * whose names would include the new link is skipped too, for
+		 * the reason given above.  */
 		for (intermediate_suffix = 1; ; intermediate_suffix++) {
 			if (intermediate_suffix > 9999)
 				return -EMLINK;
@@ -932,6 +1126,9 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 			if (status < 0 || status >= PATH_MAX)
 				return -ENAMETOOLONG;
 			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
+
+			if (is_name_of_chain(link, new_intermediate))
+				continue;
 
 			if (l2s_lstat(final, &statl) == 0)
 				continue;
@@ -998,8 +1195,8 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	}
 
 	/* Perform symlink() operation within PRoot.  */
-	status = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
-	if (status >= 0 && symlink(intermediate, final) < 0)
+	status = 0;
+	if (symlink(intermediate, link) < 0)
 		status = -errno;
 	if (status < 0) {
 		(void) decrement_intermediate_count(tracee, original, intermediate);
@@ -1115,6 +1312,34 @@ static int remember_removed_link(Extension *extension, Reg sysarg)
 }
 
 /**
+ * Copy in @chain the path of the intermediate of the chain @path -- a
+ * host path -- belongs to: the one a faked hard link points to, or the
+ * intermediate @path is, or the one of the final file @path is -- only
+ * the latter when @symlink_checked, as the caller already knows @path
+ * is no symbolic link to a name of this extension.  This function
+ * returns -errno if @path belongs to no chain, otherwise 0.
+ */
+static int get_chain(const char path[PATH_MAX], char chain[PATH_MAX], bool symlink_checked)
+{
+	size_t length;
+
+	if (!symlink_checked && read_faked_hard_link(path, chain) == 0) {
+		if (is_intermediate_of(path, chain))
+			strcpy(chain, path);
+		return 0;
+	}
+
+	if (!is_final_file(path))
+		return -EINVAL;
+
+	length = strrchr(path, '.') - path;
+	memcpy(chain, path, length);
+	chain[length] = '\0';
+
+	return 0;
+}
+
+/**
  * Prepare the rename(2) of the path @old_sysarg names to the one
  * @new_sysarg names, with the renameat2(2) @flags.  This function
  * returns -errno if an error occured, otherwise 0.
@@ -1124,8 +1349,9 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
 	Tracee *tracee = TRACEE(extension);
 	Link2SymlinkConfig *config;
 	char old_path[PATH_MAX];
-	char old_intermediate[PATH_MAX];
-	ssize_t size;
+	char new_path[PATH_MAX];
+	char old_chain[PATH_MAX];
+	char new_chain[PATH_MAX];
 	int status;
 
 	/* Neither of these removes the new name: RENAME_NOREPLACE fails
@@ -1137,29 +1363,44 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
 	if (status < 0)
 		return status;
 
+	/* Note: these paths were already canonicalized.  */
+	status = read_path(tracee, new_path, peek_reg(tracee, CURRENT, new_sysarg));
+	if (status < 0)
+		return status;
+
+	/* The chain of the new name, if any: a faked hard link or an
+	 * intermediate -- both remembered above as symbolic links to a
+	 * name of this extension -- or a final file.  */
 	config = get_config(extension, false);
-	if (config == NULL || config->removed_link[0] == '\0')
+	if (config != NULL && config->removed_link[0] != '\0') {
+		if (is_intermediate_of(config->removed_link, config->removed_intermediate))
+			strcpy(new_chain, config->removed_link);
+		else
+			strcpy(new_chain, config->removed_intermediate);
+	}
+	else if (get_chain(new_path, new_chain, true) < 0)
 		return 0;
 
-	/* Note: this path was already canonicalized.  */
-	size = read_string(tracee, old_path, peek_reg(tracee, CURRENT, old_sysarg), PATH_MAX);
-	if (size < 0)
-		return size;
-	if (size >= PATH_MAX)
-		return -ENAMETOOLONG;
+	status = read_path(tracee, old_path, peek_reg(tracee, CURRENT, old_sysarg));
+	if (status < 0)
+		return status;
 
-	if (read_faked_hard_link(old_path, old_intermediate) < 0
-	    || strcmp(old_intermediate, config->removed_intermediate) != 0)
+	if (get_chain(old_path, old_chain, false) < 0 || !is_same_entry(old_chain, new_chain))
 		return 0;
 
 	/* Both names are links to the same file -- or are the same
 	 * name -- in which case rename(2) does nothing.  The kernel
 	 * sees two different symbolic links though, and would replace
 	 * the new one with the old one, that is, remove the old name.
-	 * Have it rename the old name onto itself instead: that is the
-	 * very same no-op, behind the very same checks (EROFS, ...).  */
+	 * The same goes for the files of the chain, which are names of
+	 * that file to the tracee, c.f. resolve_faked_hard_link(): the
+	 * kernel would have replaced the intermediate with a faked hard
+	 * link that points to it, that is, to itself.  Have it rename
+	 * the old name onto itself instead: that is the very same no-op,
+	 * behind the very same checks (EROFS, ...).  */
 	poke_reg(tracee, new_sysarg, peek_reg(tracee, CURRENT, old_sysarg));
-	config->removed_link[0] = '\0';
+	if (config != NULL)
+		config->removed_link[0] = '\0';
 
 	return 0;
 }
@@ -1267,18 +1508,29 @@ static int get_faked_hard_link_type(const char path[PATH_MAX])
 }
 
 /**
- * Give the faked hard links listed by the getdents(2) or getdents64(2)
- * @tracee has just performed the type lstat(2) reports for them, instead
- * of DT_LNK, the type of the symbolic links they really are.  Programs
- * that rely on d_type -- "find -type f", ripgrep, Rust's
- * DirEntry::file_type(), Python's DirEntry.is_symlink() -- otherwise see
- * a symbolic link where lstat(2) sees a regular file, then skip it or
- * trip over the contradiction.
+ * Rewrite the listing the getdents(2) or getdents64(2) @tracee has just
+ * performed:
  *
- * The same goes for intermediates, c.f. resolve_faked_hard_link().
+ * - The intermediates and final files of the chains this extension
+ *   made are left out, c.f. is_internal_file().  They used to be listed
+ *   like any name of their file, so programs that copy a directory --
+ *   "cp -a", tar(1) -- made them names of the copy as well, which then
+ *   collided with the files of the chains of the copy itself; and
+ *   "rm -rf" removed them along with the names of their file, at the
+ *   names it had listed them by, while removing those names renamed
+ *   them, so a final file was left behind.
+ *
+ * - The faked hard links get the type lstat(2) reports for them,
+ *   instead of DT_LNK, the type of the symbolic links they really are.
+ *   Programs that rely on d_type -- "find -type f", ripgrep, Rust's
+ *   DirEntry::file_type(), Python's DirEntry.is_symlink() -- otherwise
+ *   see a symbolic link where lstat(2) sees a regular file, then skip
+ *   it or trip over the contradiction.
  *
  * This syscall is never failed: an entry that can't be checked is left
- * as the kernel reported it.
+ * as the kernel reported it.  When every entry it returned is left out,
+ * it is made again -- a result of 0 would mean the end of the
+ * directory.
  */
 static int handle_getdents_exit(Tracee *tracee)
 {
@@ -1290,10 +1542,11 @@ static int handle_getdents_exit(Tracee *tracee)
 	size_t name_offset;
 	size_t type_offset;
 	size_t first_modified;
-	size_t last_modified;
 	size_t offset;
 	size_t length;
+	size_t kept;
 	unsigned short reclen;
+	unsigned char type;
 	const char *name;
 	char *buffer;
 	word_t address;
@@ -1304,6 +1557,12 @@ static int handle_getdents_exit(Tracee *tracee)
 	if (status <= 0)
 		return 0;
 	length = status;
+
+	/* Another extension -- hidden_files -- already asked for this
+	 * syscall to be made again: these entries are going to be
+	 * replaced, and they are checked once that is done.  */
+	if (has_chained_syscalls(tracee))
+		return 0;
 
 	/* The first argument is overwritten by the result on some
 	 * architectures, hence ORIGINAL.  */
@@ -1333,10 +1592,16 @@ static int handle_getdents_exit(Tracee *tracee)
 	if (status < 0)
 		return 0;
 
+	/* The records kept are moved down over the ones left out: @kept
+	 * is where the next one goes, and @first_modified is the first
+	 * byte that differs from what the kernel wrote.  */
 	first_modified = length;
-	last_modified = 0;
+	kept = 0;
 
 	for (offset = 0; offset + name_offset < length; offset += reclen) {
+		bool left_out = false;
+		int new_type = -1;
+
 		memcpy(&reclen, buffer + offset + reclen_offset, sizeof(reclen));
 
 		/* Room for an empty name at least, plus d_type at the end
@@ -1345,48 +1610,272 @@ static int handle_getdents_exit(Tracee *tracee)
 			break;
 
 		type_offset = (dirent64 ? 18 : reclen - 1u);
-		if ((unsigned char) buffer[offset + type_offset] != DT_LNK)
-			continue;
+		type = (unsigned char) buffer[offset + type_offset];
 
 		name = buffer + offset + name_offset;
 		if (memchr(name, '\0', reclen - name_offset) == NULL)
 			break;
 
-		/* Only now that it's needed: most directories hold no
-		 * symbolic link at all.  */
-		if (!directory_known) {
-			status = readlink_proc_pid_fd(tracee->pid, fd, directory);
-			if (status < 0 || directory[0] != '/')
-				return 0;
-			if (strcmp(directory, "/") == 0)
-				directory[0] = '\0';
-			directory_known = true;
+		/* Only names of this extension, and symbolic links: most
+		 * entries are neither, and need no syscall at all.  */
+		if (type == DT_LNK || strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
+			if (!directory_known) {
+				status = readlink_proc_pid_fd(tracee->pid, fd, directory);
+				if (status < 0 || directory[0] != '/')
+					break;
+				if (strcmp(directory, "/") == 0)
+					directory[0] = '\0';
+				directory_known = true;
+			}
+
+			status = snprintf(path, PATH_MAX, "%s/%s", directory, name);
+			if (status >= 0 && status < PATH_MAX) {
+				if (is_internal_file(path, type))
+					left_out = true;
+				else if (type == DT_LNK) {
+					status = get_faked_hard_link_type(path);
+					if (status >= 0 && status != DT_LNK)
+						new_type = status;
+				}
+			}
 		}
 
-		status = snprintf(path, PATH_MAX, "%s/%s", directory, name);
-		if (status < 0 || status >= PATH_MAX)
+		if (left_out) {
+			if (first_modified == length)
+				first_modified = kept;
 			continue;
+		}
 
-		status = get_faked_hard_link_type(path);
-		if (status < 0 || status == DT_LNK)
-			continue;
+		if (kept != offset) {
+			memmove(buffer + kept, buffer + offset, reclen);
+			if (first_modified == length)
+				first_modified = kept;
+		}
 
-		buffer[offset + type_offset] = status;
+		if (new_type >= 0) {
+			buffer[kept + type_offset] = new_type;
+			if (first_modified == length)
+				first_modified = kept + type_offset;
+		}
 
-		if (first_modified == length)
-			first_modified = offset + type_offset;
-		last_modified = offset + type_offset;
+		kept += reclen;
+	}
+
+	/* Whatever couldn't be parsed is left as is, after the records
+	 * that were.  */
+	if (offset < length) {
+		if (kept != offset)
+			memmove(buffer + kept, buffer + offset, length - offset);
+		kept += length - offset;
 	}
 
 	if (first_modified == length)
 		return 0;
 
-	/* Only the span of the entries that changed: without
-	 * process_vm_writev(2), this is written word by word.  */
-	(void) write_data(tracee, address + first_modified, buffer + first_modified,
-			last_modified - first_modified + 1);
+	if (kept == 0) {
+		status = register_chained_syscall(tracee, get_sysnum(tracee, ORIGINAL),
+						peek_reg(tracee, ORIGINAL, SYSARG_1),
+						peek_reg(tracee, ORIGINAL, SYSARG_2),
+						peek_reg(tracee, ORIGINAL, SYSARG_3),
+						0, 0, 0);
+		if (status < 0)
+			VERBOSE(tracee, 1, "link2symlink: can't list the directory further, status=%d", status);
+		return 0;
+	}
+
+	/* Only from the first byte that changed -- nothing when only
+	 * the last records were left out: without process_vm_writev(2),
+	 * this is written word by word.  */
+	if (kept > first_modified) {
+		status = write_data(tracee, address + first_modified, buffer + first_modified,
+				    kept - first_modified);
+		if (status < 0)
+			return 0;
+	}
+
+	if (kept != length)
+		poke_reg(tracee, SYSARG_RESULT, kept);
 
 	return 0;
+}
+
+/**
+ * Give the owner of the directory @path every permission on it, and copy
+ * in @mode the one to restore.  The tracee was granted what it needed
+ * for the duration of its syscall only, by fake_id0 typically -- c.f.
+ * decrement_removed_link_count() -- and what this extension does to
+ * the files it made is its own business.  This function returns false
+ * if the mode was left as is.
+ */
+static bool grant_permissions(const char *path, mode_t *mode)
+{
+	struct stat statd;
+
+	if (stat(path, &statd) < 0 || !S_ISDIR(statd.st_mode))
+		return false;
+
+	if ((statd.st_mode & S_IRWXU) == S_IRWXU)
+		return false;
+
+	if (chmod(path, (statd.st_mode & 07777) | S_IRWXU) < 0)
+		return false;
+
+	*mode = statd.st_mode & 07777;
+	return true;
+}
+
+/**
+ * Remove the directory @path -- a host path -- that the tracee couldn't
+ * remove because it isn't empty, if all it contains is the files of
+ * chains this extension made, c.f. is_internal_file().  To the tracee
+ * this directory is empty: it lists nothing in it.  The files of a
+ * chain are kept next to the first name of their file, unless
+ * PROOT_L2S_DIR is set, so they remain once that name is gone while
+ * others are left in other directories: such a directory couldn't be
+ * removed, not even by "rm -rf" of a tree that contains these other
+ * names too -- cargo-clean(1) of Rust's hard-linked build outputs, for
+ * instance -- as it got there first.  These chains are removed along
+ * with it, like "rm -rf" removed them when they were listed: the names
+ * left elsewhere are dangling from then on, as they already were then.
+ * The l2s directory itself is never emptied this way.  This function
+ * returns -ENOTEMPTY if the directory has to be left as is, otherwise
+ * the status of rmdir(2).
+ */
+static int remove_internal_files(Tracee *tracee, const char path[PATH_MAX])
+{
+	char parent[PATH_MAX];
+	char entry_path[PATH_MAX];
+	struct dirent *entry;
+	struct stat statd;
+	struct stat statl;
+	char **entries = NULL;
+	size_t nb_entries = 0;
+	bool granted = false;
+	mode_t parent_mode;
+	mode_t mode = 0;
+	char *slash;
+	size_t i;
+	DIR *directory;
+	int status;
+
+	/* The one PRoot uses, whatever its name is now.  */
+	if (   get_l2s_directory()
+	    && stat(path, &statd) == 0
+	    && (l2s_directory_fd >= 0
+		? fstat(l2s_directory_fd, &statl) == 0
+		: stat(l2s_directory, &statl) == 0)
+	    && statd.st_dev == statl.st_dev
+	    && statd.st_ino == statl.st_ino)
+		return -ENOTEMPTY;
+
+	directory = opendir(path);
+	if (directory == NULL && errno == EACCES) {
+		granted = grant_permissions(path, &mode);
+		if (granted)
+			directory = opendir(path);
+	}
+	if (directory == NULL) {
+		status = -ENOTEMPTY;
+		goto end;
+	}
+
+	while ((entry = readdir(directory)) != NULL) {
+		char **tmp;
+
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		status = snprintf(entry_path, PATH_MAX, "%s/%s", path, entry->d_name);
+		if (status < 0 || status >= PATH_MAX || !is_internal_file(entry_path, entry->d_type))
+			break;
+
+		tmp = talloc_realloc(tracee->ctx, entries, char *, nb_entries + 1);
+		if (tmp == NULL)
+			break;
+		entries = tmp;
+
+		entries[nb_entries] = talloc_strdup(entries, entry_path);
+		if (entries[nb_entries] == NULL)
+			break;
+		nb_entries++;
+	}
+
+	/* Not this extension's business when something else is left --
+	 * something hidden from the tracee otherwise, or that appeared in
+	 * the meantime.  */
+	status = (entry != NULL || nb_entries == 0) ? -ENOTEMPTY : 0;
+	closedir(directory);
+	if (status < 0)
+		goto end;
+
+	for (i = 0; i < nb_entries; i++) {
+		status = unlink(entries[i]);
+		if (status < 0 && errno == EACCES && !granted) {
+			granted = grant_permissions(path, &mode);
+			if (granted)
+				status = unlink(entries[i]);
+		}
+		if (status < 0) {
+			VERBOSE(tracee, 1, "link2symlink: can't remove \"%s\", errno=%d", entries[i], errno);
+			status = -ENOTEMPTY;
+			goto end;
+		}
+
+		if (is_l2s_file(entries[i]))
+			(void) notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t) entries[i], 0);
+	}
+
+	status = (rmdir(path) < 0 ? -errno : 0);
+	if (status == -EACCES) {
+		strcpy(parent, path);
+		slash = strrchr(parent, '/');
+		if (slash != NULL && slash != parent) {
+			*slash = '\0';
+			if (grant_permissions(parent, &parent_mode)) {
+				status = (rmdir(path) < 0 ? -errno : 0);
+				(void) chmod(parent, parent_mode);
+			}
+		}
+	}
+
+	if (status == 0)
+		return 0;
+end:
+	if (granted)
+		(void) chmod(path, mode);
+
+	return status;
+}
+
+/**
+ * Let the rmdir(2) -- or unlinkat(AT_REMOVEDIR) -- @tracee has just
+ * performed on the path its @sysarg names succeed where only files of
+ * this extension made the directory not empty, c.f.
+ * remove_internal_files().
+ */
+static void handle_rmdir_exit(Tracee *tracee, Reg sysarg)
+{
+	char path[PATH_MAX];
+	int result;
+	int status;
+
+	/* POSIX allows EEXIST too.  */
+	result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if (result != -ENOTEMPTY && result != -EEXIST)
+		return;
+
+	/* Note: this path was already canonicalized.  The first
+	 * argument is overwritten by the result on some architectures,
+	 * hence MODIFIED.  */
+	status = read_path(tracee, path, peek_reg(tracee, MODIFIED, sysarg));
+	if (status < 0)
+		return;
+
+	status = remove_internal_files(tracee, path);
+	if (status == -ENOTEMPTY)
+		return;
+
+	poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 }
 
 /**
@@ -1497,8 +1986,17 @@ static int handle_sysexit_end(Extension *extension)
 				strcpy(intermediate,original);
 				goto intermediate_proc;
 			} else {
+				/* Not every file named like this is one of
+				 * this extension: the tracee can make some,
+				 * by extracting an archive that contains them
+				 * for instance.  Only a final file has an
+				 * intermediate that points to it.  */
+				if (status < 0 || !is_final_file(original))
+					return 0;
+
 				strcpy(final,original);
-				goto final_proc;
+				finalStat = statl;
+				goto final_proc_stat;
 			}
 		}
 
@@ -1528,9 +2026,12 @@ static int handle_sysexit_end(Extension *extension)
 		if (read_intermediate(intermediate, final) < 0)
 			return 0;
 
-		final_proc:
+		if (lstat(final, &finalStat) < 0)
+			return 0;
+
+		final_proc_stat:
 		link_count = get_link_count(final);
-		if (link_count < 0 || lstat(final, &finalStat) < 0)
+		if (link_count < 0)
 			return 0;
 
 		finalStat.st_nlink = link_count;
@@ -1560,8 +2061,17 @@ static int handle_sysexit_end(Extension *extension)
 	case PR_renameat:                  //int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
 	case PR_renameat2:                 //int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
 	case PR_unlink:                    //int unlink(const char *pathname);
+		forget_removed_link(extension);
+		return 0;
+
 	case PR_unlinkat:                  //int unlinkat(int dirfd, const char *pathname, int flags);
 		forget_removed_link(extension);
+		if ((peek_reg(tracee, ORIGINAL, SYSARG_3) & AT_REMOVEDIR) != 0)
+			handle_rmdir_exit(tracee, SYSARG_2);
+		return 0;
+
+	case PR_rmdir:                     //int rmdir(const char *pathname);
+		handle_rmdir_exit(tracee, SYSARG_1);
 		return 0;
 
 	case PR_creat:                     //int creat(const char *pathname, mode_t mode);
@@ -1604,6 +2114,11 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 
 	link_count = get_link_count(state->host_path);
 	if (link_count < 0)
+		return;
+
+	/* Only a final file has an intermediate that points to it, c.f.
+	 * handle_sysexit_end().  */
+	if (!is_final_file(state->host_path))
 		return;
 
 	state->statx_buf.stx_nlink = link_count;
@@ -1886,6 +2401,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			{ PR_renameat2,		FILTER_SYSEXIT },
 			{ PR_getdents,		FILTER_SYSEXIT },
 			{ PR_getdents64,	FILTER_SYSEXIT },
+			{ PR_rmdir,		FILTER_SYSEXIT },
 			FILTERED_SYSNUM_END,
 		};
 		extension->filtered_sysnums = filtered_sysnums;

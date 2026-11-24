@@ -23,8 +23,9 @@ cd "$1" || exit 1
 echo 1 > a; echo 2 > b
 ./link a b; echo "exists $? $(cat a)"
 
-# The faked hard link is broken.
-./link a c; rm .l2s.a*
+# The faked hard link is broken.  The files of its chain are left out
+# of directory listings, hence named one by one.
+./link a c; rm .l2s.a0001 .l2s.a0001.0002
 ./link c d; echo "broken $?"
 
 # The file can not be moved out of its directory.
@@ -39,8 +40,10 @@ chmod 755 ro
 PROOT_L2S_DIR="${DIR}/l2s" ${PROOT} -l sh -c '
 cd "$1" || exit 1
 
-# The l2s directory was removed once in use.
-echo 4 > g; ./link g h; rm -rf l2s
+# The l2s directory was removed once in use.  It looks empty, and
+# rmdir(2) leaves it in place as long as it is not, hence its files
+# named one by one.
+echo 4 > g; ./link g h; rm l2s/.l2s.g0001 l2s/.l2s.g0001.0002; rmdir l2s
 echo 5 > i; ./link i j; echo "gone $? $(cat i)"
 ' sh "${DIR}" 2>&1)
 STATUS=$?

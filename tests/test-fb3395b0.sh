@@ -7,7 +7,9 @@ fi
 # The stat(2) family reported it as the file it points to, but statx(2),
 # getdents(2) and readlink(2) as the symbolic link it is, and open(2)
 # with O_NOFOLLOW followed none: tar(1), hence dpkg-deb -b, failed with
-# ELOOP.  It is one more name of its file to every syscall now.
+# ELOOP.  It is one more name of its file to every syscall now -- and
+# left out of directory listings, c.f. test-9cce9b50, so only named
+# directly, by an archive made before for instance.
 
 DIR=${TMPDIR:?}/$(mcookie)
 mkdir -p "${DIR}/tree/sub" "${DIR}/extracted"
@@ -20,12 +22,11 @@ INTERMEDIATE=${DIR}/tree/.l2s.a0001
 test -L "${INTERMEDIATE}"
 
 LC_ALL=C ${PROOT} -l stat -c "%F %h" "${INTERMEDIATE}" | grep -x "regular file 3"
-${PROOT} -l find "${DIR}/tree" -name .l2s.a0001 -type f | grep -x "${INTERMEDIATE}"
 if ${PROOT} -l readlink "${INTERMEDIATE}"; then
     exit 1
 fi
 
-${PROOT} -l tar -C "${DIR}" -cf "${DIR}/archive.tar" tree
+${PROOT} -l tar -C "${DIR}" -cf "${DIR}/archive.tar" tree tree/.l2s.a0001
 
 # Each name is the same file: none is archived as a symbolic link, which
 # would point into this tree.
