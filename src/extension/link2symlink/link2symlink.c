@@ -432,6 +432,29 @@ static int name_link_count(const char final[PATH_MAX], int link_count, char new_
 }
 
 /**
+ * Rename the final file @final to @new_final, its name for another link
+ * count, c.f. name_link_count().  rename(2) replaces whatever is in the
+ * way: what's left of a broken chain -- a new one only checks the name
+ * it gets for 2 links -- or a file the tracee named like that, which
+ * was lost.  This function returns -EEXIST if there's one, -errno if
+ * another error occured, otherwise 0.
+ */
+static int rename_final(const char final[PATH_MAX], const char new_final[PATH_MAX])
+{
+	struct stat statl;
+
+	if (l2s_lstat(new_final, &statl) == 0)
+		return -EEXIST;
+	if (errno != ENOENT)
+		return errno > 0 ? -errno : -EEXIST;
+
+	if (l2s_rename(final, new_final) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/**
  * Copy in @intermediate the path of the intermediate the faked hard
  * link @link -- a host path -- points to.  This function returns
  * -errno if @link is not a faked hard link, otherwise 0.
@@ -1178,9 +1201,13 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		if (status < 0)
 			return status;
 
-		status = l2s_rename(final, new_final);
+		/* The count can't be recorded when its name is taken:
+		 * the file can't get one more link, then.  */
+		status = rename_final(final, new_final);
+		if (status == -EEXIST)
+			return -EMLINK;
 		if (status < 0)
-			return -errno;
+			return status;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
@@ -1240,9 +1267,16 @@ static int decrement_intermediate_count(Tracee *tracee, const char original[PATH
 		if (status < 0)
 			return status;
 
-		status = l2s_rename(final, new_final);
+		/* Nor can a lower count: the one recorded is then too
+		 * high, which only keeps the file longer.  */
+		status = rename_final(final, new_final);
+		if (status == -EEXIST) {
+			VERBOSE(tracee, 1, "link2symlink: \"%s\" is in the way, the count of \"%s\" is left as is",
+				new_final, final);
+			return 0;
+		}
 		if (status < 0)
-			return -errno;
+			return status;
 		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
 		if (status < 0)
 			return status;
