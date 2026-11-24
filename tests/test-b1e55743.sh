@@ -16,16 +16,23 @@ if ! gcc "${SCRIPT_DIR}/link.c" -o "${DIR}/link" >/dev/null 2>&1; then
 fi
 
 set +e
-RESULT=$(${PROOT} -l sh -c '
+RESULT=$(
+${PROOT} -l sh -c '
 cd "$1" || exit 1
 
 # The new name exists.
 echo 1 > a; echo 2 > b
 ./link a b; echo "exists $? $(cat a)"
 
-# The faked hard link is broken.  The files of its chain are left out
-# of directory listings, hence named one by one.
-./link a c; rm .l2s.a0001 .l2s.a0001.0002
+./link a c
+' sh "${DIR}" 2>&1
+
+# The faked hard link is broken.  Its tracee can't remove the files of
+# its chain, they are removed behind PRoot's back.
+rm "${DIR}/.l2s.a0001" "${DIR}/.l2s.a0001.0002"
+
+${PROOT} -l sh -c '
+cd "$1" || exit 1
 ./link c d; echo "broken $?"
 
 # The file can not be moved out of its directory.
@@ -37,15 +44,23 @@ else
 fi
 chmod 755 ro
 ' sh "${DIR}" 2>&1
+
+# The l2s directory was removed once in use -- behind PRoot's back
+# again, its tracee can't remove it as long as it is not empty.
 PROOT_L2S_DIR="${DIR}/l2s" ${PROOT} -l sh -c '
 cd "$1" || exit 1
-
-# The l2s directory was removed once in use.  It looks empty, and
-# rmdir(2) leaves it in place as long as it is not, hence its files
-# named one by one.
-echo 4 > g; ./link g h; rm l2s/.l2s.g0001 l2s/.l2s.g0001.0002; rmdir l2s
+echo 4 > g; ./link g h; : > ready
+i=0; while [ ! -e go ] && [ $i -lt 60 ]; do sleep 1; i=$((i + 1)); done
 echo 5 > i; ./link i j; echo "gone $? $(cat i)"
-' sh "${DIR}" 2>&1)
+' sh "${DIR}" > "${DIR}/gone" 2>&1 &
+i=0; while [ ! -e "${DIR}/ready" ] && [ $i -lt 60 ]; do sleep 1; i=$((i + 1)); done
+rm -rf "${DIR}/l2s"
+: > "${DIR}/go"
+wait $!
+GONE=$?
+cat "${DIR}/gone"
+exit ${GONE}
+)
 STATUS=$?
 set -e
 

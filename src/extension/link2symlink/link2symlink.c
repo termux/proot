@@ -1386,19 +1386,35 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
 	char new_path[PATH_MAX];
 	char old_chain[PATH_MAX];
 	char new_chain[PATH_MAX];
+	bool old_internal;
+	bool new_internal;
 	int status;
 
-	/* Neither of these removes the new name: RENAME_NOREPLACE fails
-	 * when it exists, RENAME_EXCHANGE gives it to the old file.  */
-	if ((flags & (RENAME_NOREPLACE | RENAME_EXCHANGE)) != 0)
-		return 0;
-
-	status = remember_removed_link(extension, new_sysarg);
+	/* Note: these paths were already canonicalized.  */
+	status = read_path(tracee, old_path, peek_reg(tracee, CURRENT, old_sysarg));
 	if (status < 0)
 		return status;
 
-	/* Note: these paths were already canonicalized.  */
 	status = read_path(tracee, new_path, peek_reg(tracee, CURRENT, new_sysarg));
+	if (status < 0)
+		return status;
+
+	/* The files of a chain have to stay where the names of their
+	 * file point to: moving one away, or replacing it, left all
+	 * these names dangling.  The tracee reaches them only by their
+	 * own names, as they are not listed, c.f. is_internal_file().  */
+	old_internal = is_internal_file(old_path, DT_UNKNOWN);
+	new_internal = is_internal_file(new_path, DT_UNKNOWN);
+
+	/* Neither of these removes the new name: RENAME_NOREPLACE fails
+	 * when it exists, RENAME_EXCHANGE gives it to the old file.  */
+	if ((flags & (RENAME_NOREPLACE | RENAME_EXCHANGE)) != 0) {
+		if (old_internal || ((flags & RENAME_EXCHANGE) != 0 && new_internal))
+			return -EBUSY;
+		return 0;
+	}
+
+	status = remember_removed_link(extension, new_sysarg);
 	if (status < 0)
 		return status;
 
@@ -1413,14 +1429,16 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
 			strcpy(new_chain, config->removed_intermediate);
 	}
 	else if (get_chain(new_path, new_chain, true) < 0)
-		return 0;
+		return old_internal ? -EBUSY : 0;
 
-	status = read_path(tracee, old_path, peek_reg(tracee, CURRENT, old_sysarg));
-	if (status < 0)
-		return status;
+	if (get_chain(old_path, old_chain, false) < 0 || !is_same_entry(old_chain, new_chain)) {
+		if (!old_internal && !new_internal)
+			return 0;
 
-	if (get_chain(old_path, old_chain, false) < 0 || !is_same_entry(old_chain, new_chain))
-		return 0;
+		if (config != NULL)
+			config->removed_link[0] = '\0';
+		return -EBUSY;
+	}
 
 	/* Both names are links to the same file -- or are the same
 	 * name -- in which case rename(2) does nothing.  The kernel
@@ -1437,6 +1455,36 @@ static int prepare_rename(Extension *extension, Reg old_sysarg, Reg new_sysarg, 
 		config->removed_link[0] = '\0';
 
 	return 0;
+}
+
+/**
+ * Keep the file of a chain @sysarg names, if it does, from being
+ * removed: it is no name of its own, but the one all the names of its
+ * file go through, c.f. is_internal_file().  Removing it left them all
+ * dangling, and the file behind.  The tracee reaches these files only
+ * by their own names -- an archive made by an older PRoot may record
+ * them, for instance -- and to the tracee they are one more name of
+ * their file, c.f. resolve_faked_hard_link(), which isn't counted: its
+ * removal leaves the other names as they are.  This function returns 1
+ * if the syscall was answered, -errno if an error occured, otherwise 0.
+ */
+static int keep_internal_file(Tracee *tracee, Reg sysarg)
+{
+	char path[PATH_MAX];
+	int status;
+
+	/* Note: this path was already canonicalized.  */
+	status = read_path(tracee, path, peek_reg(tracee, CURRENT, sysarg));
+	if (status < 0)
+		return status;
+
+	if (!is_internal_file(path, DT_UNKNOWN))
+		return 0;
+
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	set_sysnum(tracee, PR_void);
+
+	return 1;
 }
 
 /**
@@ -2501,6 +2549,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			 *   file is deleted, c.f. remember_removed_link().
 			 */
 
+			status = keep_internal_file(tracee, SYSARG_1);
+			if (status != 0)
+				return status < 0 ? status : 0;
+
 			status = remember_removed_link(extension, SYSARG_1);
 			if (status < 0)
 				return status;
@@ -2521,6 +2573,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			 *   to end of original file -- once the file is deleted, c.f.
 			 *   remember_removed_link().
 			 */
+
+			status = keep_internal_file(tracee, SYSARG_2);
+			if (status != 0)
+				return status < 0 ? status : 0;
 
 			status = remember_removed_link(extension, SYSARG_2);
 			if (status < 0)
