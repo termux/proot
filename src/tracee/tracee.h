@@ -366,6 +366,12 @@ typedef struct tracee {
 	 * has to be ignored as it's same syscall entry */
 	bool seccomp_already_handled_enter;
 
+	/* Set by the event loop around the seccomp-stop enter translation of a
+	 * FILTER_SYSEXIT syscall; answered_at_enter becomes true when the enter
+	 * stage answered the syscall itself and skipped its sysexit stop.  */
+	bool seccomp_enter_skippable;
+	bool answered_at_enter;
+
 	/* Whether the tracee itself requested the "no new privileges" flag
 	 * via prctl(PR_SET_NO_NEW_PRIVS).  PRoot always sets the real kernel
 	 * flag in the child before execve (it is a precondition for installing

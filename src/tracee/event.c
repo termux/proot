@@ -735,7 +735,15 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if ((flags & FILTER_SYSEXIT) != 0 || sysexit_necessary) {
 				if (seccomp_after_ptrace_enter) {
 					tracee->restart_how = PTRACE_SYSCALL;
+					tracee->seccomp_enter_skippable = !sysexit_necessary;
+					tracee->answered_at_enter = false;
 					translate_syscall(tracee);
+					tracee->seccomp_enter_skippable = false;
+					if (tracee->answered_at_enter) {
+						tracee->answered_at_enter = false;
+						tracee->restart_how = PTRACE_CONT;
+						break;
+					}
 				}
 				tracee->restart_how = PTRACE_SYSCALL;
 				break;

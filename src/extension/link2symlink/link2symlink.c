@@ -1580,6 +1580,37 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 	state->updated_stats = true;
 }
 
+static int link2symlink_handle_stat(struct stat_syscall_state *state)
+{
+	char intermediate[PATH_MAX];
+	const char *name;
+	int link_count;
+
+	if (state->host_path == NULL || state->host_path[0] == '\0')
+		return 0;
+
+	if (S_ISLNK(state->stat_buf->st_mode)) {
+		name = strrchr(state->host_path, '/');
+		name = (name != NULL) ? name + 1 : state->host_path;
+		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
+			return -EAGAIN;
+
+		if (my_readlink(state->host_path, intermediate) >= 0) {
+			name = strrchr(intermediate, '/');
+			name = (name != NULL) ? name + 1 : intermediate;
+			if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
+				return -EAGAIN;
+		}
+		return 0;
+	}
+
+	link_count = get_link_count(state->host_path);
+	if (link_count >= 0)
+		state->stat_buf->st_nlink = link_count;
+
+	return 0;
+}
+
 /**
  * Remember the name the tracee of @extension used for the file it is
  * about to open, when @host_path -- the path this open was redirected
@@ -2050,6 +2081,9 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	case TRANSLATED_PATH:
 		translated_path(extension, (char *) data1);
 		return 0;
+
+	case STAT_SYSCALL:
+		return link2symlink_handle_stat((struct stat_syscall_state *) data1);
 
 	case STATX_SYSCALL:
 		link2symlink_handle_statx((struct statx_syscall_state *) data1);

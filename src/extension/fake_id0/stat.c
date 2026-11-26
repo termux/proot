@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <linux/limits.h>
 #include <fcntl.h>       /* AT_EMPTY_PATH, */
 #include <string.h>      /* strcpy(3), */
@@ -178,6 +179,25 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 	return 0;
 }
 #endif /* ifdef USERLAND */
+
+int fake_id0_handle_stat_syscall(Tracee *tracee, const Config *config, uintptr_t stat_state_raw)
+{
+#ifdef USERLAND
+	(void) tracee;
+	(void) config;
+	(void) stat_state_raw;
+	return -ENOSYS;
+#else
+	struct stat_syscall_state *state = (struct stat_syscall_state *) stat_state_raw;
+	(void) tracee;
+
+	if (state->stat_buf->st_uid == get_host_uid())
+		state->stat_buf->st_uid = config->suid;
+	if (state->stat_buf->st_gid == get_host_gid())
+		state->stat_buf->st_gid = config->sgid;
+	return 0;
+#endif
+}
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
 	struct statx_syscall_state *state = (struct statx_syscall_state *) statx_state_raw;

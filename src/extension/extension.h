@@ -32,6 +32,15 @@
 #include "syscall/seccomp.h"
 
 /* List of possible events.  */
+struct stat;
+
+/* Passed to extensions on STAT_SYSCALL when answering a stat-family
+ * syscall at the seccomp enter stop.  */
+struct stat_syscall_state {
+	const char *host_path;
+	struct stat *stat_buf;
+};
+
 typedef enum {
 	/* A guest path passed as an argument of the current syscall
 	 * is about to be translated: "(char *) data1" is the base for
@@ -153,6 +162,12 @@ typedef enum {
         /* link2symlink notifies other extensions when it is unlinking
          * a file */
         LINK2SYMLINK_UNLINK,
+
+	/* A stat/fstatat/fstat syscall is being answered at the seccomp
+	 * enter stop: "(struct stat_syscall_state *) data1" holds the
+	 * host path (empty when unknown) and the struct stat buffer to
+	 * adjust.  Returning < 0 falls back to the normal exit stage.  */
+	STAT_SYSCALL,
 
 	/* statx() syscall was used by tracee and is being replaced by proot
 	 * data1 argument contains pointer to statx_syscall_state struct

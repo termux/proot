@@ -1,8 +1,13 @@
 #include <errno.h>          /* E*, */
+#include <fcntl.h>          /* AT_*, */
+#include <string.h>         /* strncmp(3), */
+#include <unistd.h>         /* syscall(2), close(2), */
+#include <sys/syscall.h>    /* __NR_statx, __NR_pidfd_*, */
 #include <sys/sysmacros.h>  /* major, minor, */
 
 #include "tracee/statx.h"
 #include "tracee/mem.h"
+#include "tracee/reg.h"
 
 int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 	RegVersion regVersion = from_sigsys ? CURRENT : ORIGINAL;
@@ -175,4 +180,90 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 		}
 	}
 	return 0;
+}
+
+#ifndef AT_STATX_SYNC_TYPE
+#define AT_STATX_SYNC_TYPE 0x6000
+#endif
+
+/**
+ * Answer statx(2) directly at the seccomp enter stop using the host path
+ * already translated in CURRENT SYSARG_2 (or pidfd_getfd() for AT_EMPTY_PATH),
+ * then invoke STATX_SYSCALL extensions and write the result back.  Returns 1
+ * with *result set when answered, or 0 to fall back to the normal enter+exit
+ * path (unusual flags, /proc paths, kernel lack of statx/pidfd_getfd, or host
+ * errors other than ENOENT/ENOTDIR).
+ */
+int answer_statx_at_enter(Tracee *tracee, word_t *result)
+{
+#if defined(__NR_statx)
+	struct statx_syscall_state state = {};
+	const word_t dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+	const word_t flags = peek_reg(tracee, CURRENT, SYSARG_3);
+	const word_t mask = peek_reg(tracee, CURRENT, SYSARG_4);
+	int status;
+	long rc;
+
+	if ((flags & ~(word_t) (AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE)) != 0)
+		return 0;
+
+	status = read_string(tracee, state.host_path, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
+	if (status <= 0 || status >= PATH_MAX)
+		return 0;
+
+	if (status == 1) {
+#if defined(__NR_pidfd_open) && defined(__NR_pidfd_getfd)
+		int pidfd, local;
+
+		if ((flags & AT_EMPTY_PATH) == 0 || (int) dirfd < 0)
+			return 0;
+		if (readlink_proc_pid_fd(tracee->pid, (int) dirfd, state.host_path) < 0)
+			return 0;
+		pidfd = (int) syscall(__NR_pidfd_open, tracee->pid, 0);
+		if (pidfd < 0)
+			return 0;
+		local = (int) syscall(__NR_pidfd_getfd, pidfd, (int) dirfd, 0);
+		close(pidfd);
+		if (local < 0)
+			return 0;
+		rc = syscall(__NR_statx, local, "", (int) (flags & (AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)),
+			     (unsigned int) mask, &state.statx_buf);
+		close(local);
+		if (rc != 0)
+			return 0;
+#else
+		return 0;
+#endif
+	}
+	else {
+		if (state.host_path[0] != '/')
+			return 0;
+		if (strncmp(state.host_path, "/proc", 5) == 0 && (state.host_path[5] == '/' || state.host_path[5] == '\0'))
+			return 0;
+		rc = syscall(__NR_statx, AT_FDCWD, state.host_path,
+			     (int) (flags & (AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)),
+			     (unsigned int) mask, &state.statx_buf);
+		if (rc != 0) {
+			const int error = errno;
+			if (error != ENOENT && error != ENOTDIR)
+				return 0;
+			*result = (word_t) -error;
+			return 1;
+		}
+	}
+
+	status = notify_extensions(tracee, STATX_SYSCALL, (intptr_t) &state, 0);
+	if (status < 0)
+		return 0;
+
+	if (write_data(tracee, peek_reg(tracee, ORIGINAL, SYSARG_5), &state.statx_buf, sizeof(state.statx_buf)) < 0)
+		return 0;
+
+	*result = 0;
+	return 1;
+#else
+	(void) tracee;
+	(void) result;
+	return 0;
+#endif
 }

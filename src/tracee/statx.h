@@ -28,6 +28,7 @@ struct statx_syscall_state {
 };
 
 int handle_statx_syscall(Tracee *tracee, bool from_sigsys);
+int answer_statx_at_enter(Tracee *tracee, word_t *result);
 
 
 #endif // STATX_H

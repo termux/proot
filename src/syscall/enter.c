@@ -77,10 +77,12 @@
 #include "tracee/mem.h"
 #include "tracee/abi.h"
 #include "tracee/event.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 #include "path/canon.h"
 #include "path/binding.h"
 #include "arch.h"
+#include <sys/syscall.h>
 
 /* Older kernel headers may lack these. */
 #ifndef CLONE_NEWTIME
@@ -2641,6 +2643,133 @@ static void maybe_redirect_userns_file(Tracee *tracee, Reg reg, int flags)
 	(void) set_sysarg_path(tracee, "/dev/null", reg);
 }
 
+static void answer_syscall_at_enter(Tracee *tracee, word_t result)
+{
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_2, peek_reg(tracee, ORIGINAL, SYSARG_2));
+	poke_reg(tracee, SYSARG_3, peek_reg(tracee, ORIGINAL, SYSARG_3));
+	poke_reg(tracee, SYSARG_4, peek_reg(tracee, ORIGINAL, SYSARG_4));
+	poke_reg(tracee, SYSARG_5, peek_reg(tracee, ORIGINAL, SYSARG_5));
+	poke_reg(tracee, SYSARG_6, peek_reg(tracee, ORIGINAL, SYSARG_6));
+	poke_reg(tracee, SYSARG_RESULT, result);
+	tracee->answered_at_enter = true;
+	tracee->restart_how = PTRACE_CONT;
+}
+
+/**
+ * Answer stat-family syscalls (newfstatat/fstatat64, fstat, statx) directly at
+ * the seccomp enter stop when safe, sparing the sysexit ptrace stop and
+ * duplicate exit-stage path resolution.  Unusual flags, /proc paths, non-native
+ * ABIs, chained syscalls, and host errors other than ENOENT/ENOTDIR fall back
+ * to the normal enter+exit path.
+ */
+static bool answer_stat_at_enter(Tracee *tracee)
+{
+#ifdef USERLAND
+	(void) tracee;
+	return false;
+#else
+	struct stat st;
+	struct stat_syscall_state state;
+	char path[PATH_MAX];
+	Sysnum sysnum;
+	Reg buffer;
+	int status;
+
+	/* Only when the kernel cancels PR_void (native 64-bit / non-ARM32). */
+	if ((long) SYSCALL_AVOIDER >= 0)
+		return false;
+
+	sysnum = get_sysnum(tracee, ORIGINAL);
+	if (get_sysnum(tracee, CURRENT) != sysnum || tracee->chain.syscalls != NULL
+	    || tracee->sysexit_pending || get_abi(tracee) != ABI_DEFAULT)
+		return false;
+
+	if (sysnum == PR_newfstatat || sysnum == PR_fstatat64) {
+#ifdef __NR_newfstatat
+		word_t flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+		if ((flags & ~(word_t) (AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) != 0)
+			return false;
+		status = read_path(tracee, path, peek_reg(tracee, CURRENT, SYSARG_2));
+		if (status < 0 || path[0] != '/')
+			return false;
+		if (strncmp(path, "/proc", 5) == 0 && (path[5] == '/' || path[5] == '\0'))
+			return false;
+
+		if (syscall(__NR_newfstatat, AT_FDCWD, path, &st, (int) flags) != 0) {
+			const int error = errno;
+			if (error != ENOENT && error != ENOTDIR) {
+				VERBOSE(tracee, 2, "stat_at_enter: skip host errno=%d %s", error, path);
+				return false;
+			}
+			VERBOSE(tracee, 2, "stat_at_enter: answered errno=%d %s", error, path);
+			answer_syscall_at_enter(tracee, (word_t) -error);
+			return true;
+		}
+		buffer = SYSARG_3;
+#else
+		return false;
+#endif
+	}
+	else if (sysnum == PR_statx) {
+		word_t result;
+		if (answer_statx_at_enter(tracee, &result) != 1)
+			return false;
+		VERBOSE(tracee, 2, "stat_at_enter: answered statx result=%ld", (long) result);
+		answer_syscall_at_enter(tracee, result);
+		return true;
+	}
+	else if (sysnum == PR_fstat) {
+#if defined(__NR_fstat) && defined(__NR_pidfd_open) && defined(__NR_pidfd_getfd)
+		const int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		int pidfd, local, saved;
+
+		if (fd < 0)
+			return false;
+		pidfd = (int) syscall(__NR_pidfd_open, tracee->pid, 0);
+		if (pidfd < 0)
+			return false;
+		local = (int) syscall(__NR_pidfd_getfd, pidfd, fd, 0);
+		saved = errno;
+		close(pidfd);
+		if (local < 0) {
+			VERBOSE(tracee, 2, "stat_at_enter: skip fstat getfd errno=%d fd=%d", saved, fd);
+			return false;
+		}
+		status = (int) syscall(__NR_fstat, local, &st);
+		close(local);
+		if (status != 0)
+			return false;
+
+		path[0] = '\0';
+		if (tracee->extensions != NULL && readlink_proc_pid_fd(tracee->pid, fd, path) >= 0) {
+			const size_t length = strlen(path), suffix = strlen(" (deleted)");
+			if (length > suffix && strcmp(path + length - suffix, " (deleted)") == 0)
+				path[length - suffix] = '\0';
+		}
+		buffer = SYSARG_2;
+#else
+		return false;
+#endif
+	}
+	else
+		return false;
+
+	state.host_path = path;
+	state.stat_buf = &st;
+	if (notify_extensions(tracee, STAT_SYSCALL, (intptr_t) &state, 0) < 0)
+		return false;
+
+	if (write_data(tracee, peek_reg(tracee, ORIGINAL, buffer), &st, sizeof(st)) < 0)
+		return false;
+
+	VERBOSE(tracee, 2, "stat_at_enter: answered %s", sysnum == PR_fstat ? "fstat" : path);
+	answer_syscall_at_enter(tracee, 0);
+	return true;
+#endif
+}
+
 /**
  * Translate the input arguments of the current @tracee's syscall in the
  * @tracee->pid process area. This function sets @tracee->status to
@@ -4010,6 +4139,9 @@ end:
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 	}
+
+	if (status >= 0 && tracee->seccomp_enter_skippable)
+		(void) answer_stat_at_enter(tracee);
 
 	return status;
 }
